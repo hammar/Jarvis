@@ -21,13 +21,21 @@ here. The accepted native trust decision is not an equivalent enforcement result
 
 | Component | Pinned version | Evidence |
 |---|---|---|
-| .NET SDK | `10.0.100`, roll-forward disabled | `global.json` |
+| .NET SDK | `10.0.401`, roll-forward disabled | `global.json`; T01 runtime evidence was initially collected with `10.0.100` |
 | `GitHub.Copilot.SDK` | exactly `1.0.16` | `tools/sdk-validation/SdkValidation.csproj`, `packages.lock.json` |
 | Bundled Copilot CLI runtime | `1.0.90` | SDK `v1.0.16` release notes and tagged package source |
 
 The SDK targets .NET 10. The package lock records its transitive dependencies. The SDK package/runtime source of truth is the [v1.0.16 release](https://github.com/github/copilot-sdk/releases/tag/v1.0.16), the [tagged .NET SDK documentation](https://github.com/github/copilot-sdk/tree/v1.0.16/dotnet), and the [NuGet package metadata](https://www.nuget.org/packages/GitHub.Copilot.SDK/1.0.16). The tagged source and release were checked for this spike; do not rely on mutable `main` documentation when changing the pin.
 
 Sources and SDK compatibility reviewed on 2026-10-04.
+
+The project remains on the .NET 10 LTS target (`net10.0`), which is the latest
+GA major release. On 2026-10-04, [Microsoft's official .NET 10 release
+metadata](https://dotnetcli.blob.core.windows.net/dotnet/release-metadata/10.0/releases.json)
+listed runtime `10.0.12` and SDK `10.0.401` as current. The pinned SDK includes
+runtime `10.0.12`; the SDK validation Docker image and CI setup use the same
+SDK version. The T01 evidence below records its original toolchain where
+relevant; the credential-free contracts were rerun against the refreshed pin.
 
 ## M0 evidence
 
@@ -150,7 +158,7 @@ the entire native host/runtime process tree makes no other network attempts.
 
 ## Reproduction
 
-Credential-free contract, after installing .NET SDK `10.0.100`:
+Credential-free contract, after installing .NET SDK `10.0.401`:
 
 ```sh
 dotnet restore tools/sdk-validation/SdkValidation.csproj --locked-mode

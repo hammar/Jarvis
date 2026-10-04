@@ -92,6 +92,12 @@ Use one controlled runtime initially if the SDK supports isolated providers and 
 
 Use feature folders within projects. Avoid one project per feature or interface. Pin the .NET SDK in global.json and NuGet versions centrally. Target .NET 10 LTS if supported by the selected SDK package; confirm platform/package compatibility in M0. Commit a dependency lock and exact Copilot runtime version/override. No floating package versions.
 
+T01 confirmed the .NET 10 target. The current `global.json` is the authoritative
+exact .NET SDK pin for subsequent tasks, including T02; do not restore an older
+pin from historical task or issue evidence. Keep CI and container SDK pins
+aligned when refreshing the toolchain, and validate compatibility before
+adopting a new pin.
+
 ## 4. SDK validation milestone (M0)
 
 Before building feature infrastructure, create a minimal executable spike using a pinned release of GitHub.Copilot.SDK. Read the exact release documentation and record package/runtime versions in docs/sdk-validation.md. Do not copy unverified API signatures from this specification.

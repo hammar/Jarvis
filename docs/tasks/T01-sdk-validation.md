@@ -32,7 +32,9 @@ Validate the pinned GitHub Copilot SDK/runtime before T02 or dependent feature w
 
 ## Dependencies and assumptions
 
-- .NET SDK `10.0.100`, with roll-forward disabled.
+- The T01 implementation was initially validated with .NET SDK `10.0.100`,
+  with roll-forward disabled; the current repository pin is maintained by
+  [the .NET GA refresh follow-up](T01-dotnet-ga-refresh.md).
 - `GitHub.Copilot.SDK` exactly `1.0.16`; its bundled Copilot CLI runtime is `1.0.90`.
 - Tagged SDK documentation and release metadata reviewed on 2026-10-04.
 - The standard contract check can download the pinned runtime/package but does not require GitHub login, cloud keys, Ollama, or household credentials.
