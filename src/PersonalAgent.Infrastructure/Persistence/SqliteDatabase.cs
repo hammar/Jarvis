@@ -52,7 +52,12 @@ public sealed class SqliteDatabase
             await ledger.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        var appliedVersion = await ReadSchemaVersionAsync(connection, cancellationToken);
+        var appliedVersion = await ValidateMigrationHistoryAsync(connection, cancellationToken);
+        if (appliedVersion > 0)
+        {
+            await ValidateSchemaAsync(connection, appliedVersion, cancellationToken);
+        }
+
         if (appliedVersion > SchemaMigrations.All[^1].Version)
         {
             throw new InvalidOperationException(
@@ -93,6 +98,8 @@ public sealed class SqliteDatabase
                 throw;
             }
         }
+
+        await ValidateSchemaAsync(connection, SchemaMigrations.All[^1].Version, cancellationToken);
     }
 
     /// <summary>Creates a consistent online SQLite backup at a destination path.</summary>
@@ -110,30 +117,18 @@ public sealed class SqliteDatabase
         var destination = Path.GetFullPath(backupPath);
         EnsureDifferentFiles(DatabasePath, destination);
         Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
-        var temporary = GetTemporaryPath(destination);
-        try
+        await using var source = await OpenConnectionAsync(cancellationToken);
+        await VerifyDatabaseAsync(source, cancellationToken);
+        await using var target = new SqliteConnection(new SqliteConnectionStringBuilder
         {
-            await using (var source = await OpenConnectionAsync(cancellationToken))
-            await using (var target = new SqliteConnection(new SqliteConnectionStringBuilder
-            {
-                DataSource = temporary,
-                Mode = SqliteOpenMode.ReadWriteCreate,
-                Pooling = false
-            }.ToString()))
-            {
-                await target.OpenAsync(cancellationToken);
-                await VerifyDatabaseAsync(source, cancellationToken);
-                source.BackupDatabase(target);
-                await VerifyDatabaseAsync(target, cancellationToken);
-            }
-
-            cancellationToken.ThrowIfCancellationRequested();
-            ReplaceDatabaseFile(temporary, destination);
-        }
-        finally
-        {
-            DeleteIfExists(temporary);
-        }
+            DataSource = destination,
+            Mode = SqliteOpenMode.ReadWriteCreate,
+            Pooling = false,
+            DefaultTimeout = 10
+        }.ToString());
+        await target.OpenAsync(cancellationToken);
+        source.BackupDatabase(target);
+        await VerifyDatabaseAsync(target, cancellationToken);
     }
 
     /// <summary>Restores a SQLite backup after validating it, atomically replacing the database file.</summary>
@@ -152,35 +147,25 @@ public sealed class SqliteDatabase
         }
 
         Directory.CreateDirectory(Path.GetDirectoryName(DatabasePath)!);
-        var temporary = GetTemporaryPath(DatabasePath);
-        try
+        await using var source = new SqliteConnection(new SqliteConnectionStringBuilder
         {
-            await using (var source = new SqliteConnection(new SqliteConnectionStringBuilder
-            {
-                DataSource = sourcePath,
-                Mode = SqliteOpenMode.ReadOnly,
-                Pooling = false
-            }.ToString()))
-            await using (var target = new SqliteConnection(new SqliteConnectionStringBuilder
-            {
-                DataSource = temporary,
-                Mode = SqliteOpenMode.ReadWriteCreate,
-                Pooling = false
-            }.ToString()))
-            {
-                await source.OpenAsync(cancellationToken);
-                await target.OpenAsync(cancellationToken);
-                await VerifyDatabaseAsync(source, cancellationToken);
-                source.BackupDatabase(target);
-                await VerifyDatabaseAsync(target, cancellationToken);
-            }
+            DataSource = sourcePath,
+            Mode = SqliteOpenMode.ReadOnly,
+            Pooling = false,
+            DefaultTimeout = 10
+        }.ToString());
+        await source.OpenAsync(cancellationToken);
+        await VerifyDatabaseAsync(source, cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
 
-            cancellationToken.ThrowIfCancellationRequested();
-            ReplaceDatabaseFile(temporary, DatabasePath);
-        }
-        finally
+        await using var target = new SqliteConnection(connectionString);
+        await target.OpenAsync(cancellationToken);
+        source.BackupDatabase(target);
+        await VerifyDatabaseAsync(target, cancellationToken);
+
+        if (cancellationToken.IsCancellationRequested)
         {
-            DeleteIfExists(temporary);
+            throw new OperationCanceledException(cancellationToken);
         }
     }
 
@@ -208,13 +193,26 @@ public sealed class SqliteDatabase
     internal static DateTimeOffset ParseUtc(string value) =>
         DateTimeOffset.Parse(value, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind).ToUniversalTime();
 
-    private static async Task<int> ReadSchemaVersionAsync(
+    private static async Task<int> ValidateMigrationHistoryAsync(
         SqliteConnection connection,
         CancellationToken cancellationToken)
     {
         await using var command = connection.CreateCommand();
-        command.CommandText = "SELECT COALESCE(MAX(Version), 0) FROM SchemaMigrations;";
-        return Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture);
+        command.CommandText = "SELECT Version, Name FROM SchemaMigrations ORDER BY Version;";
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        var version = 0;
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            version++;
+            if (version > SchemaMigrations.All.Length
+                || reader.GetInt32(0) != version
+                || !string.Equals(reader.GetString(1), SchemaMigrations.All[version - 1].Name, StringComparison.Ordinal))
+            {
+                throw new InvalidDataException("SQLite migration history is incomplete, duplicated, or unrecognized.");
+            }
+        }
+
+        return version;
     }
 
     private static async Task VerifyIntegrityAsync(
@@ -224,10 +222,14 @@ public sealed class SqliteDatabase
         await using (var integrity = connection.CreateCommand())
         {
             integrity.CommandText = "PRAGMA integrity_check;";
-            var result = Convert.ToString(await integrity.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture);
-            if (!string.Equals(result, "ok", StringComparison.OrdinalIgnoreCase))
+            await using var reader = await integrity.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
             {
-                throw new InvalidDataException($"SQLite integrity check failed: {result}");
+                var result = reader.GetString(0);
+                if (!string.Equals(result, "ok", StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidDataException($"SQLite integrity check failed: {result}");
+                }
             }
         }
 
@@ -245,32 +247,87 @@ public sealed class SqliteDatabase
         CancellationToken cancellationToken)
     {
         await VerifyIntegrityAsync(connection, cancellationToken);
-        long version;
+        int version;
         try
         {
-            await using var command = connection.CreateCommand();
-            command.CommandText = "SELECT COALESCE(MAX(Version), 0) FROM SchemaMigrations;";
-            version = Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture);
+            version = await ValidateMigrationHistoryAsync(connection, cancellationToken);
         }
-        catch (SqliteException exception)
+        catch (Exception exception) when (exception is SqliteException or InvalidDataException)
         {
-            throw new InvalidDataException("The file is not an initialized PersonalAgent database.", exception);
+            throw new InvalidDataException("The file does not contain a valid PersonalAgent migration history.", exception);
         }
 
-        if (version < 1 || version > SchemaMigrations.All[^1].Version)
+        if (version < 1)
         {
-            throw new InvalidDataException($"Unsupported database schema version {version}.");
+            throw new InvalidDataException("The file is not an initialized PersonalAgent database.");
         }
+
+        await ValidateSchemaAsync(connection, version, cancellationToken);
     }
 
-    private static string GetTemporaryPath(string path) =>
-        $"{path}.{Guid.NewGuid():N}.tmp";
-
-    private static void ReplaceDatabaseFile(string temporary, string destination)
+    private static async Task ValidateSchemaAsync(
+        SqliteConnection connection,
+        int version,
+        CancellationToken cancellationToken)
     {
-        DeleteIfExists($"{destination}-wal");
-        DeleteIfExists($"{destination}-shm");
-        File.Move(temporary, destination, overwrite: true);
+        var required = new Dictionary<string, string[]>
+        {
+            ["SchemaMigrations"] = ["Version", "Name", "AppliedAtUtc"],
+            ["Conversations"] = ["Id", "CreatedAtUtc"],
+            ["Messages"] = ["MessageId", "ConversationId", "Role", "Content", "CreatedAtUtc"],
+            ["Turns"] = ["TurnId", "ConversationId", "Status", "CreatedAtUtc", "Version"],
+            ["TurnEvents"] = ["EventId", "TurnId", "Sequence", "EventType", "Payload", "OccurredAtUtc"],
+            ["MemoryFacts"] = ["Id", "Subject", "FactKey", "Value", "SourceId", "PrivacyClass", "Version", "ValidityStatus"],
+            ["MemoryProposals"] = ["Id", "OwnerId", "ProposalJson", "Status", "Version"],
+            ["Actions"] = ["Id", "OwnerId", "ActionType", "CanonicalArguments", "RequestHash", "Status", "Version"],
+            ["ApprovalRequests"] = ["Id", "ActionId", "OwnerId", "ExpiresAtUtc", "Status", "Version"],
+            ["Jobs"] = ["Id", "OwnerId", "Kind", "PayloadVersion", "Payload", "TimeZoneId", "DueAtUtc", "Enabled", "LeaseOwner", "LeaseExpiresAtUtc"],
+            ["JobRuns"] = ["Id", "JobId", "ScheduledOccurrenceUtc", "Status"],
+            ["Notifications"] = ["Id", "OwnerId", "Message", "CreatedAtUtc"],
+            ["CloudConsents"] = ["Id", "OwnerId", "Provider", "PacketHash", "ExpiresAtUtc"],
+            ["AuditEvents"] = ["Id", "OwnerId", "EventType", "DetailsJson", "OccurredAtUtc"]
+        };
+
+        foreach (var (table, requiredColumns) in required)
+        {
+            await using var command = connection.CreateCommand();
+            command.CommandText = $"PRAGMA table_info(\"{table}\");";
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            var actualColumns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                actualColumns.Add(reader.GetString(1));
+            }
+
+            if (requiredColumns.Any(column => !actualColumns.Contains(column)))
+            {
+                throw new InvalidDataException($"Database schema is missing required columns from {table}.");
+            }
+        }
+
+        var requiredObjects = new List<string>();
+        if (version >= 2)
+        {
+            requiredObjects.AddRange(
+                ["MemoryFactsSearch", "TR_MemoryFactsSearch_Insert", "TR_MemoryFactsSearch_Delete", "TR_MemoryFactsSearch_Update"]);
+        }
+
+        if (version >= 3)
+        {
+            requiredObjects.AddRange(
+                ["UX_Actions_Id_OwnerId", "TR_ApprovalRequests_Owner_Insert", "TR_ApprovalRequests_Owner_Update"]);
+        }
+
+        foreach (var name in requiredObjects)
+        {
+            await using var command = connection.CreateCommand();
+            command.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE name = $name;";
+            command.Parameters.AddWithValue("$name", name);
+            if (Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture) != 1)
+            {
+                throw new InvalidDataException($"Database schema is missing required object {name}.");
+            }
+        }
     }
 
     private static void DeleteIfExists(string path)
@@ -283,9 +340,36 @@ public sealed class SqliteDatabase
 
     private static void EnsureDifferentFiles(string first, string second)
     {
-        if (string.Equals(Path.GetFullPath(first), Path.GetFullPath(second), StringComparison.Ordinal))
+        var firstPath = ResolvePathAliases(first);
+        var secondPath = ResolvePathAliases(second);
+        var comparison = OperatingSystem.IsWindows() || OperatingSystem.IsMacOS()
+            ? StringComparison.OrdinalIgnoreCase
+            : StringComparison.Ordinal;
+        if (string.Equals(firstPath, secondPath, comparison))
         {
             throw new ArgumentException("Backup and database paths must refer to different files.");
         }
+    }
+
+    private static string ResolvePathAliases(string path)
+    {
+        var fullPath = Path.GetFullPath(path);
+        var root = Path.GetPathRoot(fullPath)!;
+        var current = root;
+        var components = fullPath[root.Length..]
+            .Split([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar], StringSplitOptions.RemoveEmptyEntries);
+        for (var index = 0; index < components.Length; index++)
+        {
+            current = Path.Combine(current, components[index]);
+            FileSystemInfo? info = Directory.Exists(current)
+                ? new DirectoryInfo(current)
+                : File.Exists(current) ? new FileInfo(current) : null;
+            if (info?.ResolveLinkTarget(returnFinalTarget: true) is { } target)
+            {
+                current = target.FullName;
+            }
+        }
+
+        return Path.GetFullPath(current);
     }
 }

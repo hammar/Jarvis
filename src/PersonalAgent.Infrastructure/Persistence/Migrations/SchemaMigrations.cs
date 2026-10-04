@@ -7,7 +7,8 @@ internal static class SchemaMigrations
     internal static readonly SchemaMigration[] All =
     [
         new(1, "initial durable state", InitialSchema),
-        new(2, "memory full-text search", MemorySearch)
+        new(2, "memory full-text search", MemorySearch),
+        new(3, "approval action owner binding", ApprovalOwnerBinding)
     ];
 
     private const string InitialSchema = """
@@ -164,5 +165,25 @@ internal static class SchemaMigrations
             VALUES (new.rowid, new.Subject, new.FactKey, new.Value);
         END;
         INSERT INTO MemoryFactsSearch(MemoryFactsSearch) VALUES ('rebuild');
+        """;
+
+    private const string ApprovalOwnerBinding = """
+        CREATE UNIQUE INDEX UX_Actions_Id_OwnerId ON Actions(Id, OwnerId);
+        CREATE TRIGGER TR_ApprovalRequests_Owner_Insert
+        BEFORE INSERT ON ApprovalRequests
+        WHEN NOT EXISTS (
+            SELECT 1 FROM Actions WHERE Id = NEW.ActionId AND OwnerId = NEW.OwnerId
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'approval owner must match action owner');
+        END;
+        CREATE TRIGGER TR_ApprovalRequests_Owner_Update
+        BEFORE UPDATE OF ActionId, OwnerId ON ApprovalRequests
+        WHEN NOT EXISTS (
+            SELECT 1 FROM Actions WHERE Id = NEW.ActionId AND OwnerId = NEW.OwnerId
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'approval owner must match action owner');
+        END;
         """;
 }

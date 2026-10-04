@@ -52,10 +52,44 @@ public sealed class SqliteRetention
         {
             command.Transaction = (SqliteTransaction)transaction;
             command.CommandText = """
+                UPDATE MemoryFacts
+                SET SourceId = 'redacted:conversation-retention',
+                    UpdatedAtUtc = $now,
+                    Version = Version + 1
+                WHERE SourceId IN (
+                    SELECT Messages.MessageId
+                    FROM Messages
+                    JOIN Conversations ON Conversations.Id = Messages.ConversationId
+                    WHERE COALESCE(
+                        (SELECT MAX(Recent.CreatedAtUtc)
+                         FROM Messages AS Recent
+                         WHERE Recent.ConversationId = Conversations.Id),
+                        Conversations.CreatedAtUtc) < $cutoff
+                      AND NOT EXISTS (
+                        SELECT 1 FROM Turns
+                        WHERE Turns.ConversationId = Conversations.Id
+                          AND Turns.Status NOT IN ('Completed', 'Failed', 'Cancelled', 'Interrupted')
+                      )
+                );
+                """;
+            command.Parameters.AddWithValue("$cutoff", conversationCutoff);
+            command.Parameters.AddWithValue("$now", SqliteDatabase.FormatUtc(clock.UtcNow));
+            await command.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await using (var command = connection.CreateCommand())
+        {
+            command.Transaction = (SqliteTransaction)transaction;
+            command.CommandText = """
                 DELETE FROM Conversations
                 WHERE COALESCE(
                     (SELECT MAX(Messages.CreatedAtUtc) FROM Messages WHERE Messages.ConversationId = Conversations.Id),
-                    Conversations.CreatedAtUtc) < $cutoff;
+                    Conversations.CreatedAtUtc) < $cutoff
+                  AND NOT EXISTS (
+                    SELECT 1 FROM Turns
+                    WHERE Turns.ConversationId = Conversations.Id
+                      AND Turns.Status NOT IN ('Completed', 'Failed', 'Cancelled', 'Interrupted')
+                  );
                 """;
             command.Parameters.AddWithValue("$cutoff", conversationCutoff);
             conversations = await command.ExecuteNonQueryAsync(cancellationToken);

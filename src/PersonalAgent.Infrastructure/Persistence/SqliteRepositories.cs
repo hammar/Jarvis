@@ -384,7 +384,11 @@ public sealed class SqliteJobStore(SqliteDatabase database, IClock clock) : IJob
     public async ValueTask CompleteAsync(JobLease lease, string outcome, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(lease);
-        ArgumentException.ThrowIfNullOrWhiteSpace(outcome);
+        if (outcome is not ("Succeeded" or "Failed" or "Unknown" or "Retryable"))
+        {
+            throw new ArgumentException("Outcome must be Succeeded, Failed, Unknown, or Retryable.", nameof(outcome));
+        }
+
         var now = clock.UtcNow;
         await using var connection = await database.OpenConnectionAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
@@ -393,16 +397,19 @@ public sealed class SqliteJobStore(SqliteDatabase database, IClock clock) : IJob
             update.Transaction = (SqliteTransaction)transaction;
             update.CommandText = """
                 UPDATE Jobs
-                SET Enabled = 0, LeaseOwner = NULL, LeaseExpiresAtUtc = NULL,
+                SET Enabled = $enabled, LeaseOwner = NULL, LeaseExpiresAtUtc = NULL,
                     Outcome = $outcome, Version = Version + 1
                 WHERE Id = $id AND PayloadVersion = $payloadVersion
-                  AND LeaseOwner = $worker AND LeaseExpiresAtUtc = $expires AND Enabled = 1;
+                  AND LeaseOwner = $worker AND LeaseExpiresAtUtc = $expires
+                  AND LeaseExpiresAtUtc > $now AND Enabled = 1;
                 """;
+            update.Parameters.AddWithValue("$enabled", outcome == "Retryable" ? 1 : 0);
             update.Parameters.AddWithValue("$outcome", outcome);
             update.Parameters.AddWithValue("$id", lease.Id.Value.ToString("D"));
             update.Parameters.AddWithValue("$payloadVersion", lease.PayloadVersion);
             update.Parameters.AddWithValue("$worker", lease.LeaseOwner);
             update.Parameters.AddWithValue("$expires", SqliteDatabase.FormatUtc(lease.LeaseExpiresAtUtc));
+            update.Parameters.AddWithValue("$now", SqliteDatabase.FormatUtc(now));
             if (await update.ExecuteNonQueryAsync(cancellationToken) != 1)
             {
                 throw new PersistenceConcurrencyException($"job {lease.Id.Value:D} lease");
@@ -415,8 +422,12 @@ public sealed class SqliteJobStore(SqliteDatabase database, IClock clock) : IJob
             run.CommandText = """
                 INSERT INTO JobRuns(Id, JobId, ScheduledOccurrenceUtc, Status, CompletedAtUtc, Error)
                 SELECT $runId, Id, DueAtUtc, $outcome, $completedAt,
-                       CASE WHEN $outcome IN ('Succeeded', 'Failed', 'Unknown') THEN NULL ELSE $outcome END
-                FROM Jobs WHERE Id = $jobId;
+                       CASE WHEN $outcome = 'Failed' THEN $outcome ELSE NULL END
+                FROM Jobs WHERE Id = $jobId
+                ON CONFLICT(JobId, ScheduledOccurrenceUtc) DO UPDATE SET
+                    Status = excluded.Status,
+                    CompletedAtUtc = excluded.CompletedAtUtc,
+                    Error = excluded.Error;
                 """;
             run.Parameters.AddWithValue("$runId", Guid.NewGuid().ToString("D"));
             run.Parameters.AddWithValue("$outcome", outcome);

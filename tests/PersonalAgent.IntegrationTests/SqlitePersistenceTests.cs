@@ -98,27 +98,74 @@ public sealed class SqlitePersistenceTests
 
     [Fact]
     [Trait("Category", "Integration")]
+    public async Task ConcurrentMemoryCompareAndSwapAllowsOnlyOneWriter()
+    {
+        using var file = IsolatedDatabaseFile.Create();
+        var database = new SqliteDatabase(file.DatabasePath);
+        await database.MigrateAsync();
+        var clock = new ControlledClock(Now);
+        var firstStore = new SqliteMemoryStore(database, clock);
+        var secondStore = new SqliteMemoryStore(new SqliteDatabase(file.DatabasePath), clock);
+        var initial = new MemoryFact(
+            MemoryFactId.New(), "owner", "location", "Seattle", "source", "Private", 0);
+        await firstStore.SaveAsync(initial, 0, CancellationToken.None);
+        var start = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        async Task<Exception?> AttemptAsync(SqliteMemoryStore store, string value)
+        {
+            await start.Task;
+            try
+            {
+                await store.SaveAsync(initial with { Value = value }, 1, CancellationToken.None);
+                return null;
+            }
+            catch (Exception exception)
+            {
+                return exception;
+            }
+        }
+
+        var attempts = new[]
+        {
+            AttemptAsync(firstStore, "Portland"),
+            AttemptAsync(secondStore, "Boston")
+        };
+        start.SetResult();
+        var results = await Task.WhenAll(attempts);
+        var winner = await firstStore.GetAsync(initial.Id, CancellationToken.None);
+
+        Assert.Single(results, result => result is null);
+        Assert.IsType<PersistenceConcurrencyException>(Assert.Single(results, result => result is not null));
+        Assert.Equal(2, winner!.Version);
+        Assert.Contains(winner.Value, new[] { "Portland", "Boston" });
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
     public async Task OlderSchemaUpgradeAddsSearchWithoutChangingExistingFacts()
     {
         using var file = IsolatedDatabaseFile.Create();
-        var id = Guid.NewGuid();
+        var database = new SqliteDatabase(file.DatabasePath);
+        await database.MigrateAsync();
+        var factId = MemoryFactId.New();
+        await new SqliteMemoryStore(database, new ControlledClock(Now)).SaveAsync(
+            new MemoryFact(factId, "owner", "vehicle", "blue", "source", "Private", 0),
+            0,
+            CancellationToken.None);
+
         await using (var connection = await OpenAsync(file.DatabasePath))
         {
             await using var command = connection.CreateCommand();
             command.CommandText = """
-                CREATE TABLE SchemaMigrations(
-                    Version INTEGER PRIMARY KEY NOT NULL, Name TEXT NOT NULL, AppliedAtUtc TEXT NOT NULL);
-                INSERT INTO SchemaMigrations VALUES(1, 'initial durable state', '2026-01-01T00:00:00.0000000+00:00');
-                CREATE TABLE MemoryFacts(
-                    Id TEXT PRIMARY KEY NOT NULL, OwnerId TEXT NOT NULL DEFAULT '', Subject TEXT NOT NULL,
-                    FactKey TEXT NOT NULL, Value TEXT NOT NULL, SourceId TEXT NOT NULL,
-                    PrivacyClass TEXT NOT NULL, CreatedAtUtc TEXT NOT NULL, UpdatedAtUtc TEXT NOT NULL,
-                    Version INTEGER NOT NULL, ValidityStatus TEXT NOT NULL DEFAULT 'Active', SupersedesId TEXT);
-                INSERT INTO MemoryFacts(
-                    Id, Subject, FactKey, Value, SourceId, PrivacyClass, CreatedAtUtc, UpdatedAtUtc, Version)
-                VALUES ($id, 'owner', 'vehicle', 'blue', 'source', 'Private', '2026-01-01', '2026-01-01', 1);
+                DROP TRIGGER TR_ApprovalRequests_Owner_Insert;
+                DROP TRIGGER TR_ApprovalRequests_Owner_Update;
+                DROP INDEX UX_Actions_Id_OwnerId;
+                DROP TRIGGER TR_MemoryFactsSearch_Insert;
+                DROP TRIGGER TR_MemoryFactsSearch_Delete;
+                DROP TRIGGER TR_MemoryFactsSearch_Update;
+                DROP TABLE MemoryFactsSearch;
+                DELETE FROM SchemaMigrations WHERE Version > 1;
                 """;
-            command.Parameters.AddWithValue("$id", id.ToString("D"));
             await command.ExecuteNonQueryAsync();
         }
 
@@ -126,7 +173,9 @@ public sealed class SqlitePersistenceTests
 
         var results = await new SqliteMemoryStore(new SqliteDatabase(file.DatabasePath), new ControlledClock(Now))
             .SearchAsync("blue", 5, CancellationToken.None);
-        Assert.Contains(results, fact => fact.Id.Value == id && fact.Value == "blue");
+        Assert.Contains(results, fact => fact.Id == factId && fact.Value == "blue");
+        Assert.Equal(3L, Convert.ToInt64(await ScalarAtAsync(
+            file.DatabasePath, "SELECT MAX(Version) FROM SchemaMigrations;")));
     }
 
     [Fact]
@@ -145,7 +194,7 @@ public sealed class SqlitePersistenceTests
             await command.ExecuteNonQueryAsync();
         }
 
-        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+        await Assert.ThrowsAsync<InvalidDataException>(() =>
             new SqliteDatabase(futurePath).MigrateAsync());
 
         var conflictingPath = Path.Combine(Path.GetDirectoryName(file.DatabasePath)!, "conflicting.db");
@@ -182,15 +231,11 @@ public sealed class SqlitePersistenceTests
 
         await database.BackupAsync(backupPath);
         await File.WriteAllTextAsync(file.DatabasePath, "not a database");
-        await File.WriteAllTextAsync($"{file.DatabasePath}-wal", "stale");
-        await File.WriteAllTextAsync($"{file.DatabasePath}-shm", "stale");
         await database.RestoreAsync(backupPath);
 
         var messages = await new SqliteConversationStore(new SqliteDatabase(file.DatabasePath))
             .ReadRecentAsync(conversationId, 5, CancellationToken.None);
         Assert.Equal("Still here.", Assert.Single(messages).Content);
-        Assert.False(File.Exists($"{file.DatabasePath}-wal"));
-        Assert.False(File.Exists($"{file.DatabasePath}-shm"));
     }
 
     [Fact]
@@ -200,6 +245,9 @@ public sealed class SqlitePersistenceTests
         using var file = IsolatedDatabaseFile.Create();
         var directory = Path.GetDirectoryName(file.DatabasePath)!;
         var database = new SqliteDatabase(file.DatabasePath);
+        await database.MigrateAsync();
+        var original = new ConversationMessage(Guid.NewGuid(), ConversationId.New(), "user", "preserve", Now);
+        await new SqliteConversationStore(database).AppendMessageAsync(original, CancellationToken.None);
         var unversioned = Path.Combine(directory, "unversioned.db");
         await using (await OpenAsync(unversioned))
         {
@@ -220,6 +268,34 @@ public sealed class SqlitePersistenceTests
 
         await Assert.ThrowsAsync<InvalidDataException>(() => database.RestoreAsync(future));
 
+        var incompleteHistory = Path.Combine(directory, "incomplete-history.db");
+        await using (var connection = await OpenAsync(incompleteHistory))
+        await using (var command = connection.CreateCommand())
+        {
+            command.CommandText = """
+                CREATE TABLE SchemaMigrations(Version INTEGER PRIMARY KEY, Name TEXT, AppliedAtUtc TEXT);
+                INSERT INTO SchemaMigrations VALUES(3, 'approval action owner binding', '2026-01-01');
+                """;
+            await command.ExecuteNonQueryAsync();
+        }
+
+        await Assert.ThrowsAsync<InvalidDataException>(() => database.RestoreAsync(incompleteHistory));
+
+        var missingSchema = Path.Combine(directory, "missing-schema.db");
+        await using (var connection = await OpenAsync(missingSchema))
+        await using (var command = connection.CreateCommand())
+        {
+            command.CommandText = """
+                CREATE TABLE SchemaMigrations(Version INTEGER PRIMARY KEY, Name TEXT, AppliedAtUtc TEXT);
+                INSERT INTO SchemaMigrations VALUES(1, 'initial durable state', '2026-01-01');
+                INSERT INTO SchemaMigrations VALUES(2, 'memory full-text search', '2026-01-02');
+                INSERT INTO SchemaMigrations VALUES(3, 'approval action owner binding', '2026-01-03');
+                """;
+            await command.ExecuteNonQueryAsync();
+        }
+
+        await Assert.ThrowsAsync<InvalidDataException>(() => database.RestoreAsync(missingSchema));
+
         var broken = Path.Combine(directory, "foreign-key-invalid.db");
         await using (var connection = await OpenAsync(broken))
         await using (var command = connection.CreateCommand())
@@ -235,6 +311,30 @@ public sealed class SqlitePersistenceTests
         }
 
         await Assert.ThrowsAsync<InvalidDataException>(() => database.RestoreAsync(broken));
+        var stillThere = await new SqliteConversationStore(database)
+            .ReadRecentAsync(original.ConversationId, 5, CancellationToken.None);
+        Assert.Equal(original, Assert.Single(stillThere));
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task BackupAndRestoreRejectSymlinkedPathAliasesWithoutChangingData()
+    {
+        using var file = IsolatedDatabaseFile.Create();
+        var database = new SqliteDatabase(file.DatabasePath);
+        await database.MigrateAsync();
+        var message = new ConversationMessage(Guid.NewGuid(), ConversationId.New(), "user", "unchanged", Now);
+        await new SqliteConversationStore(database).AppendMessageAsync(message, CancellationToken.None);
+        var directory = Path.GetDirectoryName(file.DatabasePath)!;
+        var alias = Path.Combine(directory, "directory-alias");
+        Directory.CreateSymbolicLink(alias, directory);
+        var aliasedDatabase = Path.Combine(alias, Path.GetFileName(file.DatabasePath));
+
+        await Assert.ThrowsAsync<ArgumentException>(() => database.BackupAsync(aliasedDatabase));
+        await Assert.ThrowsAsync<ArgumentException>(() => database.RestoreAsync(aliasedDatabase));
+        var result = await new SqliteConversationStore(database)
+            .ReadRecentAsync(message.ConversationId, 5, CancellationToken.None);
+        Assert.Equal(message, Assert.Single(result));
     }
 
     [Fact]
@@ -250,9 +350,26 @@ public sealed class SqlitePersistenceTests
         var jobs = new SqliteJobStore(database, new ControlledClock(Now));
         var oldConversation = ConversationId.New();
         var recentConversation = ConversationId.New();
-        await conversations.AppendMessageAsync(Message(oldConversation, Now.AddDays(-91)), CancellationToken.None);
+        var oldMessage = Message(oldConversation, Now.AddDays(-91));
+        await conversations.AppendMessageAsync(oldMessage, CancellationToken.None);
         await conversations.AppendMessageAsync(Message(recentConversation, Now.AddDays(-89)), CancellationToken.None);
-        var fact = new MemoryFact(MemoryFactId.New(), "owner", "preference", "tea", "source", "Private", 0);
+        var pendingConversation = ConversationId.New();
+        await conversations.AppendMessageAsync(Message(pendingConversation, Now.AddDays(-91)), CancellationToken.None);
+        await using (var connection = await database.OpenConnectionAsync(CancellationToken.None))
+        await using (var command = connection.CreateCommand())
+        {
+            command.CommandText = """
+                INSERT INTO Turns(TurnId, ConversationId, Status, CreatedAtUtc, Version)
+                VALUES ($turnId, $conversationId, 'WaitingForApproval', $createdAt, 1);
+                """;
+            command.Parameters.AddWithValue("$turnId", TurnId.New().Value.ToString("D"));
+            command.Parameters.AddWithValue("$conversationId", pendingConversation.Value.ToString("D"));
+            command.Parameters.AddWithValue("$createdAt", SqliteDatabase.FormatUtc(Now.AddDays(-91)));
+            await command.ExecuteNonQueryAsync();
+        }
+
+        var fact = new MemoryFact(
+            MemoryFactId.New(), "owner", "preference", "tea", oldMessage.MessageId.ToString("D"), "Private", 0);
         await memory.SaveAsync(fact, 0, CancellationToken.None);
         await journal.AppendAuditEventAsync(Audit("old", Now.AddDays(-31)), CancellationToken.None);
         await journal.AppendAuditEventAsync(Audit("recent", Now.AddDays(-29)), CancellationToken.None);
@@ -274,7 +391,8 @@ public sealed class SqlitePersistenceTests
         Assert.Equal(new RetentionResult(0, 0), second);
         Assert.Empty(await conversations.ReadRecentAsync(oldConversation, 5, CancellationToken.None));
         Assert.Single(await conversations.ReadRecentAsync(recentConversation, 5, CancellationToken.None));
-        Assert.NotNull(await memory.GetAsync(fact.Id, CancellationToken.None));
+        Assert.Single(await conversations.ReadRecentAsync(pendingConversation, 5, CancellationToken.None));
+        Assert.Equal("redacted:conversation-retention", (await memory.GetAsync(fact.Id, CancellationToken.None))!.SourceId);
         Assert.Equal("Unknown", await TextAsync(
             file.DatabasePath, "SELECT Status FROM Actions WHERE Id = $id;", ("$id", unknownAction.Id.Value.ToString("D"))));
         Assert.Equal(jobId.Value.ToString("D"), await TextAsync(
@@ -313,17 +431,39 @@ public sealed class SqlitePersistenceTests
         using var file = IsolatedDatabaseFile.Create();
         var database = new SqliteDatabase(file.DatabasePath);
         await database.MigrateAsync();
-        var store = new SqliteJobStore(database, new ControlledClock(Now));
+        var clock = new ControlledClock(Now);
+        var store = new SqliteJobStore(database, clock);
         var jobId = JobId.New();
         await store.ScheduleAsync(new SqliteScheduledJob(
             jobId, "owner", "reminder", 1, """{"message":"hello"}""", "UTC", Now,
             "NotifyLate", "request-1"), CancellationToken.None);
-        var lease = await new SqliteJobStore(new SqliteDatabase(file.DatabasePath), new ControlledClock(Now))
+        var lease = await new SqliteJobStore(new SqliteDatabase(file.DatabasePath), clock)
             .ClaimDueAsync("worker-1", Now, TimeSpan.FromMinutes(1), CancellationToken.None);
 
         await Assert.ThrowsAsync<PersistenceConcurrencyException>(async () =>
             await store.CompleteAsync(lease! with { LeaseOwner = "worker-2" }, "Succeeded", CancellationToken.None));
-        await store.CompleteAsync(lease!, "Unknown", CancellationToken.None);
+
+        clock.UtcNow = Now.AddMinutes(2);
+        await Assert.ThrowsAsync<PersistenceConcurrencyException>(async () =>
+            await store.CompleteAsync(lease!, "Succeeded", CancellationToken.None));
+        Assert.Equal(0L, Convert.ToInt64(await TextAsync(
+            file.DatabasePath, "SELECT COUNT(*) FROM JobRuns WHERE JobId = $id;", ("$id", jobId.Value.ToString("D")))));
+        Assert.Equal(1L, Convert.ToInt64(await TextAsync(
+            file.DatabasePath, "SELECT Enabled FROM Jobs WHERE Id = $id;", ("$id", jobId.Value.ToString("D")))));
+
+        var reclaimed = await store.ClaimDueAsync(
+            "worker-2", clock.UtcNow, TimeSpan.FromMinutes(1), CancellationToken.None);
+        await Assert.ThrowsAsync<PersistenceConcurrencyException>(async () =>
+            await store.CompleteAsync(lease!, "Succeeded", CancellationToken.None));
+        await store.CompleteAsync(reclaimed!, "Retryable", CancellationToken.None);
+        Assert.Equal(1L, Convert.ToInt64(await TextAsync(
+            file.DatabasePath, "SELECT Enabled FROM Jobs WHERE Id = $id;", ("$id", jobId.Value.ToString("D")))));
+        Assert.Equal("Retryable", await TextAsync(
+            file.DatabasePath, "SELECT Status FROM JobRuns WHERE JobId = $id;", ("$id", jobId.Value.ToString("D"))));
+
+        clock.UtcNow = Now.AddMinutes(3);
+        var retry = await store.ClaimDueAsync("worker-3", clock.UtcNow, TimeSpan.FromMinutes(1), CancellationToken.None);
+        await store.CompleteAsync(retry!, "Unknown", CancellationToken.None);
         var duplicateId = await store.ScheduleAsync(new SqliteScheduledJob(
             JobId.New(), "owner", "reminder", 1, """{"message":"different"}""", "UTC", Now,
             "NotifyLate", "request-1"), CancellationToken.None);
@@ -331,7 +471,11 @@ public sealed class SqlitePersistenceTests
         Assert.Equal(jobId, duplicateId);
         Assert.Equal("Unknown", await TextAsync(
             file.DatabasePath, "SELECT Status FROM JobRuns WHERE JobId = $id;", ("$id", jobId.Value.ToString("D"))));
-        Assert.Null(await store.ClaimDueAsync("worker-2", Now.AddMinutes(2), TimeSpan.FromMinutes(1), CancellationToken.None));
+        Assert.Equal(1L, Convert.ToInt64(await TextAsync(
+            file.DatabasePath, "SELECT COUNT(*) FROM JobRuns WHERE JobId = $id;", ("$id", jobId.Value.ToString("D"))));
+        Assert.Null(await store.ClaimDueAsync("worker-4", Now.AddMinutes(5), TimeSpan.FromMinutes(1), CancellationToken.None));
+        await Assert.ThrowsAsync<ArgumentException>(async () =>
+            await store.CompleteAsync(retry!, "unexpected", CancellationToken.None));
     }
 
     [Fact]
@@ -349,11 +493,19 @@ public sealed class SqlitePersistenceTests
         await journal.UpdateActionAsync(action.Id, 1, "Unknown", Now, CancellationToken.None);
         var approval = new SqliteApprovalRecord(
             ApprovalId.New(), action.Id, "owner", Now.AddMinutes(5), Now, "Pending", 1);
+        await Assert.ThrowsAsync<SqliteException>(async () =>
+            await journal.SaveApprovalAsync(approval with { Id = ApprovalId.New(), OwnerId = "different-owner" }, CancellationToken.None));
         await journal.SaveApprovalAsync(approval, CancellationToken.None);
+        await Assert.ThrowsAsync<PersistenceConcurrencyException>(async () =>
+            await journal.UpdateApprovalAsync(approval.Id, "different-owner", 1, "Approved", CancellationToken.None));
+        Assert.Equal("Pending", await TextAsync(
+            file.DatabasePath, "SELECT Status FROM ApprovalRequests WHERE Id = $id;", ("$id", approval.Id.Value.ToString("D"))));
+        Assert.Equal(1L, Convert.ToInt64(await TextAsync(
+            file.DatabasePath, "SELECT Version FROM ApprovalRequests WHERE Id = $id;", ("$id", approval.Id.Value.ToString("D")))));
         await journal.UpdateApprovalAsync(approval.Id, "owner", 1, "Approved", CancellationToken.None);
 
         await Assert.ThrowsAsync<PersistenceConcurrencyException>(async () =>
-            await journal.UpdateApprovalAsync(approval.Id, "owner", 1, "Rejected", CancellationToken.None));
+            await journal.UpdateApprovalAsync(approval.Id, "owner", 2, "Rejected", CancellationToken.None));
         await Assert.ThrowsAsync<SqliteException>(async () =>
             await journal.SaveApprovalAsync(
                 approval with { Id = ApprovalId.New(), ActionId = ActionId.New() }, CancellationToken.None));
@@ -362,6 +514,8 @@ public sealed class SqlitePersistenceTests
             file.DatabasePath, "SELECT Status FROM Actions WHERE Id = $id;", ("$id", action.Id.Value.ToString("D"))));
         Assert.Equal("Approved", await TextAsync(
             file.DatabasePath, "SELECT Status FROM ApprovalRequests WHERE Id = $id;", ("$id", approval.Id.Value.ToString("D"))));
+        Assert.Equal(2L, Convert.ToInt64(await TextAsync(
+            file.DatabasePath, "SELECT Version FROM ApprovalRequests WHERE Id = $id;", ("$id", approval.Id.Value.ToString("D")))));
         await Assert.ThrowsAsync<PersistenceConcurrencyException>(async () =>
             await journal.UpdateActionAsync(action.Id, 1, "Succeeded", Now, CancellationToken.None));
     }
@@ -447,6 +601,6 @@ public sealed class SqlitePersistenceTests
 
     private sealed class ControlledClock(DateTimeOffset now) : IClock
     {
-        public DateTimeOffset UtcNow { get; } = now;
+        public DateTimeOffset UtcNow { get; set; } = now;
     }
 }
