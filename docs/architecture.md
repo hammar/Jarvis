@@ -27,7 +27,7 @@ flowchart TD
 | --- | --- | --- |
 | Domain | Strong IDs and core state types | None |
 | Application | Frozen use-case and adapter contracts, typed events | Domain |
-| Infrastructure | Persistence/provider/device adapter implementations (future) | Application, Domain |
+| Infrastructure | SQLite persistence, migrations, backup/restore, and provider/device adapters | Application, Domain |
 | Web | Razor host and composition root | Application, Domain, ServiceDefaults; Infrastructure only in composition |
 | ServiceDefaults | Health, service discovery and filtered local telemetry | No application projects |
 | AppHost | Aspire resource graph and trusted profiles | Web and simulator resource references only |
@@ -41,6 +41,30 @@ pre-T02 exception. Web request handlers must call Application contracts
 rather than raw database, provider or Home Assistant clients. The architecture
 tests enforce direct project edges, compiled assembly/type dependencies,
 Copilot adapter namespaces, and the Web composition exception.
+
+## Durable storage ownership
+
+SQLite is the authoritative store for application conversations, turns and
+events, explicit memory facts/proposals, approval and action journals, jobs and
+runs, notifications, cloud consents, and audit events. `Infrastructure` owns
+the schema and numbered transactional migrations; the application-facing
+conversation, memory, and job contracts are implemented by SQLite repositories.
+Storage-only approval/action/audit journal primitives remain in Infrastructure
+until their consuming application use cases are implemented. Neither Domain nor
+Application exposes SQLite types.
+
+Connections enable foreign keys and WAL. UTC instants use invariant round-trip
+text, versioned writes use SQL compare-and-swap, and FTS5 indexes memory fields.
+Online backup/restore uses SQLite's backup API and validates integrity before
+replacement. Restore requires stopped workers and closed database connections;
+unknown action states remain data and are never replayed by storage.
+
+Conversation retention defaults to 90 days of inactivity and audit retention
+to 30 days. Validated positive owner overrides are supported. Retention removes
+conversation roots (and cascading messages/turn history) and old audit events;
+it does not delete durable facts, jobs, action journals, or unknown outcomes.
+The Web composition root is not yet wired to these stores; this persistence
+slice provides the schema and adapters for later use-case integration.
 
 ## Turn and privacy model
 

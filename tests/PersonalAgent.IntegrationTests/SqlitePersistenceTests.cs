@@ -88,6 +88,12 @@ public sealed class SqlitePersistenceTests
         Assert.Contains("memory fact", exception.Message, StringComparison.Ordinal);
         Assert.Equal("Portland", persisted!.Value);
         Assert.Equal(2, updated.Version);
+        Assert.Empty(await store.SearchAsync("Seattle", 5, CancellationToken.None));
+        Assert.Single(await store.SearchAsync("Portland", 5, CancellationToken.None));
+        await store.DeleteAsync(fact.Id, 2, CancellationToken.None);
+        Assert.Empty(await store.SearchAsync("Portland", 5, CancellationToken.None));
+        await Assert.ThrowsAsync<PersistenceConcurrencyException>(async () =>
+            await store.DeleteAsync(fact.Id, 2, CancellationToken.None));
     }
 
     [Fact]
@@ -125,6 +131,44 @@ public sealed class SqlitePersistenceTests
 
     [Fact]
     [Trait("Category", "Integration")]
+    public async Task MigrationRejectsFutureSchemasAndRollsBackFailedMigrations()
+    {
+        using var file = IsolatedDatabaseFile.Create();
+        var futurePath = Path.Combine(Path.GetDirectoryName(file.DatabasePath)!, "future.db");
+        await using (var connection = await OpenAsync(futurePath))
+        {
+            await using var command = connection.CreateCommand();
+            command.CommandText = """
+                CREATE TABLE SchemaMigrations(Version INTEGER PRIMARY KEY, Name TEXT, AppliedAtUtc TEXT);
+                INSERT INTO SchemaMigrations VALUES(99, 'future', '2026-01-01');
+                """;
+            await command.ExecuteNonQueryAsync();
+        }
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            new SqliteDatabase(futurePath).MigrateAsync());
+
+        var conflictingPath = Path.Combine(Path.GetDirectoryName(file.DatabasePath)!, "conflicting.db");
+        await using (var connection = await OpenAsync(conflictingPath))
+        {
+            await using var command = connection.CreateCommand();
+            command.CommandText = """
+                CREATE TABLE SchemaMigrations(Version INTEGER PRIMARY KEY, Name TEXT, AppliedAtUtc TEXT);
+                CREATE TABLE Conversations(Id TEXT PRIMARY KEY);
+                """;
+            await command.ExecuteNonQueryAsync();
+        }
+
+        await Assert.ThrowsAsync<SqliteException>(() =>
+            new SqliteDatabase(conflictingPath).MigrateAsync());
+        Assert.Equal(0L, Convert.ToInt64(await ScalarAtAsync(
+            conflictingPath, "SELECT COUNT(*) FROM SchemaMigrations;")));
+        Assert.Equal(0L, Convert.ToInt64(await ScalarAtAsync(
+            conflictingPath, "SELECT COUNT(*) FROM sqlite_master WHERE name = 'Messages';")));
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
     public async Task OnlineBackupRestoresDataAfterTheOriginalFileIsCorrupted()
     {
         using var file = IsolatedDatabaseFile.Create();
@@ -138,11 +182,59 @@ public sealed class SqlitePersistenceTests
 
         await database.BackupAsync(backupPath);
         await File.WriteAllTextAsync(file.DatabasePath, "not a database");
+        await File.WriteAllTextAsync($"{file.DatabasePath}-wal", "stale");
+        await File.WriteAllTextAsync($"{file.DatabasePath}-shm", "stale");
         await database.RestoreAsync(backupPath);
 
         var messages = await new SqliteConversationStore(new SqliteDatabase(file.DatabasePath))
             .ReadRecentAsync(conversationId, 5, CancellationToken.None);
         Assert.Equal("Still here.", Assert.Single(messages).Content);
+        Assert.False(File.Exists($"{file.DatabasePath}-wal"));
+        Assert.False(File.Exists($"{file.DatabasePath}-shm"));
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task RestoreRejectsUnversionedFutureAndForeignKeyInvalidDatabases()
+    {
+        using var file = IsolatedDatabaseFile.Create();
+        var directory = Path.GetDirectoryName(file.DatabasePath)!;
+        var database = new SqliteDatabase(file.DatabasePath);
+        var unversioned = Path.Combine(directory, "unversioned.db");
+        await using (await OpenAsync(unversioned))
+        {
+        }
+
+        await Assert.ThrowsAsync<InvalidDataException>(() => database.RestoreAsync(unversioned));
+
+        var future = Path.Combine(directory, "future-backup.db");
+        await using (var connection = await OpenAsync(future))
+        await using (var command = connection.CreateCommand())
+        {
+            command.CommandText = """
+                CREATE TABLE SchemaMigrations(Version INTEGER PRIMARY KEY, Name TEXT, AppliedAtUtc TEXT);
+                INSERT INTO SchemaMigrations VALUES(99, 'future', '2026-01-01');
+                """;
+            await command.ExecuteNonQueryAsync();
+        }
+
+        await Assert.ThrowsAsync<InvalidDataException>(() => database.RestoreAsync(future));
+
+        var broken = Path.Combine(directory, "foreign-key-invalid.db");
+        await using (var connection = await OpenAsync(broken))
+        await using (var command = connection.CreateCommand())
+        {
+            command.CommandText = """
+                CREATE TABLE SchemaMigrations(Version INTEGER PRIMARY KEY, Name TEXT, AppliedAtUtc TEXT);
+                INSERT INTO SchemaMigrations VALUES(1, 'old', '2026-01-01');
+                CREATE TABLE Parent(Id INTEGER PRIMARY KEY);
+                CREATE TABLE Child(ParentId INTEGER REFERENCES Parent(Id));
+                INSERT INTO Child VALUES(404);
+                """;
+            await command.ExecuteNonQueryAsync();
+        }
+
+        await Assert.ThrowsAsync<InvalidDataException>(() => database.RestoreAsync(broken));
     }
 
     [Fact]
@@ -155,7 +247,7 @@ public sealed class SqlitePersistenceTests
         var conversations = new SqliteConversationStore(database);
         var memory = new SqliteMemoryStore(database, new ControlledClock(Now));
         var journal = new SqliteJournalStore(database);
-        var jobs = new SqliteJobStore(database);
+        var jobs = new SqliteJobStore(database, new ControlledClock(Now));
         var oldConversation = ConversationId.New();
         var recentConversation = ConversationId.New();
         await conversations.AppendMessageAsync(Message(oldConversation, Now.AddDays(-91)), CancellationToken.None);
@@ -221,12 +313,12 @@ public sealed class SqlitePersistenceTests
         using var file = IsolatedDatabaseFile.Create();
         var database = new SqliteDatabase(file.DatabasePath);
         await database.MigrateAsync();
-        var store = new SqliteJobStore(database);
+        var store = new SqliteJobStore(database, new ControlledClock(Now));
         var jobId = JobId.New();
         await store.ScheduleAsync(new SqliteScheduledJob(
             jobId, "owner", "reminder", 1, """{"message":"hello"}""", "UTC", Now,
             "NotifyLate", "request-1"), CancellationToken.None);
-        var lease = await new SqliteJobStore(new SqliteDatabase(file.DatabasePath))
+        var lease = await new SqliteJobStore(new SqliteDatabase(file.DatabasePath), new ControlledClock(Now))
             .ClaimDueAsync("worker-1", Now, TimeSpan.FromMinutes(1), CancellationToken.None);
 
         await Assert.ThrowsAsync<PersistenceConcurrencyException>(async () =>
@@ -244,6 +336,38 @@ public sealed class SqlitePersistenceTests
 
     [Fact]
     [Trait("Category", "Integration")]
+    public async Task JournalUpdatesAreOwnerScopedVersionedAndForeignKeyBound()
+    {
+        using var file = IsolatedDatabaseFile.Create();
+        var database = new SqliteDatabase(file.DatabasePath);
+        await database.MigrateAsync();
+        var journal = new SqliteJournalStore(database);
+        var action = new SqliteActionRecord(
+            ActionId.New(), "owner", "home.set_light", """{"entity":"light.office"}""",
+            "hash", "Prepared", Now, 1);
+        await journal.SaveActionAsync(action, CancellationToken.None);
+        await journal.UpdateActionAsync(action.Id, 1, "Unknown", Now, CancellationToken.None);
+        var approval = new SqliteApprovalRecord(
+            ApprovalId.New(), action.Id, "owner", Now.AddMinutes(5), Now, "Pending", 1);
+        await journal.SaveApprovalAsync(approval, CancellationToken.None);
+        await journal.UpdateApprovalAsync(approval.Id, "owner", 1, "Approved", CancellationToken.None);
+
+        await Assert.ThrowsAsync<PersistenceConcurrencyException>(async () =>
+            await journal.UpdateApprovalAsync(approval.Id, "owner", 1, "Rejected", CancellationToken.None));
+        await Assert.ThrowsAsync<SqliteException>(async () =>
+            await journal.SaveApprovalAsync(
+                approval with { Id = ApprovalId.New(), ActionId = ActionId.New() }, CancellationToken.None));
+
+        Assert.Equal("Unknown", await TextAsync(
+            file.DatabasePath, "SELECT Status FROM Actions WHERE Id = $id;", ("$id", action.Id.Value.ToString("D"))));
+        Assert.Equal("Approved", await TextAsync(
+            file.DatabasePath, "SELECT Status FROM ApprovalRequests WHERE Id = $id;", ("$id", approval.Id.Value.ToString("D"))));
+        await Assert.ThrowsAsync<PersistenceConcurrencyException>(async () =>
+            await journal.UpdateActionAsync(action.Id, 1, "Succeeded", Now, CancellationToken.None));
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
     public async Task InvalidRetentionWindowsAndBackupPathsAreRejected()
     {
         using var file = IsolatedDatabaseFile.Create();
@@ -255,8 +379,30 @@ public sealed class SqlitePersistenceTests
         await Assert.ThrowsAsync<ArgumentException>(() => database.BackupAsync(file.DatabasePath));
         await Assert.ThrowsAsync<FileNotFoundException>(() =>
             database.RestoreAsync(Path.Combine(Path.GetDirectoryName(file.DatabasePath)!, "missing.db")));
+        await Assert.ThrowsAsync<FileNotFoundException>(() =>
+            new SqliteDatabase(Path.Combine(Path.GetDirectoryName(file.DatabasePath)!, "uninitialized.db"))
+                .BackupAsync(Path.Combine(Path.GetDirectoryName(file.DatabasePath)!, "uninitialized-backup.db")));
         await Assert.ThrowsAsync<ArgumentOutOfRangeException>(async () =>
             await new SqliteConversationStore(database).ReadRecentAsync(ConversationId.New(), 0, CancellationToken.None));
+        var memory = new SqliteMemoryStore(database, new ControlledClock(Now));
+        await Assert.ThrowsAsync<ArgumentException>(async () =>
+            await memory.SearchAsync("  ", 5, CancellationToken.None));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(async () =>
+            await memory.SearchAsync("word", 101, CancellationToken.None));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(async () =>
+            await memory.SaveAsync(
+                new MemoryFact(MemoryFactId.New(), "subject", "key", "value", "source", "Private", 0),
+                -1, CancellationToken.None));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(async () =>
+            await memory.DeleteAsync(MemoryFactId.New(), 0, CancellationToken.None));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(async () =>
+            await new SqliteJobStore(database, new ControlledClock(Now))
+                .ClaimDueAsync("worker", Now, TimeSpan.Zero, CancellationToken.None));
+        using var cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            new SqliteDatabase(Path.Combine(Path.GetDirectoryName(file.DatabasePath)!, "cancelled.db"))
+                .MigrateAsync(cancelled.Token));
     }
 
     private static ConversationMessage Message(ConversationId conversationId, DateTimeOffset at) =>
@@ -270,6 +416,7 @@ public sealed class SqlitePersistenceTests
         var connection = new SqliteConnection(new SqliteConnectionStringBuilder
         {
             DataSource = path,
+            ForeignKeys = false,
             Pooling = false
         }.ToString());
         await connection.OpenAsync();
@@ -281,6 +428,12 @@ public sealed class SqlitePersistenceTests
         await using var command = connection.CreateCommand();
         command.CommandText = sql;
         return await command.ExecuteScalarAsync();
+    }
+
+    private static async Task<object?> ScalarAtAsync(string path, string sql)
+    {
+        await using var connection = await OpenAsync(path);
+        return await ScalarAsync(connection, sql);
     }
 
     private static async Task<string?> TextAsync(string path, string sql, (string Name, object Value) parameter)

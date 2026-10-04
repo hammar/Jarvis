@@ -102,6 +102,11 @@ public sealed class SqliteDatabase
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(backupPath);
         cancellationToken.ThrowIfCancellationRequested();
+        if (!File.Exists(DatabasePath))
+        {
+            throw new FileNotFoundException("The SQLite database file does not exist.", DatabasePath);
+        }
+
         var destination = Path.GetFullPath(backupPath);
         EnsureDifferentFiles(DatabasePath, destination);
         Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
@@ -117,8 +122,9 @@ public sealed class SqliteDatabase
             }.ToString()))
             {
                 await target.OpenAsync(cancellationToken);
+                await VerifyDatabaseAsync(source, cancellationToken);
                 source.BackupDatabase(target);
-                await VerifyIntegrityAsync(target, cancellationToken);
+                await VerifyDatabaseAsync(target, cancellationToken);
             }
 
             cancellationToken.ThrowIfCancellationRequested();
@@ -164,9 +170,9 @@ public sealed class SqliteDatabase
             {
                 await source.OpenAsync(cancellationToken);
                 await target.OpenAsync(cancellationToken);
-                await VerifyIntegrityAsync(source, cancellationToken);
+                await VerifyDatabaseAsync(source, cancellationToken);
                 source.BackupDatabase(target);
-                await VerifyIntegrityAsync(target, cancellationToken);
+                await VerifyDatabaseAsync(target, cancellationToken);
             }
 
             cancellationToken.ThrowIfCancellationRequested();
@@ -231,6 +237,29 @@ public sealed class SqliteDatabase
         if (await reader.ReadAsync(cancellationToken))
         {
             throw new InvalidDataException("SQLite foreign key validation failed.");
+        }
+    }
+
+    private static async Task VerifyDatabaseAsync(
+        SqliteConnection connection,
+        CancellationToken cancellationToken)
+    {
+        await VerifyIntegrityAsync(connection, cancellationToken);
+        long version;
+        try
+        {
+            await using var command = connection.CreateCommand();
+            command.CommandText = "SELECT COALESCE(MAX(Version), 0) FROM SchemaMigrations;";
+            version = Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture);
+        }
+        catch (SqliteException exception)
+        {
+            throw new InvalidDataException("The file is not an initialized PersonalAgent database.", exception);
+        }
+
+        if (version < 1 || version > SchemaMigrations.All[^1].Version)
+        {
+            throw new InvalidDataException($"Unsupported database schema version {version}.");
         }
     }
 

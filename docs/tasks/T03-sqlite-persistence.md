@@ -37,7 +37,7 @@ integration. Restore must be performed with workers stopped by the caller.
 
 - Depends on completed T02 contracts and architecture boundaries.
 - Uses the existing pinned `Microsoft.Data.Sqlite` package and hand-written
-  embedded SQL migrations, avoiding an additional ORM/tool dependency. Each
+  versioned SQL migrations, avoiding an additional ORM/tool dependency. Each
   migration is applied transactionally and recorded in the database.
 - UTC instants are stored as invariant round-trip strings. SQLite is local,
   single-host authoritative state; WAL and foreign keys are enabled.
@@ -61,4 +61,17 @@ instructions.
   implemented without leaking SQLite dependencies into Domain/Application.
 - Real SQLite integration scenarios pass; Infrastructure meets the configured
   coverage gate.
-- **Status: implementation in progress; validation evidence pending.**
+- **Status: implementation complete.** Local validation on 2026-10-04:
+  - `tools/validate.sh build` — Release build, analyzers, and formatting passed.
+  - `tools/validate.sh unit` — 7 tests passed.
+  - `tools/validate.sh integration` — 18 real SQLite/Web integration tests passed.
+  - `tools/validate.sh architecture` — 6 boundary tests passed.
+  - `tools/validate.sh sdk-contracts` — actual pinned runtime contracts and the
+    SDK package contract test passed.
+  - `tools/validate.sh coverage` — Infrastructure 99.3% lines / 93.6% branches;
+    overall thresholds, reports, and discovery passed.
+  - `tools/validate.sh docs` — internal Markdown links passed.
+
+The Web composition root and T06/T08/T09 use cases are not wired to the new
+stores by this task; those integrations remain follow-up work. No production
+backup automation or live household-data validation is claimed.

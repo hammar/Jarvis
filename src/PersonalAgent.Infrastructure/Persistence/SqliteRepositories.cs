@@ -268,7 +268,7 @@ public sealed record SqliteScheduledJob(
     string? ClientRequestId);
 
 /// <summary>Persists durable job payloads and atomic expiring lease transitions.</summary>
-public sealed class SqliteJobStore(SqliteDatabase database) : IJobStore
+public sealed class SqliteJobStore(SqliteDatabase database, IClock clock) : IJobStore
 {
     /// <summary>Persists a one-time job; a repeated owner request ID returns the original job identifier.</summary>
     /// <param name="job">Validated job storage fields.</param>
@@ -385,7 +385,7 @@ public sealed class SqliteJobStore(SqliteDatabase database) : IJobStore
     {
         ArgumentNullException.ThrowIfNull(lease);
         ArgumentException.ThrowIfNullOrWhiteSpace(outcome);
-        var now = DateTimeOffset.UtcNow;
+        var now = clock.UtcNow;
         await using var connection = await database.OpenConnectionAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         await using (var update = connection.CreateCommand())
