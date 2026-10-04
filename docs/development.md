@@ -70,5 +70,8 @@ need explicit future semantics.
 - .NET SDK `10.0.401`; locked restore.
 - Chromium for Playwright browser E2E. Install it without PowerShell using
   `tools/validate.sh playwright-install` (Linux installs system dependencies).
-- Docker is optional and not used by the Simulator/E2E profiles.
+- A Docker CLI and reachable Docker Engine are required by the Aspire runtime
+  for local AppHost and Aspire E2E startup. The Simulator/E2E profiles do not
+  launch Docker-managed application resources; on macOS, keep Docker Desktop
+  running while using Aspire.
 - No cloud API keys or household credentials for required checks.

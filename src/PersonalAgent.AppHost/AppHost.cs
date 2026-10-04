@@ -9,7 +9,8 @@ if (profile is not ("Simulator" or "Local" or "Hybrid" or "E2E"))
 }
 
 var dataDirectory = ResolveDataDirectory(profile, builder.Configuration);
-var web = builder.AddProject<Projects.PersonalAgent_Web>("personalagent-web")
+var web = builder.AddProject<Projects.PersonalAgent_Web>("personalagent-web", launchProfileName: null)
+    .WithHttpEndpoint()
     .WithEnvironment("JARVIS_PROFILE", profile)
     .WithEnvironment("JARVIS_DATA_DIR", dataDirectory)
     .WithHttpHealthCheck("/health/ready");
@@ -23,10 +24,16 @@ if (profile is "Simulator" or "E2E")
         .WithEnvironment("JARVIS_HOME_ASSISTANT_BASE_URL", string.Empty)
         .WithEnvironment("JARVIS_HOME_ASSISTANT_SECRET_REFERENCE", string.Empty);
 
-    var simulatorModel = builder.AddProject<Projects.PersonalAgent_SimulatorEndpoints>("simulator-model")
+    var simulatorModel = builder.AddProject<Projects.PersonalAgent_SimulatorEndpoints>(
+            "simulator-model",
+            launchProfileName: null)
+        .WithHttpEndpoint()
         .WithEnvironment("JARVIS_SIMULATOR_KIND", "model")
         .WithHttpHealthCheck("/health/ready");
-    var simulatorHome = builder.AddProject<Projects.PersonalAgent_SimulatorEndpoints>("simulator-home-assistant")
+    var simulatorHome = builder.AddProject<Projects.PersonalAgent_SimulatorEndpoints>(
+            "simulator-home-assistant",
+            launchProfileName: null)
+        .WithHttpEndpoint()
         .WithEnvironment("JARVIS_SIMULATOR_KIND", "home-assistant")
         .WithHttpHealthCheck("/health/ready");
     web.WithReference(simulatorModel).WithReference(simulatorHome);

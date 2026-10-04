@@ -115,14 +115,17 @@ evidence from the native macOS worktree:
   coverable branches were 100%; changed executable lines were 100%.
 - `tools/validate.sh aspire-e2e` — 2 out-of-process tests passed, exercising
   Simulator plus Local/Hybrid with explicit test-only endpoint and secret
-  references.
+  references. The same gate passed in a clean Linux x64 SDK container with
+  Docker CLI/daemon access after switching AppHost project endpoints to
+  dynamic allocation, avoiding port collisions between its process resources.
 - `tools/validate.sh browser-e2e` — Playwright smoke passed; the deliberately
   failing assertion produced a failed TRX and the failure verifier accepted
   it as expected.
 - `tools/validate.sh gate-self-test` and `tools/validate.sh docs` — synthetic
   enforcement fixtures and internal Markdown links passed.
 
-GitHub-hosted Linux CI, Docker containment, and the remote-link action were
-not run from this macOS session; their real workflow jobs are configured in
-`.github/workflows/ci.yml`. No production adapter, persistence schema, or
-household/cloud integration is claimed by this scaffold.
+The Linux x64 Docker validation also passed the Release build, unit,
+integration, architecture, SDK contract, coverage, and Aspire E2E gates;
+loopback containment passed separately. GitHub-hosted CI and the remote-link
+action were not run from this session. No production adapter, persistence
+schema, or household/cloud integration is claimed by this scaffold.

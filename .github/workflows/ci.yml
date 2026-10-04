@@ -124,6 +124,7 @@ jobs:
       - name: Run actual pinned SDK contracts and solution contract tests
         run: sh tools/validate.sh sdk-contracts
       - name: Verify Aspire Simulator process and external endpoint behavior
+        if: runner.os == 'Linux'
         run: sh tools/validate.sh aspire-e2e
       - name: Verify loopback-only Linux runtime containment
         if: runner.os == 'Linux'
