@@ -154,6 +154,5 @@ jobs:
         with:
           args: >-
             --no-progress
-            --exclude-mail
             '**/*.md'
           fail: true
