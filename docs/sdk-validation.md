@@ -53,6 +53,10 @@ JARVIS_OLLAMA_MODEL=llama3.2:latest dotnet run --no-build --project tools/sdk-va
 
 The contract command exercised the actual spawned Copilot runtime against controlled loopback providers; it is not a fake SDK test. The Ollama command exercised actual local inference through the instrumented proxy. The owner-authorized cloud command subsequently passed against Foundry's Responses API. CI's `sdk-contracts` job is configured for Linux and macOS; these workflow runs have not been claimed as executed on GitHub.
 
+The platform matrix reports `sdk-contracts-platform` checks. The stable
+branch-protection check `sdk-contracts` aggregates both platform results and
+fails if either platform fails, is cancelled, or is skipped.
+
 This cohesive standalone slice exceeds the approximately 400-line review target:
 the actual-runtime provider fixture, live modes, process lifecycle tests, and
 network instrumentation are kept together rather than splitting feasibility

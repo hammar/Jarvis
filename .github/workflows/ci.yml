@@ -65,8 +65,8 @@ jobs:
           fi
           echo "::notice::No src/ yet - architecture job is a bootstrap placeholder (see T02)."
 
-  sdk-contracts:
-    name: sdk-contracts
+  sdk-contracts-platform:
+    name: sdk-contracts-platform (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
@@ -92,6 +92,21 @@ jobs:
             --entrypoint /bin/bash jarvis-sdk-egress:t01 /validation/check-containment.sh
           docker run --rm --network none --hostname jarvis-sdk-fixture \
             --add-host jarvis-sdk-fixture:127.0.0.1 --cap-add SYS_PTRACE jarvis-sdk-egress:t01
+
+  sdk-contracts:
+    name: sdk-contracts
+    needs: [sdk-contracts-platform]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require all SDK platform checks to succeed
+        env:
+          PLATFORM_RESULT: ${{ needs.sdk-contracts-platform.result }}
+        run: |
+          if [ "$PLATFORM_RESULT" != "success" ]; then
+            echo "::error::SDK platform checks did not all succeed: $PLATFORM_RESULT"
+            exit 1
+          fi
 
   unit-tests:
     name: unit-tests
