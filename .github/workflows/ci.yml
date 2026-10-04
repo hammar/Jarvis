@@ -1,0 +1,158 @@
+name: CI
+
+# Required checks for hammar/Jarvis per AGENTS.md "CI enforcement".
+#
+# BOOTSTRAP NOTE: no .NET solution exists yet (pre-T01/T02). Until the
+# solution, test projects, and coverage/architecture tooling are scaffolded,
+# each job below does the most real thing it can (restore/build/test if a
+# solution is present) and otherwise prints an explicit "nothing to validate
+# yet" notice, so the check is never a silent/accidental pass. Replace the
+# placeholder steps with real validation as each task lands; do not just
+# delete the notices.
+#
+# Required reviewed exception: all "solution not found" branches below are
+# intentional, temporary, and must be removed once a .sln exists.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+
+jobs:
+  build-and-analyzers:
+    name: build-and-analyzers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Find solution
+        id: find
+        run: |
+          sln=$(find . -maxdepth 3 -name '*.sln' | head -n1)
+          echo "sln=$sln" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-dotnet@v4
+        if: steps.find.outputs.sln != ''
+        with:
+          dotnet-version: '9.0.x'
+      - name: Restore & build (Release, analyzers as errors)
+        if: steps.find.outputs.sln != ''
+        run: |
+          dotnet restore "${{ steps.find.outputs.sln }}"
+          dotnet build "${{ steps.find.outputs.sln }}" -c Release \
+            -warnaserror -p:TreatWarningsAsErrors=true -p:Nullable=enable
+      - name: No solution yet
+        if: steps.find.outputs.sln == ''
+        run: |
+          echo "::notice::No .sln found yet - build-and-analyzers has nothing to build. This is a bootstrap placeholder (see T01/T02)."
+
+  architecture:
+    name: architecture
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Architecture boundary checks (placeholder)
+        run: |
+          if [ -d src ]; then
+            echo "::error::Architecture tests are not scaffolded yet but src/ exists. Implement T02 dependency-rule tests before merging real code."
+            exit 1
+          fi
+          echo "::notice::No src/ yet - architecture job is a bootstrap placeholder (see T02)."
+
+  sdk-contracts:
+    name: sdk-contracts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Copilot SDK contract validation (placeholder)
+        run: |
+          echo "::notice::SDK contract tests land with T01 (SDK validation). Nothing to run yet."
+
+  unit-tests:
+    name: unit-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Find solution
+        id: find
+        run: |
+          sln=$(find . -maxdepth 3 -name '*.sln' | head -n1)
+          echo "sln=$sln" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-dotnet@v4
+        if: steps.find.outputs.sln != ''
+        with:
+          dotnet-version: '9.0.x'
+      - name: Run unit tests
+        if: steps.find.outputs.sln != ''
+        run: dotnet test "${{ steps.find.outputs.sln }}" -c Release --filter Category=Unit
+      - name: No solution yet
+        if: steps.find.outputs.sln == ''
+        run: echo "::notice::No .sln found yet - unit-tests bootstrap placeholder."
+
+  integration-tests:
+    name: integration-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Find solution
+        id: find
+        run: |
+          sln=$(find . -maxdepth 3 -name '*.sln' | head -n1)
+          echo "sln=$sln" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-dotnet@v4
+        if: steps.find.outputs.sln != ''
+        with:
+          dotnet-version: '9.0.x'
+      - name: Run integration tests (SQLite/HTTP, no live cloud/household creds)
+        if: steps.find.outputs.sln != ''
+        run: dotnet test "${{ steps.find.outputs.sln }}" -c Release --filter Category=Integration
+      - name: No solution yet
+        if: steps.find.outputs.sln == ''
+        run: echo "::notice::No .sln found yet - integration-tests bootstrap placeholder."
+
+  coverage:
+    name: coverage
+    needs: [unit-tests, integration-tests]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Coverage gate (placeholder)
+        run: |
+          echo "::notice::Coverage thresholds from AGENTS.md (90/85 unit, 85/75 combined, etc.) will be enforced once T02 selects the runner/collector."
+
+  aspire-e2e:
+    name: aspire-e2e
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Aspire Simulator/E2E profile (placeholder)
+        run: |
+          echo "::notice::Aspire AppHost does not exist yet - aspire-e2e bootstrap placeholder (see T02)."
+
+  browser-e2e:
+    name: browser-e2e
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Playwright E2E (placeholder)
+        run: |
+          echo "::notice::No Web project/Playwright suite yet - browser-e2e bootstrap placeholder."
+
+  docs:
+    name: docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lint markdown links
+        uses: lycheeverse/lychee-action@v2
+        with:
+          args: >-
+            --no-progress
+            '**/*.md'
+          fail: true

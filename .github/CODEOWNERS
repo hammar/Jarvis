@@ -1,0 +1,30 @@
+# CODEOWNERS
+#
+# This is a solo personal project with one human (the repo owner) and no
+# second reviewer, so this file is documentation of area ownership, not a
+# merge-blocking gate — branch protection does not require code owner
+# review. Update the owners below if this ever becomes a multi-person repo.
+#
+# Order matters: later patterns override earlier ones.
+
+# Default owner for everything not matched below.
+*                                   @hammar
+
+# Agent/process instructions and specification — changes here redefine scope
+# and acceptance, so they need deliberate review.
+/AGENTS.md                         @hammar
+/docs/Personal-Agent-Project-Spec.md @hammar
+/docs/adr/                         @hammar
+
+# CI, workflow policy, and branch/repo configuration.
+/.github/                          @hammar
+
+# Shared contracts and policy/approval boundaries (paths to refine once the
+# solution is scaffolded in T02, e.g. src/Domain, src/Application contracts,
+# policy and approval modules).
+/src/**/Contracts/                 @hammar
+/src/**/Policy/                    @hammar
+/src/**/Approval/                  @hammar
+
+# Database/schema migrations.
+/src/**/Migrations/                @hammar
