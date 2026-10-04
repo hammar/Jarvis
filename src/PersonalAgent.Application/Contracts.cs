@@ -349,7 +349,14 @@ public interface IClock
 /// <summary>Represents one typed event emitted during an agent turn.</summary>
 /// <param name="TurnId">Application-owned turn identifier.</param>
 /// <param name="OccurredAtUtc">UTC instant when the host observed the event.</param>
-public abstract record AgentEvent(TurnId TurnId, DateTimeOffset OccurredAtUtc);
+public abstract record AgentEvent(TurnId TurnId, DateTimeOffset OccurredAtUtc)
+{
+    /// <summary>
+    /// Gets the 1-based, strictly increasing sequence assigned within one turn.
+    /// Persisted event stores use this value as the reconnect cursor.
+    /// </summary>
+    public long SequenceNumber { get; init; }
+}
 
 /// <summary>Signals that a turn was accepted and is starting.</summary>
 /// <param name="TurnId">Application-owned turn identifier.</param>
