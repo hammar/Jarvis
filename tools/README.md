@@ -2,7 +2,6 @@
 
 `validate.sh` is the canonical macOS/Linux entry point used by developers and
 CI. It needs the pinned .NET SDK and a POSIX-compatible shell, not PowerShell.
-`validate.ps1` is an optional wrapper for existing `pwsh` users.
 
 `PersonalAgent.Validation` validates test discovery and coverage output and
 provides a PowerShell-free launcher for the Playwright browser installer.

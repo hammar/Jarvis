@@ -3,8 +3,8 @@
 ## Toolchain and validation commands
 
 Install the exact .NET SDK in `global.json` (`10.0.401`) and use the solution
-lock files. On macOS and Linux, run `tools/validate.sh`; PowerShell wrappers
-are optional, so macOS developers do not need to install `pwsh`.
+lock files. On macOS and Linux, run `tools/validate.sh`. PowerShell is not
+required or used.
 
 ```sh
 dotnet restore Jarvis.sln --locked-mode
@@ -75,3 +75,12 @@ need explicit future semantics.
   launch Docker-managed application resources; on macOS, keep Docker Desktop
   running while using Aspire.
 - No cloud API keys or household credentials for required checks.
+
+## Copilot cloud agent environment
+
+`.github/workflows/copilot-setup-steps.yml` prepares GitHub-hosted Copilot
+cloud agent sessions: it installs the SDK from `global.json`, performs locked
+restores and installs Playwright Chromium through `tools/validate.sh`. It
+receives no secrets. Local agent sessions use the developer's own toolchain and
+do not run it. The workflow also runs when the file itself changes, so edits are
+validated before cloud agents depend on them.

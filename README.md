@@ -26,8 +26,7 @@ direct Web host command and the Local/Hybrid profile configuration are in
 ## Validation
 
 Use `tools/validate.sh` on macOS/Linux. It relies on the pinned .NET SDK and
-ordinary shell tools; PowerShell is not required. Optional `.ps1` wrappers are
-available for developers who already use `pwsh`.
+ordinary shell tools; PowerShell is not required.
 
 ```sh
 tools/validate.sh restore

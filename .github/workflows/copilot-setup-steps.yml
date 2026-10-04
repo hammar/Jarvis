@@ -1,0 +1,40 @@
+name: Copilot Setup Steps
+
+# Prepares the GitHub-hosted environment used by Copilot cloud agent sessions.
+# Only the job named `copilot-setup-steps` is used by the agent. It installs the
+# pinned toolchain the same way CI does; it receives no cloud or household
+# secrets and does not cache assistant state.
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/copilot-setup-steps.yml
+  pull_request:
+    paths:
+      - .github/workflows/copilot-setup-steps.yml
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+
+jobs:
+  copilot-setup-steps:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          global-json-file: global.json
+          cache: true
+          cache-dependency-path: '**/packages.lock.json'
+      - name: Locked restore, validator build, and Playwright Chromium
+        run: sh tools/validate.sh playwright-install
+      - name: Restore SDK validation harness
+        run: dotnet restore tools/sdk-validation/SdkValidation.csproj --locked-mode
