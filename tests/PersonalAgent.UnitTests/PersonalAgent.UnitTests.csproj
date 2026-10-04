@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../PersonalAgent.TestSupport/PersonalAgent.TestSupport.csproj" />
+    <ProjectReference Include="../../src/PersonalAgent.Application/PersonalAgent.Application.csproj" />
+    <ProjectReference Include="../../src/PersonalAgent.Domain/PersonalAgent.Domain.csproj" />
+  </ItemGroup>
+</Project>

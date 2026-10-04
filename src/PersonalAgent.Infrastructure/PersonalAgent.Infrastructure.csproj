@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <WarningsAsErrors>$(WarningsAsErrors);CS1591</WarningsAsErrors>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="GitHub.Copilot.SDK" />
+    <ProjectReference Include="../PersonalAgent.Application/PersonalAgent.Application.csproj" />
+    <ProjectReference Include="../PersonalAgent.Domain/PersonalAgent.Domain.csproj" />
+  </ItemGroup>
+</Project>

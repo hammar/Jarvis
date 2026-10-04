@@ -1,0 +1,10 @@
+<Project Sdk="Aspire.AppHost.Sdk/13.6.0">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AspireUseCliBundle>true</AspireUseCliBundle>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../PersonalAgent.Web/PersonalAgent.Web.csproj" IsAspireProjectResource="true" />
+    <ProjectReference Include="../../tools/PersonalAgent.SimulatorEndpoints/PersonalAgent.SimulatorEndpoints.csproj" IsAspireProjectResource="true" />
+  </ItemGroup>
+</Project>
