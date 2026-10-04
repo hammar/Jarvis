@@ -19,12 +19,16 @@
 # CI, workflow policy, and branch/repo configuration.
 /.github/                          @hammar
 
-# Shared contracts and policy/approval boundaries (paths to refine once the
-# solution is scaffolded in T02, e.g. src/Domain, src/Application contracts,
-# policy and approval modules).
-/src/**/Contracts/                 @hammar
+# Shared contracts and core boundaries.
+/src/PersonalAgent.Domain/         @hammar
+/src/PersonalAgent.Application/    @hammar
 /src/**/Policy/                    @hammar
 /src/**/Approval/                  @hammar
+/src/PersonalAgent.Infrastructure/AgentEngine/Copilot/ @hammar
+
+# Aspire composition and project dependency rules.
+/src/PersonalAgent.AppHost/        @hammar
+/tests/PersonalAgent.ArchitectureTests/ @hammar
 
 # Database/schema migrations.
 /src/**/Migrations/                @hammar

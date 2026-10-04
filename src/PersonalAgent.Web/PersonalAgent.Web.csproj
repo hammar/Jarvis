@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <WarningsAsErrors>$(WarningsAsErrors);CS1591</WarningsAsErrors>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../PersonalAgent.Application/PersonalAgent.Application.csproj" />
+    <ProjectReference Include="../PersonalAgent.Domain/PersonalAgent.Domain.csproj" />
+    <ProjectReference Include="../PersonalAgent.Infrastructure/PersonalAgent.Infrastructure.csproj" />
+    <ProjectReference Include="../PersonalAgent.ServiceDefaults/PersonalAgent.ServiceDefaults.csproj" />
+  </ItemGroup>
+</Project>

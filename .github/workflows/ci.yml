@@ -1,18 +1,5 @@
 name: CI
 
-# Required checks for hammar/Jarvis per AGENTS.md "CI enforcement".
-#
-# BOOTSTRAP NOTE: no .NET solution exists yet (pre-T01/T02). Until the
-# solution, test projects, and coverage/architecture tooling are scaffolded,
-# each job below does the most real thing it can (restore/build/test if a
-# solution is present) and otherwise prints an explicit "nothing to validate
-# yet" notice, so the check is never a silent/accidental pass. Replace the
-# placeholder steps with real validation as each task lands; do not just
-# delete the notices.
-#
-# Required reviewed exception: all "solution not found" branches below are
-# intentional, temporary, and must be removed once a .sln exists.
-
 on:
   pull_request:
     branches: [main]
@@ -21,6 +8,10 @@ on:
 
 permissions:
   contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   DOTNET_NOLOGO: true
@@ -32,38 +23,88 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - name: Find solution
-        id: find
-        run: |
-          sln=$(find . -maxdepth 3 -name '*.sln' | head -n1)
-          echo "sln=$sln" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
-        if: steps.find.outputs.sln != ''
         with:
-          dotnet-version: '10.0.401'
-      - name: Restore & build (Release, analyzers as errors)
-        if: steps.find.outputs.sln != ''
-        run: |
-          dotnet restore "${{ steps.find.outputs.sln }}"
-          dotnet build "${{ steps.find.outputs.sln }}" -c Release \
-            -warnaserror -p:TreatWarningsAsErrors=true -p:Nullable=enable
-      - name: No solution yet
-        if: steps.find.outputs.sln == ''
-        run: |
-          echo "::notice::No .sln found yet - build-and-analyzers has nothing to build. This is a bootstrap placeholder (see T01/T02)."
+          dotnet-version: 10.0.401
+          cache: true
+          cache-dependency-path: '**/packages.lock.json'
+      - name: Release build, analyzers, and formatting
+        run: sh tools/validate.sh build
 
   architecture:
     name: architecture
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - name: Architecture boundary checks (placeholder)
-        run: |
-          if [ -d src ]; then
-            echo "::error::Architecture tests are not scaffolded yet but src/ exists. Implement T02 dependency-rule tests before merging real code."
-            exit 1
-          fi
-          echo "::notice::No src/ yet - architecture job is a bootstrap placeholder (see T02)."
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: 10.0.401
+          cache: true
+          cache-dependency-path: '**/packages.lock.json'
+      - name: Enforce project and compiled dependency boundaries
+        run: sh tools/validate.sh architecture
+
+  unit-tests:
+    name: unit-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: 10.0.401
+          cache: true
+          cache-dependency-path: '**/packages.lock.json'
+      - name: Run unit tests and collect coverage
+        run: sh tools/validate.sh unit
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: unit-coverage
+          path: artifacts/coverage/unit/
+          if-no-files-found: error
+          retention-days: 3
+
+  integration-tests:
+    name: integration-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: 10.0.401
+          cache: true
+          cache-dependency-path: '**/packages.lock.json'
+      - name: Run SQLite and Web integration tests and collect coverage
+        run: sh tools/validate.sh integration
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: integration-coverage
+          path: artifacts/coverage/integration/
+          if-no-files-found: error
+          retention-days: 3
+
+  coverage:
+    name: coverage
+    needs: [unit-tests, integration-tests]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: 10.0.401
+          cache: true
+          cache-dependency-path: '**/packages.lock.json'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: unit-coverage
+          path: artifacts/coverage/unit/
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: integration-coverage
+          path: artifacts/coverage/integration/
+      - name: Enforce coverage, report, and discovery gates
+        run: sh tools/validate.sh coverage artifacts/coverage/unit artifacts/coverage/integration
 
   sdk-contracts-platform:
     name: sdk-contracts-platform (${{ matrix.os }})
@@ -72,18 +113,18 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-14]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         with:
-          dotnet-version: '10.0.401'
-      - name: Restore locked SDK validation harness
-        run: dotnet restore tools/sdk-validation/SdkValidation.csproj --locked-mode
-      - name: Build SDK validation harness
-        run: dotnet build tools/sdk-validation/SdkValidation.csproj -c Release --no-restore -warnaserror -p:TreatWarningsAsErrors=true
-      - name: Run real Copilot runtime contracts
-        run: dotnet run --project tools/sdk-validation/SdkValidation.csproj -c Release --no-build --no-restore -- --contracts
+          dotnet-version: 10.0.401
+          cache: true
+          cache-dependency-path: '**/packages.lock.json'
+      - name: Run actual pinned SDK contracts and solution contract tests
+        run: sh tools/validate.sh sdk-contracts
+      - name: Verify Aspire Simulator process and external endpoint behavior
+        run: sh tools/validate.sh aspire-e2e
       - name: Verify loopback-only Linux runtime containment
         if: runner.os == 'Linux'
         run: |
@@ -108,85 +149,54 @@ jobs:
             exit 1
           fi
 
-  unit-tests:
-    name: unit-tests
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - name: Find solution
-        id: find
-        run: |
-          sln=$(find . -maxdepth 3 -name '*.sln' | head -n1)
-          echo "sln=$sln" >> "$GITHUB_OUTPUT"
-      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
-        if: steps.find.outputs.sln != ''
-        with:
-          dotnet-version: '10.0.401'
-      - name: Run unit tests
-        if: steps.find.outputs.sln != ''
-        run: dotnet test "${{ steps.find.outputs.sln }}" -c Release --filter Category=Unit
-      - name: No solution yet
-        if: steps.find.outputs.sln == ''
-        run: echo "::notice::No .sln found yet - unit-tests bootstrap placeholder."
-
-  integration-tests:
-    name: integration-tests
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - name: Find solution
-        id: find
-        run: |
-          sln=$(find . -maxdepth 3 -name '*.sln' | head -n1)
-          echo "sln=$sln" >> "$GITHUB_OUTPUT"
-      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
-        if: steps.find.outputs.sln != ''
-        with:
-          dotnet-version: '10.0.401'
-      - name: Run integration tests (SQLite/HTTP, no live cloud/household creds)
-        if: steps.find.outputs.sln != ''
-        run: dotnet test "${{ steps.find.outputs.sln }}" -c Release --filter Category=Integration
-      - name: No solution yet
-        if: steps.find.outputs.sln == ''
-        run: echo "::notice::No .sln found yet - integration-tests bootstrap placeholder."
-
-  coverage:
-    name: coverage
-    needs: [unit-tests, integration-tests]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - name: Coverage gate (placeholder)
-        run: |
-          echo "::notice::Coverage thresholds from AGENTS.md (90/85 unit, 85/75 combined, etc.) will be enforced once T02 selects the runner/collector."
-
   aspire-e2e:
     name: aspire-e2e
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - name: Aspire Simulator/E2E profile (placeholder)
-        run: |
-          echo "::notice::Aspire AppHost does not exist yet - aspire-e2e bootstrap placeholder (see T02)."
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: 10.0.401
+          cache: true
+          cache-dependency-path: '**/packages.lock.json'
+      - name: Launch and exercise the isolated Aspire E2E profile
+        run: sh tools/validate.sh aspire-e2e
 
   browser-e2e:
     name: browser-e2e
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - name: Playwright E2E (placeholder)
-        run: |
-          echo "::notice::No Web project/Playwright suite yet - browser-e2e bootstrap placeholder."
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: 10.0.401
+          cache: true
+          cache-dependency-path: '**/packages.lock.json'
+      - name: Run Playwright browser smoke and failure-probe gates
+        run: sh tools/validate.sh browser-e2e
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: playwright-artifacts
+          path: artifacts/playwright/
+          if-no-files-found: ignore
+          retention-days: 3
 
   docs:
     name: docs
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - name: Lint markdown links
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: 10.0.401
+          cache: true
+          cache-dependency-path: '**/packages.lock.json'
+      - name: Validate local Markdown links
+        run: sh tools/validate.sh docs
+      - name: Validate remote Markdown links
         uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2
         with:
-          args: >-
-            --no-progress
-            '**/*.md'
+          args: --no-progress '**/*.md'
           fail: true
