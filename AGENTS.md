@@ -77,11 +77,13 @@ T02 proves that low coverage, an architecture violation fixture, a failed browse
 
 ## PR review and integration
 
-Implementer: record the task plan, implement tests/docs with the change, run required scripts and self-review the diff. Open PRs within the owner's established development authorization. Describe the concrete problem and resulting behavior, scope/spec IDs, actual checks/results, migrations and limitations. Do not attach unrelated cleanup.
+This is a solo personal project: the owner is the only human, and every PR — whether pushed directly by the owner or produced by an agent session — is authenticated as the owner's own GitHub identity. GitHub never allows a PR author to approve their own PR, so a mandatory reviewer-approval gate is not achievable here and branch protection does not require one. Do not reintroduce a required-approving-review-count or treat its absence as a gap to silently work around.
 
-Reviewer: use an independent review context, inspect the task, merge base and actual diff rather than relying on the author's summary. Check correctness, scope, architecture, concurrency, idempotency, uncertain outcomes, context/permissions, privacy, upgrade preservation, dependencies, tests and documentation. Run relevant validation. Findings include severity, location, evidence and practical correction; distinguish blocking defects from optional preferences.
+Implementer (owner or agent): record the task plan, implement tests/docs with the change, run required scripts and self-review the diff. Describe the concrete problem and resulting behavior, scope/spec IDs, actual checks/results, migrations and limitations. Do not attach unrelated cleanup.
 
-Resolve findings, rerun gates and review the revised HEAD. Approval applies to the exact revision being merged or merge-queue result. Author self-review is not independent review. An agent's Markdown “LGTM” is not an eligible GitHub approval. If the configured reviewer identity cannot approve, leave the PR ready for owner/eligible reviewer approval without impersonation or disabling protection. Merge only under established authorization and repository rules.
+Human sign-off is enforced procedurally instead of by a GitHub-approval gate: an agent session must never merge a PR, enable auto-merge, or enqueue it into a merge queue on its own initiative, regardless of how green its checks are. Only the owner's explicit action — clicking Merge, or an explicit live instruction to an agent to do so — lands a PR. Required CI checks and conversation resolution remain mandatory gates and must not be weakened or bypassed to go green.
+
+Before merging anything non-trivial, the owner reviews the actual diff (not just the agent's summary) for correctness, scope, architecture, concurrency, idempotency, uncertain physical outcomes, context/permissions, privacy, upgrade preservation, dependencies, tests and documentation. An agent's own "LGTM" is never a substitute for this. Never silently lower thresholds or protection; any authorized emergency exception is narrow, documented, audited and time-bounded.
 
 ## CI enforcement
 
@@ -89,7 +91,7 @@ Implement stable required checks: `build-and-analyzers`, `architecture`, `unit-t
 
 Run Linux checks for every code PR, plus native macOS checks for process launch, OS paths/secrets, external endpoint or packaging changes. Docs-only classification may skip runtime suites explicitly, but docs/workflow-policy results remain required. CI, dependencies, AppHost profiles and enforcement changes run the full relevant gates. Required checks must not pass accidentally on skipped jobs, absent reports or omitted paths; test the protection configuration before M1 release.
 
-Configure CODEOWNERS for contracts, policy boundaries, migrations and CI with eligible owners. Administrators must enable branch protection/rulesets requiring independent approval, resolved conversations and current checks. Writing instructions does not enable these controls. Never silently lower thresholds or protection; any authorized emergency exception is narrow, documented, audited and time-bounded.
+Configure CODEOWNERS for contracts, policy boundaries, migrations and CI for documentation/reference purposes; it does not gate merges here since there is no second reviewer to assign. The owner enables branch protection requiring passing required checks, resolved conversations, no force-push/deletion of `main`, and — per "PR review and integration" above — relies on the never-self-merge rule rather than a reviewer-approval count to keep a human in the loop. Writing instructions does not enable these controls. Never silently lower thresholds or protection; any authorized emergency exception is narrow, documented, audited and time-bounded.
 
 ## Handoff
 

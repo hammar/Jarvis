@@ -1,8 +1,9 @@
 # CODEOWNERS
 #
-# AGENTS.md requires CODEOWNERS coverage for contracts, policy boundaries,
-# migrations, and CI. Update the owners below as the team grows; today the
-# repository owner is the sole eligible reviewer.
+# This is a solo personal project with one human (the repo owner) and no
+# second reviewer, so this file is documentation of area ownership, not a
+# merge-blocking gate — branch protection does not require code owner
+# review. Update the owners below if this ever becomes a multi-person repo.
 #
 # Order matters: later patterns override earlier ones.
 
