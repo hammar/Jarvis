@@ -103,6 +103,27 @@ internal sealed class CoverageMetrics
         Branches.UnionWith(other.Branches);
         CoveredBranches.UnionWith(other.CoveredBranches);
     }
+
+    internal CoverageMetrics SelectFile(string path)
+    {
+        var result = new CoverageMetrics();
+        var fullPath = Path.GetFullPath(path);
+        var comparison = OperatingSystem.IsWindows()
+            ? StringComparison.OrdinalIgnoreCase
+            : StringComparison.Ordinal;
+        foreach (var line in Lines.Where(line => string.Equals(line.File, fullPath, comparison)))
+        {
+            result.AddLine(line, CoveredLines.Contains(line));
+        }
+
+        var branchPrefix = fullPath + ":";
+        foreach (var branch in Branches.Where(branch => branch.StartsWith(branchPrefix, comparison)))
+        {
+            result.AddBranch(branch, CoveredBranches.Contains(branch));
+        }
+
+        return result;
+    }
 }
 
 internal static class CoverageGate
@@ -115,6 +136,7 @@ internal static class CoverageGate
         "PersonalAgent.Web",
         "PersonalAgent.ServiceDefaults"
     ];
+    private const string CriticalJournalSource = "src/PersonalAgent.Infrastructure/Persistence/SqliteJournalStore.cs";
 
     internal static void RunSelfTests()
     {
@@ -157,6 +179,45 @@ internal static class CoverageGate
         }
 
         ExpectFailure(() => EnforceThreshold("low branch coverage fixture", lowBranchCoverage, 90, 85));
+
+        var criticalJournal = new CoverageMetrics();
+        for (var line = 1; line <= 100; line++)
+        {
+            criticalJournal.AddLine(new CoverageLine("critical-journal.cs", line), covered: true);
+        }
+
+        for (var branch = 1; branch <= 20; branch++)
+        {
+            criticalJournal.AddBranch($"critical-journal.cs:1:{branch}", covered: true);
+        }
+
+        EnforceThreshold("critical journal passing fixture", criticalJournal, 95, 90, allowNoLines: false);
+        var lowCriticalLine = new CoverageMetrics();
+        for (var line = 1; line <= 100; line++)
+        {
+            lowCriticalLine.AddLine(new CoverageLine("critical-journal.cs", line), line <= 94);
+        }
+
+        for (var branch = 1; branch <= 20; branch++)
+        {
+            lowCriticalLine.AddBranch($"critical-journal.cs:1:{branch}", covered: true);
+        }
+
+        ExpectFailure(() => EnforceThreshold(
+            "critical journal low-line fixture", lowCriticalLine, 95, 90, allowNoLines: false));
+        var lowCriticalBranch = new CoverageMetrics();
+        for (var line = 1; line <= 100; line++)
+        {
+            lowCriticalBranch.AddLine(new CoverageLine("critical-journal.cs", line), covered: true);
+        }
+
+        for (var branch = 1; branch <= 20; branch++)
+        {
+            lowCriticalBranch.AddBranch($"critical-journal.cs:1:{branch}", branch <= 17);
+        }
+
+        ExpectFailure(() => EnforceThreshold(
+            "critical journal low-branch fixture", lowCriticalBranch, 95, 90, allowNoLines: false));
         ExpectFailure(() => RequireReports([], "missing report fixture"));
         ExpectFailure(() => TestResults.VerifyDiscoveryXml(
             XDocument.Parse("<TestRun><ResultSummary><Counters total=\"0\" executed=\"0\" passed=\"0\" failed=\"0\" /></ResultSummary></TestRun>"),
@@ -216,6 +277,9 @@ internal static class CoverageGate
         }
 
         EnforceThreshold("combined unit + integration runtime", runtime, 85, 75, allowNoLines: false);
+        var criticalJournal = combined.Assemblies["PersonalAgent.Infrastructure"]
+            .SelectFile(Path.Combine(root, CriticalJournalSource));
+        EnforceThreshold("critical approval/action/audit journal", criticalJournal, 95, 90, allowNoLines: false);
         EnforceChangedLineThreshold(root, combined.AllAssemblies);
 
         Console.WriteLine("Coverage thresholds passed. Totals use unique source lines and branch conditions.");

@@ -147,25 +147,41 @@ public sealed class SqliteDatabase
         }
 
         Directory.CreateDirectory(Path.GetDirectoryName(DatabasePath)!);
-        await using var source = new SqliteConnection(new SqliteConnectionStringBuilder
+        var temporary = $"{DatabasePath}.{Guid.NewGuid():N}.restore";
+        try
         {
-            DataSource = sourcePath,
-            Mode = SqliteOpenMode.ReadOnly,
-            Pooling = false,
-            DefaultTimeout = 10
-        }.ToString());
-        await source.OpenAsync(cancellationToken);
-        await VerifyDatabaseAsync(source, cancellationToken);
-        cancellationToken.ThrowIfCancellationRequested();
+            await using (var source = new SqliteConnection(new SqliteConnectionStringBuilder
+            {
+                DataSource = sourcePath,
+                Mode = SqliteOpenMode.ReadOnly,
+                Pooling = false,
+                DefaultTimeout = 10
+            }.ToString()))
+            await using (var target = new SqliteConnection(new SqliteConnectionStringBuilder
+            {
+                DataSource = temporary,
+                Mode = SqliteOpenMode.ReadWriteCreate,
+                Pooling = false,
+                DefaultTimeout = 10
+            }.ToString()))
+            {
+                await source.OpenAsync(cancellationToken);
+                await VerifyDatabaseAsync(source, cancellationToken);
+                await target.OpenAsync(cancellationToken);
+                source.BackupDatabase(target);
+                await VerifyDatabaseAsync(target, cancellationToken);
+            }
 
-        await using var target = new SqliteConnection(connectionString);
-        await target.OpenAsync(cancellationToken);
-        source.BackupDatabase(target);
-        await VerifyDatabaseAsync(target, cancellationToken);
-
-        if (cancellationToken.IsCancellationRequested)
+            cancellationToken.ThrowIfCancellationRequested();
+            await CheckpointBeforeReplacementAsync(cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            DeleteIfExists($"{DatabasePath}-wal");
+            DeleteIfExists($"{DatabasePath}-shm");
+            File.Move(temporary, DatabasePath, overwrite: true);
+        }
+        finally
         {
-            throw new OperationCanceledException(cancellationToken);
+            DeleteIfExists(temporary);
         }
     }
 
@@ -222,10 +238,10 @@ public sealed class SqliteDatabase
         await using (var integrity = connection.CreateCommand())
         {
             integrity.CommandText = "PRAGMA integrity_check;";
-            await using var reader = await integrity.ExecuteReaderAsync(cancellationToken);
-            while (await reader.ReadAsync(cancellationToken))
+            await using var integrityReader = await integrity.ExecuteReaderAsync(cancellationToken);
+            while (await integrityReader.ReadAsync(cancellationToken))
             {
-                var result = reader.GetString(0);
+                var result = integrityReader.GetString(0);
                 if (!string.Equals(result, "ok", StringComparison.OrdinalIgnoreCase))
                 {
                     throw new InvalidDataException($"SQLite integrity check failed: {result}");
@@ -263,6 +279,52 @@ public sealed class SqliteDatabase
         }
 
         await ValidateSchemaAsync(connection, version, cancellationToken);
+    }
+
+    private async Task CheckpointBeforeReplacementAsync(CancellationToken cancellationToken)
+    {
+        if (!File.Exists(DatabasePath))
+        {
+            return;
+        }
+
+        try
+        {
+            await using var current = new SqliteConnection(connectionString);
+            await current.OpenAsync(cancellationToken);
+            await using var checkpoint = current.CreateCommand();
+            checkpoint.CommandText = "PRAGMA wal_checkpoint(TRUNCATE);";
+            await using var reader = await checkpoint.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                throw new InvalidDataException("SQLite did not report a WAL checkpoint result.");
+            }
+
+            var busy = reader.GetInt32(0);
+            var logFrames = reader.GetInt32(1);
+            var checkpointedFrames = reader.GetInt32(2);
+            if (busy != 0 || (logFrames >= 0 && checkpointedFrames < logFrames))
+            {
+                throw new IOException("The database WAL could not be fully checkpointed; restore was not applied.");
+            }
+        }
+        catch (SqliteException exception)
+        {
+            if (File.Exists($"{DatabasePath}-wal") && new FileInfo($"{DatabasePath}-wal").Length > 0)
+            {
+                throw new InvalidDataException(
+                    "The current database is unreadable and has a WAL that cannot be safely discarded.",
+                    exception);
+            }
+        }
+    }
+
+    private static void DeleteIfExists(string path)
+    {
+        if (File.Exists(path))
+        {
+            File.Delete(path);
+        }
     }
 
     private static async Task ValidateSchemaAsync(
@@ -327,14 +389,6 @@ public sealed class SqliteDatabase
             {
                 throw new InvalidDataException($"Database schema is missing required object {name}.");
             }
-        }
-    }
-
-    private static void DeleteIfExists(string path)
-    {
-        if (File.Exists(path))
-        {
-            File.Delete(path);
         }
     }
 

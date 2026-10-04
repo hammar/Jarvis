@@ -23,7 +23,7 @@ public sealed class SqlitePersistenceTests
 
         await using var connection = await OpenAsync(file.DatabasePath);
         Assert.Equal("wal", await ScalarAsync(connection, "PRAGMA journal_mode;"));
-        Assert.Equal(2L, Convert.ToInt64(await ScalarAsync(connection, "SELECT MAX(Version) FROM SchemaMigrations;")));
+        Assert.Equal(3L, Convert.ToInt64(await ScalarAsync(connection, "SELECT MAX(Version) FROM SchemaMigrations;")));
         Assert.Equal(1L, Convert.ToInt64(await ScalarAsync(
             connection, "SELECT COUNT(*) FROM pragma_foreign_key_list('Messages');")));
         var tableCount = Convert.ToInt64(await ScalarAsync(
@@ -169,13 +169,19 @@ public sealed class SqlitePersistenceTests
             await command.ExecuteNonQueryAsync();
         }
 
-        await new SqliteDatabase(file.DatabasePath).MigrateAsync();
+        var oldSchemaBackup = Path.Combine(Path.GetDirectoryName(file.DatabasePath)!, "old-schema-backup.db");
+        await database.BackupAsync(oldSchemaBackup);
+        var restoredPath = Path.Combine(Path.GetDirectoryName(file.DatabasePath)!, "restored-old-schema.db");
+        var restoredDatabase = new SqliteDatabase(restoredPath);
+        await restoredDatabase.MigrateAsync();
+        await restoredDatabase.RestoreAsync(oldSchemaBackup);
+        await restoredDatabase.MigrateAsync();
 
-        var results = await new SqliteMemoryStore(new SqliteDatabase(file.DatabasePath), new ControlledClock(Now))
+        var results = await new SqliteMemoryStore(restoredDatabase, new ControlledClock(Now))
             .SearchAsync("blue", 5, CancellationToken.None);
         Assert.Contains(results, fact => fact.Id == factId && fact.Value == "blue");
         Assert.Equal(3L, Convert.ToInt64(await ScalarAtAsync(
-            file.DatabasePath, "SELECT MAX(Version) FROM SchemaMigrations;")));
+            restoredPath, "SELECT MAX(Version) FROM SchemaMigrations;")));
     }
 
     [Fact]
@@ -355,7 +361,7 @@ public sealed class SqlitePersistenceTests
         await conversations.AppendMessageAsync(Message(recentConversation, Now.AddDays(-89)), CancellationToken.None);
         var pendingConversation = ConversationId.New();
         await conversations.AppendMessageAsync(Message(pendingConversation, Now.AddDays(-91)), CancellationToken.None);
-        await using (var connection = await database.OpenConnectionAsync(CancellationToken.None))
+        await using (var connection = await OpenAsync(file.DatabasePath))
         await using (var command = connection.CreateCommand())
         {
             command.CommandText = """
@@ -364,7 +370,7 @@ public sealed class SqlitePersistenceTests
                 """;
             command.Parameters.AddWithValue("$turnId", TurnId.New().Value.ToString("D"));
             command.Parameters.AddWithValue("$conversationId", pendingConversation.Value.ToString("D"));
-            command.Parameters.AddWithValue("$createdAt", SqliteDatabase.FormatUtc(Now.AddDays(-91)));
+            command.Parameters.AddWithValue("$createdAt", Now.AddDays(-91).ToString("O"));
             await command.ExecuteNonQueryAsync();
         }
 
@@ -472,7 +478,7 @@ public sealed class SqlitePersistenceTests
         Assert.Equal("Unknown", await TextAsync(
             file.DatabasePath, "SELECT Status FROM JobRuns WHERE JobId = $id;", ("$id", jobId.Value.ToString("D"))));
         Assert.Equal(1L, Convert.ToInt64(await TextAsync(
-            file.DatabasePath, "SELECT COUNT(*) FROM JobRuns WHERE JobId = $id;", ("$id", jobId.Value.ToString("D"))));
+            file.DatabasePath, "SELECT COUNT(*) FROM JobRuns WHERE JobId = $id;", ("$id", jobId.Value.ToString("D")))));
         Assert.Null(await store.ClaimDueAsync("worker-4", Now.AddMinutes(5), TimeSpan.FromMinutes(1), CancellationToken.None));
         await Assert.ThrowsAsync<ArgumentException>(async () =>
             await store.CompleteAsync(retry!, "unexpected", CancellationToken.None));
