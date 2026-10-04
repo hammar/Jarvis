@@ -67,6 +67,9 @@ case "$COMMAND" in
     run_test tests/PersonalAgent.IntegrationTests/PersonalAgent.IntegrationTests.csproj Integration \
       "$INTEGRATION_RESULTS" integration.trx \
       --collect "XPlat Code Coverage" --settings tools/coverage.runsettings
+    run_test tests/PersonalAgent.SdkContractTests/PersonalAgent.SdkContractTests.csproj Integration \
+      "$INTEGRATION_RESULTS/copilot-adapter" copilot-adapter.trx \
+      --collect "XPlat Code Coverage" --settings tools/coverage.runsettings
     ;;
   architecture)
     restore_solution

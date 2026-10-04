@@ -7,7 +7,7 @@
 | Unit | `PersonalAgent.UnitTests` / `unit-tests` | Domain and Application contracts without network or real clocks. |
 | Architecture | `PersonalAgent.ArchitectureTests` / `architecture` | Direct project references, compiled dependency boundaries, Copilot confinement, and Web composition exception. |
 | Integration | `PersonalAgent.IntegrationTests` / `integration-tests` | Real isolated SQLite and in-process Web HTTP composition. |
-| SDK contract | `tools/sdk-validation` / `sdk-contracts` | Actual pinned Copilot runtime contracts, credential-free on Linux and macOS. |
+| SDK contract | `tools/sdk-validation` and `PersonalAgent.SdkContractTests` / `sdk-contracts` | Actual pinned Copilot runtime checks against deterministic loopback endpoints, credential-free on Linux and macOS. |
 | Aspire E2E | `PersonalAgent.E2ETests` / `aspire-e2e` | Out-of-process AppHost Web and managed deterministic endpoints; temporary data is isolated. |
 | Browser E2E | `PersonalAgent.E2ETests` / `browser-e2e` | Playwright drives the Razor page through the Aspire resource endpoint. |
 
@@ -34,9 +34,10 @@ no coverable lines fail, and branch coverage is N/A only when a module has no
 coverable branches. Thresholds apply as executable production code is
 introduced; compiler-generated record boilerplate is excluded by attribute,
 while handwritten code remains covered. E2E execution is not counted as
-in-process coverage. No broad Infrastructure exclusion is allowed: the
-currently empty Infrastructure assembly activates its per-assembly 80%/70%
-requirement as soon as it contains handwritten C#.
+in-process coverage. No broad Infrastructure exclusion is allowed. The
+Copilot adapter's actual-runtime contracts also run as Integration tests with
+Coverlet so its handwritten runtime code is counted toward the Infrastructure
+80%/70% threshold.
 
 The `gate-self-test` operation runs low-line, low-branch, empty-coverage,
 missing-report, and zero-discovery fixtures through the same validator used by CI. Architecture
@@ -60,5 +61,16 @@ reported as a failure.
 | Missing discovery/report/low coverage fails | `PersonalAgent.Validation gate-self-test` |
 | Browser test failure is visible | `BrowserSmokeTests.DeliberatelyIncorrectBrowserAssertionFails` probe |
 
-The full MVP acceptance matrix is added as T03–T12 features land; a passing
-scaffold is not a claim that those unimplemented scenarios are covered.
+| T04 explicit route, transcript isolation, tool dispatch and streaming | `CopilotAgentEngineContractTests.AdapterStreamsExplicitRoutesAndDispatchesOnlyTheRegisteredTool` (actual runtime; run by `integration-tests` and `sdk-contracts`) |
+| T04 cancellation, runtime crash/restart, exactly-one terminal event, and host tool budget | `CopilotAgentEngineContractTests` lifecycle and budget contracts |
+| T04 sequenced replay after a simulated subscriber disconnect | `CopilotTurnStateTests.ReplayingAfterDisconnectReturnsOrderedEventsWithoutRepeatingTerminalOutcome` |
+
+The adapter contracts run the real pinned runtime and replace only the model
+endpoint with a deterministic loopback fixture. T01's `--contracts` suite
+continues to verify hostile ambient configuration, process lifecycle and SDK
+limits; neither suite uses GitHub login, cloud credentials, Ollama or household
+services. T04 sequence replay is in-memory only: durable event persistence and
+HTTP/SSE reconnection remain application responsibilities for T10.
+
+The full MVP acceptance matrix continues as T03–T12 features land; passing the
+implemented scenarios is not a claim that unimplemented scenarios are covered.

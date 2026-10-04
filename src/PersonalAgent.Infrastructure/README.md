@@ -10,8 +10,11 @@ directory, empty mode, no ambient user login and a replaced, allowlisted child
 environment. The host enforces tool-call and elapsed-time limits, streams
 sequenced events, and reports one terminal outcome. Copilot session state is
 ephemeral; durable conversations and replay history belong to application
-storage. Per T01, child-process death may not promptly complete an SDK wait, so
-the adapter must keep a deadline and force-stop an unresponsive runtime.
+storage. Local inference endpoints must be loopback; cloud endpoints use HTTPS
+(loopback HTTP is permitted for deterministic contract fixtures). API keys are
+resolved from host secret references and are never forwarded through the child
+environment. Per T01, child-process death may not promptly complete an SDK
+wait, so the adapter keeps a deadline and force-stops an unresponsive runtime.
 Native OS network containment is not claimed; see ADR 0001 and
 [the T01 validation report](../../docs/sdk-validation.md).
 

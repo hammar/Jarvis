@@ -267,6 +267,7 @@ public sealed class CopilotAgentEngine : IAgentEngine, IAsyncDisposable
         }
         catch (TimeoutException)
         {
+            turn.Cancel();
             turn.Terminate(
                 TurnStatus.Interrupted,
                 new TurnInterrupted(request.TurnId, _clock.UtcNow, "engine_timeout"));
@@ -283,7 +284,13 @@ public sealed class CopilotAgentEngine : IAgentEngine, IAsyncDisposable
             {
                 if (token.IsCancellationRequested && session is not null)
                 {
-                    await session.AbortAsync().WaitAsync(AbortGracePeriod).ConfigureAwait(false);
+                    try
+                    {
+                        await session.AbortAsync().WaitAsync(AbortGracePeriod).ConfigureAwait(false);
+                    }
+                    catch (IOException) when (token.IsCancellationRequested)
+                    {
+                    }
                 }
 
                 if (client is not null)
@@ -418,29 +425,47 @@ public sealed class CopilotAgentEngine : IAgentEngine, IAsyncDisposable
             throw new ArgumentException("A runtime data directory is required.", nameof(options));
         }
 
-        ValidateProvider(options.LocalProvider, nameof(options.LocalProvider), requireSecret: false);
-        ValidateProvider(options.CloudProvider, nameof(options.CloudProvider), requireSecret: true);
+        ValidateProvider(
+            options.LocalProvider,
+            nameof(options.LocalProvider),
+            requireSecret: false,
+            requireLoopback: true);
+        ValidateProvider(
+            options.CloudProvider,
+            nameof(options.CloudProvider),
+            requireSecret: true,
+            requireLoopback: false);
         Directory.CreateDirectory(Path.GetFullPath(options.RuntimeDataDirectory));
     }
 
     private static void ValidateProvider(
         CopilotProviderSettings provider,
         string parameterName,
-        bool requireSecret)
+        bool requireSecret,
+        bool requireLoopback)
     {
         ArgumentNullException.ThrowIfNull(provider);
-        if (!provider.BaseUrl.IsAbsoluteUri ||
+        if (provider.BaseUrl is null ||
+            !provider.BaseUrl.IsAbsoluteUri ||
             provider.BaseUrl.Scheme is not ("http" or "https") ||
+            (requireLoopback && !provider.BaseUrl.IsLoopback) ||
+            (!requireLoopback && provider.BaseUrl.Scheme != "https" && !provider.BaseUrl.IsLoopback) ||
+            !string.IsNullOrEmpty(provider.BaseUrl.UserInfo) ||
+            !string.IsNullOrEmpty(provider.BaseUrl.Query) ||
+            !string.IsNullOrEmpty(provider.BaseUrl.Fragment) ||
             string.IsNullOrWhiteSpace(provider.Model) ||
-            (requireSecret && provider.ApiKeyReference is null))
+            (requireSecret && string.IsNullOrWhiteSpace(provider.ApiKeyReference?.Name)))
         {
-            throw new ArgumentException("Provider configuration must specify an absolute HTTP(S) URL, model, and required secret reference.", parameterName);
+            throw new ArgumentException(
+                "Provider configuration must specify a safe absolute endpoint, model, and required secret reference; local endpoints must use loopback.",
+                parameterName);
         }
     }
 
     private static void ValidateRequest(AgentTurnRequest request)
     {
         if (request.TurnId.Value == Guid.Empty ||
+            !Enum.IsDefined(request.Provider) ||
             string.IsNullOrWhiteSpace(request.Instructions) ||
             request.Deadline <= TimeSpan.Zero ||
             request.MaximumToolCalls < 0 ||

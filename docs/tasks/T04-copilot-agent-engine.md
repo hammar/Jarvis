@@ -30,8 +30,11 @@ events.
 
 - `src/PersonalAgent.Infrastructure/AgentEngine/Copilot/`
 - `src/PersonalAgent.Application/Contracts.cs` (event sequence metadata)
+- `src/PersonalAgent.Application/TurnStatusGate.cs`
+- `src/PersonalAgent.Application/TurnEventSequencer.cs`
 - `tests/PersonalAgent.SdkContractTests/`
 - `tests/PersonalAgent.UnitTests/`
+- `tools/validate.sh` (include actual-runtime adapter tests in integration coverage)
 - `docs/tasks/T04-copilot-agent-engine.md`
 - `src/PersonalAgent.Infrastructure/README.md`
 - `docs/testing.md`
@@ -43,6 +46,8 @@ events.
 - `IAgentEngine` receives host-approved context and provider choice. Durable
   conversations and replay persistence remain application-owned and are not
   stored in Copilot sessions.
+- In-process replay tests establish sequence/cursor behavior; durable event
+  persistence and browser reconnect handling remain T10 responsibilities.
 - SDK process death may not promptly complete a pending turn; T01 requires a
   host deadline and explicit runtime stop/restart behavior.
 
@@ -53,6 +58,8 @@ events.
   subscriber disconnect.
 - Run `tools/validate.sh sdk-contracts` against the actual pinned runtime and a
   deterministic loopback model endpoint.
+- Run `tools/validate.sh integration` so the adapter runtime code contributes
+  to Infrastructure coverage.
 - Update the Infrastructure README and testing guide with isolation guarantees,
   SDK limitations, and actual commands/results.
 

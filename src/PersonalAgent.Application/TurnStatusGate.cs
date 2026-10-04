@@ -1,6 +1,6 @@
 using PersonalAgent.Domain;
 
-namespace PersonalAgent.Infrastructure.AgentEngine.Copilot;
+namespace PersonalAgent.Application;
 
 /// <summary>Provides atomic in-process state transitions for one non-durable engine turn.</summary>
 internal sealed class TurnStatusGate
