@@ -1,0 +1,29 @@
+# CODEOWNERS
+#
+# AGENTS.md requires CODEOWNERS coverage for contracts, policy boundaries,
+# migrations, and CI. Update the owners below as the team grows; today the
+# repository owner is the sole eligible reviewer.
+#
+# Order matters: later patterns override earlier ones.
+
+# Default owner for everything not matched below.
+*                                   @hammar
+
+# Agent/process instructions and specification — changes here redefine scope
+# and acceptance, so they need deliberate review.
+/AGENTS.md                         @hammar
+/docs/Personal-Agent-Project-Spec.md @hammar
+/docs/adr/                         @hammar
+
+# CI, workflow policy, and branch/repo configuration.
+/.github/                          @hammar
+
+# Shared contracts and policy/approval boundaries (paths to refine once the
+# solution is scaffolded in T02, e.g. src/Domain, src/Application contracts,
+# policy and approval modules).
+/src/**/Contracts/                 @hammar
+/src/**/Policy/                    @hammar
+/src/**/Approval/                  @hammar
+
+# Database/schema migrations.
+/src/**/Migrations/                @hammar
