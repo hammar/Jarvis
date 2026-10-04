@@ -64,12 +64,13 @@ instructions.
 - **Status: implementation complete.** Local validation on 2026-10-04:
   - `tools/validate.sh build` — Release build, analyzers, and formatting passed.
   - `tools/validate.sh unit` — 7 tests passed.
-  - `tools/validate.sh integration` — 18 real SQLite/Web integration tests passed.
+  - `tools/validate.sh integration` — 22 real SQLite/Web integration tests passed.
   - `tools/validate.sh architecture` — 6 boundary tests passed.
   - `tools/validate.sh sdk-contracts` — actual pinned runtime contracts and the
     SDK package contract test passed.
-  - `tools/validate.sh coverage` — Infrastructure 99.3% lines / 93.6% branches;
-    overall thresholds, reports, and discovery passed.
+  - `tools/validate.sh coverage` — Infrastructure 98.0% lines / 83.3% branches;
+    critical journal 100% lines / branches; overall thresholds, reports, and
+    discovery passed.
   - `tools/validate.sh docs` — internal Markdown links passed.
 
 The Web composition root and T06/T08/T09 use cases are not wired to the new

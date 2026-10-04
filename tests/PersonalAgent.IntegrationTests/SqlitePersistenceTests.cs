@@ -246,6 +246,74 @@ public sealed class SqlitePersistenceTests
 
     [Fact]
     [Trait("Category", "Integration")]
+    public async Task OnlineBackupIncludesCommittedWalFramesBeforeCheckpoint()
+    {
+        using var files = IsolatedDirectory.Create();
+        var databasePath = Path.Combine(files.Path, "source.db");
+        var database = new SqliteDatabase(databasePath);
+        await database.MigrateAsync();
+        var auditId = Guid.NewGuid();
+        await using (var writer = await OpenAsync(databasePath))
+        {
+            await using (var setup = writer.CreateCommand())
+            {
+                setup.CommandText = "PRAGMA wal_autocheckpoint = 0;";
+                await setup.ExecuteNonQueryAsync();
+            }
+
+            await using var insert = writer.CreateCommand();
+            insert.CommandText = """
+                INSERT INTO AuditEvents(Id, OwnerId, EventType, DetailsJson, OccurredAtUtc)
+                VALUES ($id, 'owner', 'wal-fixture', '{}', $occurredAt);
+                """;
+            insert.Parameters.AddWithValue("$id", auditId.ToString("D"));
+            insert.Parameters.AddWithValue("$occurredAt", Now.ToString("O"));
+            await insert.ExecuteNonQueryAsync();
+            Assert.True(new FileInfo($"{databasePath}-wal").Length > 0);
+
+            var backupPath = Path.Combine(files.Path, "backup.db");
+            await database.BackupAsync(backupPath);
+            Assert.Equal(1L, Convert.ToInt64(await TextAsync(
+                backupPath,
+                "SELECT COUNT(*) FROM AuditEvents WHERE Id = $id;",
+                ("$id", auditId.ToString("D")))));
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task RestoreDoesNotReplaceDatabaseWhenItsWalCannotBeCheckpointed()
+    {
+        using var files = IsolatedDirectory.Create();
+        var targetPath = Path.Combine(files.Path, "target.db");
+        var backupPath = Path.Combine(files.Path, "backup.db");
+        var source = new SqliteDatabase(Path.Combine(files.Path, "source.db"));
+        await source.MigrateAsync();
+        await source.BackupAsync(backupPath);
+        var target = new SqliteDatabase(targetPath);
+        await target.MigrateAsync();
+        var existingMessage = new ConversationMessage(
+            Guid.NewGuid(), ConversationId.New(), "user", "keep committed data", Now);
+        await new SqliteConversationStore(target).AppendMessageAsync(existingMessage, CancellationToken.None);
+
+        await using (var writer = await OpenAsync(targetPath))
+        {
+            await using var begin = writer.CreateCommand();
+            begin.CommandText = "BEGIN IMMEDIATE;";
+            await begin.ExecuteNonQueryAsync();
+            await Assert.ThrowsAsync<IOException>(() => target.RestoreAsync(backupPath));
+            await using var rollback = writer.CreateCommand();
+            rollback.CommandText = "ROLLBACK;";
+            await rollback.ExecuteNonQueryAsync();
+        }
+
+        var retained = await new SqliteConversationStore(new SqliteDatabase(targetPath))
+            .ReadRecentAsync(existingMessage.ConversationId, 5, CancellationToken.None);
+        Assert.Equal(existingMessage, Assert.Single(retained));
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
     public async Task RestoreRejectsUnversionedFutureAndForeignKeyInvalidDatabases()
     {
         using var file = IsolatedDatabaseFile.Create();

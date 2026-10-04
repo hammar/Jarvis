@@ -175,6 +175,7 @@ public sealed class SqliteDatabase
             cancellationToken.ThrowIfCancellationRequested();
             await CheckpointBeforeReplacementAsync(cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
+            // The current main file stays intact until this same-volume replace; only a completed checkpoint makes its WAL disposable.
             DeleteIfExists($"{DatabasePath}-wal");
             DeleteIfExists($"{DatabasePath}-shm");
             File.Move(temporary, DatabasePath, overwrite: true);
@@ -352,6 +353,19 @@ public sealed class SqliteDatabase
 
         foreach (var (table, requiredColumns) in required)
         {
+            await using (var type = connection.CreateCommand())
+            {
+                type.CommandText = "SELECT type FROM sqlite_master WHERE name = $name;";
+                type.Parameters.AddWithValue("$name", table);
+                if (!string.Equals(
+                    Convert.ToString(await type.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture),
+                    "table",
+                    StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidDataException($"Database schema is missing required table {table}.");
+                }
+            }
+
             await using var command = connection.CreateCommand();
             command.CommandText = $"PRAGMA table_info(\"{table}\");";
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);

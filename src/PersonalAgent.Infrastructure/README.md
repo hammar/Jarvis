@@ -26,9 +26,12 @@ tools/validate.sh integration
 
 `BackupAsync` uses SQLite's online backup API. Before calling `RestoreAsync`,
 stop workers and close all connections to the target database. The method
-validates the backup's integrity and schema before replacing the database.
-Unknown action outcomes are persisted as journal state; restore does not
-dispatch or replay actions.
+validates migration history and required schema, stages the backup, checkpoints
+the current WAL, and atomically replaces the main file. An unreadable target
+with a nonempty WAL is rejected because it cannot safely establish that
+committed transactions are captured. File and symlink-parent aliases are
+rejected. Unknown action outcomes are persisted as journal state; restore does
+not dispatch or replay actions.
 
 ## Tests
 

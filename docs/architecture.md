@@ -56,8 +56,13 @@ Application exposes SQLite types.
 Connections enable foreign keys and WAL. UTC instants use invariant round-trip
 text, versioned writes use SQL compare-and-swap, and FTS5 indexes memory fields.
 Online backup/restore uses SQLite's backup API and validates integrity before
-replacement. Restore requires stopped workers and closed database connections;
-unknown action states remain data and are never replayed by storage.
+replacement. Restore validates migration history and required schema, stages
+the backup, checkpoints the current WAL before replacing the main file, and
+rejects unreadable databases with a nonempty WAL. Restore requires stopped
+workers and closed database connections; unknown action states remain data and
+are never replayed by storage. Expiring conversation transcripts replaces
+matching fact source-message IDs with `redacted:conversation-retention` in the
+same transaction, preserving the facts without dangling transcript references.
 
 Conversation retention defaults to 90 days of inactivity and audit retention
 to 30 days. Validated positive owner overrides are supported. Retention removes

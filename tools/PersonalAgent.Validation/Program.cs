@@ -277,9 +277,15 @@ internal static class CoverageGate
         }
 
         EnforceThreshold("combined unit + integration runtime", runtime, 85, 75, allowNoLines: false);
-        var criticalJournal = combined.Assemblies["PersonalAgent.Infrastructure"]
-            .SelectFile(Path.Combine(root, CriticalJournalSource));
+        var criticalJournalPath = Path.Combine(root, CriticalJournalSource);
+        if (!File.Exists(criticalJournalPath))
+        {
+            throw new ValidationException($"Critical journal coverage source is missing: {CriticalJournalSource}.");
+        }
+
+        var criticalJournal = combined.Assemblies["PersonalAgent.Infrastructure"].SelectFile(criticalJournalPath);
         EnforceThreshold("critical approval/action/audit journal", criticalJournal, 95, 90, allowNoLines: false);
+        Console.WriteLine($"Critical approval/action/audit journal: {Describe(criticalJournal)}");
         EnforceChangedLineThreshold(root, combined.AllAssemblies);
 
         Console.WriteLine("Coverage thresholds passed. Totals use unique source lines and branch conditions.");

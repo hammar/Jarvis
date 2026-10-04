@@ -56,9 +56,13 @@ reported as a failure.
 | Stale optimistic writes are rejected and FTS tracks edits/deletion | `SqlitePersistenceTests.MemoryCompareAndSwapRejectsAStaleVersionWithoutLosingTheNewValue` |
 | Older database data survives an additive schema upgrade | `SqlitePersistenceTests.OlderSchemaUpgradeAddsSearchWithoutChangingExistingFacts` |
 | Online backup restores a corrupted original file | `SqlitePersistenceTests.OnlineBackupRestoresDataAfterTheOriginalFileIsCorrupted` |
+| Online backup includes committed, uncheckpointed WAL frames | `SqlitePersistenceTests.OnlineBackupIncludesCommittedWalFramesBeforeCheckpoint` |
+| Restore rejects incomplete history/schema and preserves the target on validation/checkpoint failure | `SqlitePersistenceTests.RestoreRejectsUnversionedFutureAndForeignKeyInvalidDatabases`, `SqlitePersistenceTests.RestoreDoesNotReplaceDatabaseWhenItsWalCannotBeCheckpointed` |
+| Backup and restore reject symlink-parent path aliases | `SqlitePersistenceTests.BackupAndRestoreRejectSymlinkedPathAliasesWithoutChangingData` |
 | Default and configured retention preserve durable facts/jobs/unknown actions | `SqlitePersistenceTests.DefaultRetentionExpiresOldHistoryAndAuditButPreservesFactsJobsAndUnknownActions`, `SqlitePersistenceTests.OwnerRetentionOverridesExpireOnlyRecordsOutsideTheirWindows` |
-| Journal writes are foreign-key-bound and single-use compare-and-swap | `SqlitePersistenceTests.JournalUpdatesAreOwnerScopedVersionedAndForeignKeyBound` |
-| Job leases and unknown outcomes persist across connections | `SqlitePersistenceTests.JobLeaseIsDurableAndCannotBeCompletedByAStaleWorker` |
+| Journal writes bind approval owner to its action and enforce single-use compare-and-swap | `SqlitePersistenceTests.JournalUpdatesAreOwnerScopedVersionedAndForeignKeyBound` |
+| Concurrent fact updates admit one writer | `SqlitePersistenceTests.ConcurrentMemoryCompareAndSwapAllowsOnlyOneWriter` |
+| Job leases reject stale/expired completion and distinguish retryable from Unknown outcomes | `SqlitePersistenceTests.JobLeaseIsDurableAndCannotBeCompletedByAStaleWorker` |
 | Razor host works without external services | `SqliteAndWebSmokeTests.RazorHostServesTheConfiguredProfileWithoutExternalServices` |
 | Aspire launches Web and discovers deterministic fakes | `AspireSimulatorTests.SimulatorStartsWebAndDiscoversDeterministicManagedEndpoints` |
 | Local and Hybrid use explicit external endpoint configuration | `ExternalEndpointProfileTests.LocalAndHybridProfilesLaunchWithExplicitExternalEndpointReferences` |
@@ -72,3 +76,6 @@ The full MVP acceptance matrix is added as T03–T12 features land; a passing
 scaffold is not a claim that those unimplemented scenarios are covered. T03
 Infrastructure coverage is measured with the combined unit/integration report
 and must meet the first-party assembly target of 80% lines / 70% branches.
+`Persistence/SqliteJournalStore.cs` owns the critical approval/action/audit
+journal invariant filter and is independently held to 95% lines / 90% branches;
+the coverage validator self-test rejects lower line or branch fixtures.
