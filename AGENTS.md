@@ -56,7 +56,7 @@ Document non-obvious internal/private policy, concurrency, recovery and algorith
 
 Use the exact .NET SDK selected by the current `global.json`; it is authoritative over historical task/issue evidence. Preserve the .NET 10 LTS target and keep CI/container SDK pins aligned with `global.json`. SDK refreshes require compatibility validation and documentation; historical version references are not instructions to downgrade.
 
-Use pinned compatible .NET/test tooling: xUnit-compatible tests, Playwright for .NET and Aspire.Hosting.Testing. T02 selects and validates the runner/coverage collector together; do not mix incompatible VSTest and Microsoft.Testing.Platform switches. Create common validation scripts under `tools/`, runnable through `pwsh` on macOS/Linux. CI and local agents use the same scripts and documented prerequisites.
+Use pinned compatible .NET/test tooling: xUnit-compatible tests, Playwright for .NET and Aspire.Hosting.Testing. T02 selects and validates the runner/coverage collector together; do not mix incompatible VSTest and Microsoft.Testing.Platform switches. Create common validation scripts under `tools/` as POSIX shell scripts (`tools/validate.sh`) runnable on macOS/Linux; PowerShell is not used. CI and local agents use the same scripts and documented prerequisites.
 
 Required test layers are unit, real SQLite/HTTP integration, actual Copilot runtime contract, Aspire API E2E and Playwright browser E2E. In-process adapter/API tests may use WebApplicationFactory. Aspire tests launch real processes; do not assume they support replacing application DI after startup. Fake engine tests cannot establish actual SDK compatibility. Live local/cloud/device tests are opt-in and separate from credential-free required checks.
 

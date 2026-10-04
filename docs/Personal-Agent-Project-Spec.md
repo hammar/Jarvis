@@ -451,7 +451,7 @@ Enable XML documentation generation and treat missing required public documentat
 
 ## 20. Test and coverage gates
 
-Use a pinned xUnit-compatible stack, Playwright for .NET browser tests and Aspire.Hosting.Testing for distributed tests. T02 chooses one compatible runner/coverage collector combination and demonstrates collection and threshold failures. Do not copy VSTest MSBuild coverage flags into an MTP setup without validating compatibility. All commands are reproducible through repository scripts in tools/; CI and agents invoke the same scripts. Provide PowerShell scripts runnable through pwsh on macOS/Linux, with prerequisites documented.
+Use a pinned xUnit-compatible stack, Playwright for .NET browser tests and Aspire.Hosting.Testing for distributed tests. T02 chooses one compatible runner/coverage collector combination and demonstrates collection and threshold failures. Do not copy VSTest MSBuild coverage flags into an MTP setup without validating compatibility. All commands are reproducible through repository scripts in tools/; CI and agents invoke the same scripts. Provide POSIX shell scripts (tools/validate.sh) runnable on macOS/Linux, with prerequisites documented; PowerShell is not required.
 
 Test layers:
 
