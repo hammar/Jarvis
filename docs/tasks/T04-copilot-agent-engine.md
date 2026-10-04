@@ -32,7 +32,9 @@ events.
 - `src/PersonalAgent.Application/Contracts.cs` (event sequence metadata)
 - `src/PersonalAgent.Application/TurnStatusGate.cs`
 - `src/PersonalAgent.Application/TurnEventSequencer.cs`
+- `src/PersonalAgent.Application/Properties/AssemblyInfo.cs` (internal test/adapter access)
 - `tests/PersonalAgent.SdkContractTests/`
+- `tests/PersonalAgent.SdkContractTests/packages.lock.json`
 - `tests/PersonalAgent.UnitTests/`
 - `tools/validate.sh` (include actual-runtime adapter tests in integration coverage)
 - `docs/tasks/T04-copilot-agent-engine.md`
@@ -75,3 +77,21 @@ events.
   re-execute tools or duplicate terminal output.
 - Targeted tests and required validation pass, and the reviewed diff contains no
   unrelated changes.
+
+## Validation evidence
+
+- `tools/validate.sh build` — locked restore, formatting and Release build
+  passed with zero warnings/errors.
+- `tools/validate.sh unit` — 9 tests passed, including terminal CAS and replay
+  sequence checks.
+- `tools/validate.sh integration` — 6 SQLite/Web tests and 7 actual-runtime
+  adapter tests passed; SDK adapter tests collect runtime coverage.
+- `tools/validate.sh sdk-contracts` — T01 actual-runtime contracts and 8
+  production adapter contract tests passed.
+- `tools/validate.sh coverage` — gates passed. Infrastructure: 93.1% lines /
+  78.1% branches; Application unit: 100% lines / 100% branches; changed
+  executable lines: 98.0%.
+
+Hosted CI and native macOS execution were not run locally. The T04 runtime
+contracts run against deterministic loopback endpoints; no real Ollama,
+cloud credentials, or household services were used.

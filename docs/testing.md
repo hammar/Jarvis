@@ -6,7 +6,7 @@
 | --- | --- | --- |
 | Unit | `PersonalAgent.UnitTests` / `unit-tests` | Domain and Application contracts without network or real clocks. |
 | Architecture | `PersonalAgent.ArchitectureTests` / `architecture` | Direct project references, compiled dependency boundaries, Copilot confinement, and Web composition exception. |
-| Integration | `PersonalAgent.IntegrationTests` / `integration-tests` | Real isolated SQLite and in-process Web HTTP composition. |
+| Integration | `PersonalAgent.IntegrationTests` and adapter contracts / `integration-tests` | Real isolated SQLite, in-process Web HTTP composition, and actual-runtime Copilot adapter coverage. |
 | SDK contract | `tools/sdk-validation` and `PersonalAgent.SdkContractTests` / `sdk-contracts` | Actual pinned Copilot runtime checks against deterministic loopback endpoints, credential-free on Linux and macOS. |
 | Aspire E2E | `PersonalAgent.E2ETests` / `aspire-e2e` | Out-of-process AppHost Web and managed deterministic endpoints; temporary data is isolated. |
 | Browser E2E | `PersonalAgent.E2ETests` / `browser-e2e` | Playwright drives the Razor page through the Aspire resource endpoint. |
@@ -62,6 +62,7 @@ reported as a failure.
 | Browser test failure is visible | `BrowserSmokeTests.DeliberatelyIncorrectBrowserAssertionFails` probe |
 
 | T04 explicit route, transcript isolation, tool dispatch and streaming | `CopilotAgentEngineContractTests.AdapterStreamsExplicitRoutesAndDispatchesOnlyTheRegisteredTool` (actual runtime; run by `integration-tests` and `sdk-contracts`) |
+| T04 failure-safe provider/request validation and non-streaming final text | `CopilotAgentEngineContractTests.AdapterValidatesProviderAndTurnInputsBeforeInference` and `.ProviderFailureAndNonStreamingFinalTextProduceCleanOutcomes` |
 | T04 cancellation, runtime crash/restart, exactly-one terminal event, and host tool budget | `CopilotAgentEngineContractTests` lifecycle and budget contracts |
 | T04 sequenced replay after a simulated subscriber disconnect | `CopilotTurnStateTests.ReplayingAfterDisconnectReturnsOrderedEventsWithoutRepeatingTerminalOutcome` |
 

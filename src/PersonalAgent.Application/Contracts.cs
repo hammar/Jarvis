@@ -352,7 +352,8 @@ public interface IClock
 public abstract record AgentEvent(TurnId TurnId, DateTimeOffset OccurredAtUtc)
 {
     /// <summary>
-    /// Gets the 1-based, strictly increasing sequence assigned within one turn.
+    /// Gets the 1-based, strictly increasing sequence assigned within one turn;
+    /// zero means an event has not yet passed through the engine sequencer.
     /// Persisted event stores use this value as the reconnect cursor.
     /// </summary>
     public long SequenceNumber { get; init; }
