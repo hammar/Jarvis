@@ -16,6 +16,46 @@ internal static class SdkValidation
     {
         try
         {
+            if (args is ["--diagnose-egress-block"])
+            {
+                using var socket = new System.Net.Sockets.Socket(
+                    System.Net.Sockets.AddressFamily.InterNetwork,
+                    System.Net.Sockets.SocketType.Stream,
+                    System.Net.Sockets.ProtocolType.Tcp);
+                try
+                {
+                    await socket.ConnectAsync(IPAddress.Parse("192.0.2.1"), 443)
+                        .WaitAsync(TimeSpan.FromSeconds(3));
+                }
+                catch (System.Net.Sockets.SocketException exception) when (
+                    exception.SocketErrorCode == System.Net.Sockets.SocketError.NetworkUnreachable)
+                {
+                    Console.WriteLine("PASS deliberate external TCP connection was rejected as network unreachable.");
+                    return 0;
+                }
+                throw new InvalidOperationException("Expected OS-level network-unreachable rejection was not observed.");
+            }
+
+            if (args is ["--diagnose-listener"])
+            {
+                await using var provider = await FakeOpenAiProvider.StartAsync();
+                Console.WriteLine("PASS fixture listener started/disposed without constructing a Copilot client.");
+                return 0;
+            }
+
+            if (args is ["--diagnose-runtime"])
+            {
+                using var fixture = new TemporaryDirectory();
+                var workspace = Path.Combine(fixture.Path, "workspace");
+                Directory.CreateDirectory(workspace);
+                await using var client = CreateClient(Path.Combine(fixture.Path, "runtime"), workspace);
+                await client.StartAsync().WaitAsync(TimeSpan.FromSeconds(15));
+                await client.PingAsync().WaitAsync(TimeSpan.FromSeconds(5));
+                await client.StopAsync().WaitAsync(TimeSpan.FromSeconds(15));
+                Console.WriteLine("PASS isolated runtime startup/ping/shutdown without a provider or fixture listener.");
+                return 0;
+            }
+
             if (args is ["--contracts"])
             {
                 await RunContractAsync();
@@ -48,7 +88,7 @@ internal static class SdkValidation
                 return 0;
             }
 
-            Console.Error.WriteLine("Usage: dotnet run --project tools/sdk-validation -- --contracts|--live-ollama|--live-cloud");
+            Console.Error.WriteLine("Usage: dotnet run --project tools/sdk-validation -- --contracts|--live-ollama|--live-cloud|--diagnose-listener|--diagnose-runtime|--diagnose-egress-block");
             return 2;
         }
         catch (Exception exception)

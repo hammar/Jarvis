@@ -9,6 +9,7 @@ for flags_file in /sys/class/net/*/flags; do
     exit 1
   fi
 done
+dotnet /validation/tools/sdk-validation/bin/Release/net10.0/SdkValidation.dll --diagnose-egress-block
 strace -f -e trace=connect -o /tmp/jarvis-connect.trace \
   dotnet /validation/tools/sdk-validation/bin/Release/net10.0/SdkValidation.dll --contracts
 

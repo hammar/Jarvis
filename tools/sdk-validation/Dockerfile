@@ -8,4 +8,5 @@ COPY tools/sdk-validation/*.cs tools/sdk-validation/
 RUN dotnet build tools/sdk-validation/SdkValidation.csproj -c Release --no-restore -warnaserror
 COPY tools/sdk-validation/check-egress.sh /validation/check-egress.sh
 COPY tools/sdk-validation/check-containment.sh /validation/check-containment.sh
+COPY tools/sdk-validation/diagnose-dns.sh /validation/diagnose-dns.sh
 ENTRYPOINT ["/bin/bash", "/validation/check-egress.sh"]

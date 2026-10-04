@@ -90,6 +90,8 @@ jobs:
           docker build -f tools/sdk-validation/Dockerfile -t jarvis-sdk-egress:t01 .
           docker run --rm --network none --cap-add SYS_PTRACE \
             --entrypoint /bin/bash jarvis-sdk-egress:t01 /validation/check-containment.sh
+          docker run --rm --network none --hostname jarvis-sdk-fixture \
+            --add-host jarvis-sdk-fixture:127.0.0.1 --cap-add SYS_PTRACE jarvis-sdk-egress:t01
 
   unit-tests:
     name: unit-tests

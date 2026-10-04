@@ -2,9 +2,17 @@
 
 ## Decision
 
-**No-go for dependent implementation on the current native-runtime isolation assumptions.** The previous conditional-go recommendation is superseded by the broader network experiment below. Local Ollama and live Microsoft Foundry tool calls work, and hostile-tool denial, bounded cancellation, crash/restart, and host budgets now have reproducible actual-runtime checks. However, the strict zero-external-attempt network diagnostic failed: the traced process tree attempted non-loopback DNS connections. Docker network isolation blocked them, but this is not proof of equivalent containment for the selected native macOS runtime.
+**Native macOS network enforcement remains unverified; the observed DNS failure is explained by the test fixture, not evidence of Copilot disclosure.** Follow-up attribution reproduced hostname queries using the .NET fixture listener without constructing any Copilot client. An isolated SDK startup/ping/shutdown baseline emitted no DNS connections. Giving the container hostname a loopback hosts-file entry eliminated non-loopback connect attempts during the full contract suite, without weakening the strict diagnostic.
 
-Issue #2 remains open pending disposition of this isolation blocker. Do not treat a passing provider proxy test, SDK telemetry setting, or an unrelated failure response as proof of no native-runtime egress. A narrowly scoped alternative is to keep the Copilot SDK behind the same application-owned adapter but run its disposable child in an OS-isolated network namespace, with an application-owned, destination-allowlisted Unix-socket gateway for approved inference. That gateway must be tested with real native Ollama before claiming the complete local route works under containment; it is not implemented here. No alternative agent framework is proposed.
+Issue #2 remains open pending disposition of the required deployment assurance.
+The earlier no-go argument based on unexplained DNS is superseded; there is no
+observed SDK disclosure in these traces. Do not treat finite Linux observations
+as proof of enforced native macOS containment. An enforced-boundary alternative
+keeps the Copilot SDK behind the same adapter but isolates its child in a network
+namespace, with an application-owned destination-allowlisted Unix-socket gateway
+to native Ollama. That complete local-inference path is not implemented/tested
+here. A native, source-reviewed trust decision is a separate threat-model
+acceptance by the owner, not an equivalent enforcement result.
 
 ## Pinned versions and sources
 
@@ -29,7 +37,7 @@ Sources and SDK compatibility reviewed on 2026-10-04.
 | 5. Ignore hostile ambient instructions/configuration | **PASS, bounded contract** | The fixture creates hostile workspace/user instructions, a skill, agent, MCP configs, and credential sentinels. The instrumented model endpoint did not observe the hostile instruction marker or credential sentinel, and only the explicit custom tool was advertised. This is not a general audit of every CLI discovery path. |
 | 6. Transcript isolation and no implicit provider fallback | **PARTIAL; containment mitigation tested** | Two explicit fixture sessions did not cross transcript markers. An inference HTTP 400 with a controlled error propagated to the caller instead of a successful fallback response. All synthetic contracts also completed with Docker external networking disabled. This proves the exercised isolated route cannot reach a hosted model, not that every native-runtime failure/discovery path lacks fallback. |
 | 7. Streaming, completion, cancellation, timeout, crash, restart, disposal | **PASS with required host deadline** | Existing streaming/abort checks pass. A new test kills only this harness's newly launched runtime child while a tool is blocked; the callback cancels, the pending turn ends at its 10-second deadline, bounded disposal succeeds, and runtime restart/ping succeeds without a second inference request. The SDK does **not** promptly fail the pending wait on process death. The coordinator must enforce its own deadline and classify that result as interrupted/failed; it must not claim an idle event was received on crash. |
-| 8. Dedicated runtime state, sanitized environment, telemetry and egress | **FAIL strict zero-attempt diagnostic; containment PASS** | Local Ollama inference was captured through the loopback proxy. Linux ARM64 Docker `--network none` plus `strace -f -e trace=connect` observed only loopback success and blocked external DNS connects to `192.168.65.7:53` (`ENETUNREACH`). These traces cover the harness and its descendants; attribution of every DNS attempt to SDK versus host-library behavior is unresolved. No native macOS full-egress claim is made. |
+| 8. Dedicated runtime state, sanitized environment, telemetry and egress | **PASS scoped Linux observation/containment; native enforcement unverified** | Initial DNS attempts were reproduced in the fixture-only baseline, querying the container's own hostname. Runtime-only startup emitted no DNS. A hostname-to-loopback mapping made the unchanged strict connect diagnostic pass for the full contract suite. Docker network-none also explicitly rejects a deliberate external TCP probe. Native macOS packet capture is denied by BPF permissions; no native full-egress/enforcement claim is made. |
 | 9. Enforceable budgets and context limits | **PASS host-mitigation demonstration; token semantics limited** | The actual runtime's repeated tool requests are capped at one host execution, with explicit `AbortAsync` and exactly one idle event on budget exhaustion. A host prompt boundary accepts 64 UTF-16 code units and rejects 65; it is not a token budget. The tagged provider API exposes `MaxPromptTokens` (compaction threshold) and `MaxOutputTokens` (truncating generation limit); neither proves an overall per-turn cost/tool budget. Complete production context/history bounding and compaction semantics must not be assumed from this small prompt test. |
 
 The commands observed passing on the implementation host were:
@@ -75,6 +83,37 @@ trace line is:
 connect(fd, {sa_family=AF_INET, sin_port=htons(53),
             sin_addr=inet_addr("192.168.65.7")}, 16) = -1 ENETUNREACH
 ```
+
+### Follow-up attribution (2026-10-04)
+
+```sh
+docker run --rm --network none --dns 127.0.0.1 --cap-add SYS_PTRACE \
+  --entrypoint /bin/bash jarvis-sdk-egress:t01 /validation/diagnose-dns.sh
+docker run --rm --network none --hostname jarvis-sdk-fixture \
+  --add-host jarvis-sdk-fixture:127.0.0.1 --cap-add SYS_PTRACE jarvis-sdk-egress:t01
+```
+
+The first comparison traces `execve`, thread creation, `connect`, and DNS
+`sendmmsg` calls in two synthetic modes. The fixture-only mode emits A and AAAA
+queries for the container's own generated hostname from the .NET host PID, with
+no runtime executable launched. The SDK-only mode starts, pings, and stops the
+runtime without a fixture listener and shows no DNS connect attempts. This
+reproduces the failure independently of Copilot and identifies local-hostname
+resolution as the source of the observed DNS traffic. DNS-query payload tracing
+must never be used with live prompts/credentials; this diagnostic runs synthetic
+baselines only with an isolated loopback resolver.
+
+The second run retains the strict zero-non-loopback-connect assertion and passes
+the complete suite after resolving the container hostname through `/etc/hosts`.
+This is a fixture-environment correction, not a relaxed network expectation.
+The separate containment script additionally makes a deliberate TCP connection
+to the documentation-only address `192.0.2.1:443` and requires an immediate
+`NetworkUnreachable` rejection. A default-network container is rejected before
+this probe.
+
+Native macOS baseline modes pass, but `tcpdump -i lo0` cannot open `/dev/bpf0`
+without permission in the current session. Passwordless elevated access is
+unavailable; no system firewall or capture permissions were changed.
 
 The image uses a pinned .NET base-image digest. Package and tracing-tool downloads
 happen during image construction, separately from the traced runtime execution.
@@ -158,7 +197,7 @@ and [Microsoft's endpoint guidance](https://learn.microsoft.com/en-us/azure/foun
 
 ## Follow-up gates
 
-1. Resolve the native-runtime network-isolation blocker before approving T02's dependent assumptions. Either prove the selected native path under a scoped OS control or validate the isolated SDK plus destination-allowlisted inference-gateway alternative.
+1. Resolve deployment assurance before treating native local-only enforcement as proven. Either test the native path with scoped process-aware controls, validate the isolated SDK plus destination-allowlisted inference gateway, or explicitly accept a source-reviewed trust boundary as an owner-directed threat-model decision.
 2. T04 must preserve explicit provider routing, allowlisted tool dispatch, host-owned bounded turns/cancellation, and a runtime crash/interruption outcome.
 3. Keep the strict zero-attempt diagnostic and containment test distinct. Do not lower the former's expectation to report a clean network audit.
 4. Full application context, approval, durable state, and privacy routing remain out of this standalone feasibility spike.
