@@ -31,16 +31,16 @@ jobs:
     name: build-and-analyzers
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Find solution
         id: find
         run: |
           sln=$(find . -maxdepth 3 -name '*.sln' | head -n1)
           echo "sln=$sln" >> "$GITHUB_OUTPUT"
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         if: steps.find.outputs.sln != ''
         with:
-          dotnet-version: '9.0.x'
+          dotnet-version: '10.0.100'
       - name: Restore & build (Release, analyzers as errors)
         if: steps.find.outputs.sln != ''
         run: |
@@ -56,7 +56,7 @@ jobs:
     name: architecture
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Architecture boundary checks (placeholder)
         run: |
           if [ -d src ]; then
@@ -67,27 +67,44 @@ jobs:
 
   sdk-contracts:
     name: sdk-contracts
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - name: Copilot SDK contract validation (placeholder)
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: '10.0.100'
+      - name: Restore locked SDK validation harness
+        run: dotnet restore tools/sdk-validation/SdkValidation.csproj --locked-mode
+      - name: Build SDK validation harness
+        run: dotnet build tools/sdk-validation/SdkValidation.csproj -c Release --no-restore -warnaserror -p:TreatWarningsAsErrors=true
+      - name: Run real Copilot runtime contracts
+        run: dotnet run --project tools/sdk-validation/SdkValidation.csproj -c Release --no-build --no-restore -- --contracts
+      - name: Verify loopback-only Linux runtime containment
+        if: runner.os == 'Linux'
         run: |
-          echo "::notice::SDK contract tests land with T01 (SDK validation). Nothing to run yet."
+          docker build -f tools/sdk-validation/Dockerfile -t jarvis-sdk-egress:t01 .
+          docker run --rm --network none --cap-add SYS_PTRACE \
+            --entrypoint /bin/bash jarvis-sdk-egress:t01 /validation/check-containment.sh
 
   unit-tests:
     name: unit-tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Find solution
         id: find
         run: |
           sln=$(find . -maxdepth 3 -name '*.sln' | head -n1)
           echo "sln=$sln" >> "$GITHUB_OUTPUT"
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         if: steps.find.outputs.sln != ''
         with:
-          dotnet-version: '9.0.x'
+          dotnet-version: '10.0.100'
       - name: Run unit tests
         if: steps.find.outputs.sln != ''
         run: dotnet test "${{ steps.find.outputs.sln }}" -c Release --filter Category=Unit
@@ -99,16 +116,16 @@ jobs:
     name: integration-tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Find solution
         id: find
         run: |
           sln=$(find . -maxdepth 3 -name '*.sln' | head -n1)
           echo "sln=$sln" >> "$GITHUB_OUTPUT"
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         if: steps.find.outputs.sln != ''
         with:
-          dotnet-version: '9.0.x'
+          dotnet-version: '10.0.100'
       - name: Run integration tests (SQLite/HTTP, no live cloud/household creds)
         if: steps.find.outputs.sln != ''
         run: dotnet test "${{ steps.find.outputs.sln }}" -c Release --filter Category=Integration
@@ -121,7 +138,7 @@ jobs:
     needs: [unit-tests, integration-tests]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Coverage gate (placeholder)
         run: |
           echo "::notice::Coverage thresholds from AGENTS.md (90/85 unit, 85/75 combined, etc.) will be enforced once T02 selects the runner/collector."
@@ -130,7 +147,7 @@ jobs:
     name: aspire-e2e
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Aspire Simulator/E2E profile (placeholder)
         run: |
           echo "::notice::Aspire AppHost does not exist yet - aspire-e2e bootstrap placeholder (see T02)."
@@ -139,7 +156,7 @@ jobs:
     name: browser-e2e
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Playwright E2E (placeholder)
         run: |
           echo "::notice::No Web project/Playwright suite yet - browser-e2e bootstrap placeholder."
@@ -148,9 +165,9 @@ jobs:
     name: docs
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Lint markdown links
-        uses: lycheeverse/lychee-action@v2
+        uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2
         with:
           args: >-
             --no-progress
