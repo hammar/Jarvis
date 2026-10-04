@@ -4,15 +4,18 @@
 
 **Native macOS network enforcement remains unverified; the observed DNS failure is explained by the test fixture, not evidence of Copilot disclosure.** Follow-up attribution reproduced hostname queries using the .NET fixture listener without constructing any Copilot client. An isolated SDK startup/ping/shutdown baseline emitted no DNS connections. Giving the container hostname a loopback hosts-file entry eliminated non-loopback connect attempts during the full contract suite, without weakening the strict diagnostic.
 
-Issue #2 remains open pending disposition of the required deployment assurance.
+**Qualified go for T02 under the owner-accepted native trusted-runtime boundary.**
+The owner accepted this tradeoff on 2026-10-04; see
+[ADR 0001](adr/0001-native-copilot-runtime-trust-boundary.md).
+Native OS-level containment is not claimed or required for this initial MVP.
+Issue closure still requires the delivery/CI gates below.
 The earlier no-go argument based on unexplained DNS is superseded; there is no
 observed SDK disclosure in these traces. Do not treat finite Linux observations
 as proof of enforced native macOS containment. An enforced-boundary alternative
 keeps the Copilot SDK behind the same adapter but isolates its child in a network
 namespace, with an application-owned destination-allowlisted Unix-socket gateway
 to native Ollama. That complete local-inference path is not implemented/tested
-here. A native, source-reviewed trust decision is a separate threat-model
-acceptance by the owner, not an equivalent enforcement result.
+here. The accepted native trust decision is not an equivalent enforcement result.
 
 ## Pinned versions and sources
 
@@ -197,7 +200,7 @@ and [Microsoft's endpoint guidance](https://learn.microsoft.com/en-us/azure/foun
 
 ## Follow-up gates
 
-1. Resolve deployment assurance before treating native local-only enforcement as proven. Either test the native path with scoped process-aware controls, validate the isolated SDK plus destination-allowlisted inference gateway, or explicitly accept a source-reviewed trust boundary as an owner-directed threat-model decision.
+1. Apply accepted ADR 0001: native runtime is a trusted dependency; application-controlled routing/disclosure remains enforced. Native OS-level containment is not proven. Revisit the decision at the ADR's triggers.
 2. T04 must preserve explicit provider routing, allowlisted tool dispatch, host-owned bounded turns/cancellation, and a runtime crash/interruption outcome.
 3. Keep the strict zero-attempt diagnostic and containment test distinct. Do not lower the former's expectation to report a clean network audit.
 4. Full application context, approval, durable state, and privacy routing remain out of this standalone feasibility spike.

@@ -58,13 +58,15 @@ Validate the pinned GitHub Copilot SDK/runtime before T02 or dependent feature w
 
 ## Current status
 
-Still open: the saved-key Foundry smoke, adversarial tool denial, permission
+Evidence collected: the saved-key Foundry smoke, adversarial tool denial, permission
 denial, provider refusal, host budgets, and active-turn crash/restart tests pass.
 Follow-up baseline tracing attributed the DNS attempts to fixture hostname
 resolution independent of Copilot. The strict full-suite diagnostic passes
 with a hostname-to-loopback mapping; no assertion was relaxed. Docker
 containment passes, including an explicit external TCP rejection probe.
 Native macOS capture is permission-blocked, and native containment or an
-isolated inference gateway to real native Ollama remains unproven. The owner
-must select/disposition the desired deployment assurance, not interpret the
-earlier DNS finding as evidence of SDK leakage.
+isolated inference gateway to real native Ollama remains unproven.
+The owner accepted native trusted-dependency operation in ADR 0001 on
+2026-10-04, resolving that assurance caveat. Qualified go does not waive
+application-owned policy or imply an air-gap. Published PR/CI delivery remains
+to be verified before closing the issue.
