@@ -163,6 +163,33 @@ public sealed class CopilotAgentEngineContractTests
 
     [Fact]
     [Trait("Category", "SdkContract")]
+    public async Task EventPersistenceFailureInterruptsRuntimeAndPersistsTerminalOutcome()
+    {
+        using var data = IsolatedDirectory.Create();
+        using var databaseFile = IsolatedDatabaseFile.Create();
+        var store = new SqliteConversationStore(await CreateDatabaseAsync(databaseFile.Path), new TestClock());
+        var failingStore = new FailFirstTurnEventStore(store);
+        await using var provider = await FakeOpenAiProvider.StartAsync();
+        var engine = CreateEngine(
+            failingStore,
+            provider.BaseUrl,
+            provider.BaseUrl,
+            Path.Combine(data.Path, "runtime"));
+        var turnId = await CreateTurnAsync(store);
+
+        var events = await CollectAsync(engine.RunTurnAsync(
+            CreateRequest(turnId, ProviderKind.Local, "event persistence failure"),
+            CancellationToken.None));
+
+        var interrupted = Assert.Single(events.OfType<TurnInterrupted>());
+        Assert.Equal("event_persistence_failed", interrupted.ReasonCode);
+        Assert.Equal(TurnStatus.Interrupted, (await store.GetTurnAsync(turnId, CancellationToken.None))?.Status);
+        var persisted = await store.ReadTurnEventsAfterAsync(turnId, 0, 1000, CancellationToken.None);
+        Assert.Equal(nameof(TurnInterrupted), Assert.Single(persisted).EventType);
+    }
+
+    [Fact]
+    [Trait("Category", "SdkContract")]
     public async Task ApiKeyIsResolvedFromHostReferenceAndNeverPersistedInTurnEvents()
     {
         using var data = IsolatedDirectory.Create();
@@ -431,6 +458,88 @@ public sealed class CopilotAgentEngineContractTests
             ResolvedReference = reference;
             return ValueTask.FromResult<ReadOnlyMemory<char>>(secret.AsMemory());
         }
+    }
+
+    private sealed class FailFirstTurnEventStore(IConversationStore inner)
+        : IConversationStore, IAtomicTurnOutcomeStore
+    {
+        private int shouldFail = 1;
+
+        public ValueTask<ConversationMessage> AppendMessageAsync(
+            ConversationMessage message,
+            CancellationToken cancellationToken) =>
+            inner.AppendMessageAsync(message, cancellationToken);
+
+        public ValueTask<IReadOnlyList<ConversationMessage>> ReadRecentAsync(
+            ConversationId conversationId,
+            int maximumMessages,
+            CancellationToken cancellationToken) =>
+            inner.ReadRecentAsync(conversationId, maximumMessages, cancellationToken);
+
+        public ValueTask<ConversationTurn> CreateTurnAsync(
+            TurnId turnId,
+            ConversationId conversationId,
+            TurnStatus status,
+            DateTimeOffset createdAtUtc,
+            CancellationToken cancellationToken) =>
+            inner.CreateTurnAsync(turnId, conversationId, status, createdAtUtc, cancellationToken);
+
+        public ValueTask<ConversationTurn?> GetTurnAsync(TurnId turnId, CancellationToken cancellationToken) =>
+            inner.GetTurnAsync(turnId, cancellationToken);
+
+        public ValueTask<IReadOnlyList<ConversationTurn>> ReadNonterminalTurnsAsync(
+            int maximumTurns,
+            CancellationToken cancellationToken) =>
+            inner.ReadNonterminalTurnsAsync(maximumTurns, cancellationToken);
+
+        public ValueTask<ConversationTurn> UpdateTurnStatusAsync(
+            TurnId turnId,
+            TurnStatus status,
+            long expectedVersion,
+            DateTimeOffset updatedAtUtc,
+            CancellationToken cancellationToken) =>
+            inner.UpdateTurnStatusAsync(turnId, status, expectedVersion, updatedAtUtc, cancellationToken);
+
+        public ValueTask<PersistedTurnEvent> AppendTurnEventAsync(
+            TurnId turnId,
+            string eventType,
+            string payloadJson,
+            DateTimeOffset occurredAtUtc,
+            CancellationToken cancellationToken)
+        {
+            if (Interlocked.Exchange(ref shouldFail, 0) == 1)
+            {
+                throw new IOException("Injected nonterminal event persistence failure.");
+            }
+
+            return inner.AppendTurnEventAsync(turnId, eventType, payloadJson, occurredAtUtc, cancellationToken);
+        }
+
+        public ValueTask<IReadOnlyList<PersistedTurnEvent>> ReadTurnEventsAfterAsync(
+            TurnId turnId,
+            long afterSequence,
+            int maximumEvents,
+            CancellationToken cancellationToken) =>
+            inner.ReadTurnEventsAfterAsync(turnId, afterSequence, maximumEvents, cancellationToken);
+
+        public ValueTask<PersistedTurnEvent> UpdateTurnStatusAndAppendEventAsync(
+            TurnId turnId,
+            TurnStatus status,
+            long expectedVersion,
+            DateTimeOffset updatedAtUtc,
+            string eventType,
+            string payloadJson,
+            DateTimeOffset occurredAtUtc,
+            CancellationToken cancellationToken) =>
+            ((IAtomicTurnOutcomeStore)inner).UpdateTurnStatusAndAppendEventAsync(
+                turnId,
+                status,
+                expectedVersion,
+                updatedAtUtc,
+                eventType,
+                payloadJson,
+                occurredAtUtc,
+                cancellationToken);
     }
 
     private sealed class RecordingDispatcher(ToolDispatchResult result) : IToolDispatcher

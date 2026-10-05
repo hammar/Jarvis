@@ -103,12 +103,13 @@ Application contract is unchanged.
   build with nullable enabled and zero warnings/errors.
 - `tools/validate.sh architecture`: 6/6 tests passed.
 - `tools/validate.sh unit`: 8/8 discovered tests passed.
-- `tools/validate.sh integration`: 64/64 discovered tests passed.
+- `tools/validate.sh integration`: 65/65 discovered tests passed.
 - `tools/validate.sh sdk-contracts`: pinned SDK/runtime validation harness
-  passed; 9/9 adapter SDK contract tests passed.
+  passed; 10/10 adapter SDK contract tests passed.
 - `tools/validate.sh coverage`: passed using the `origin/main...HEAD`
-  merge-base comparison. Changed executable lines 514/551 (93.3%);
-  Infrastructure 1702/1854 lines (91.8%) and 433/561 branches (77.2%).
+  merge-base comparison plus tracked worktree changes. Changed executable
+  lines 510/549 (92.9%); Infrastructure 1714/1868 lines (91.8%) and 438/563
+  branches (77.8%).
   The gate enforces 95% line / 90% branch
   thresholds for both the terminal state machine and active-turn cancellation
   and runtime lifecycle module.
@@ -138,11 +139,13 @@ Initial pre-PR worktree review findings and dispositions:
 | T04-R8 | Interrupted terminal turns were returned as nonterminal recovery work. | Fixed by excluding `Interrupted` in `ReadNonterminalTurnsAsync`; the SQLite restart/recovery test now verifies interrupted turns are not returned. Retention intentionally continues to preserve interrupted conversations, as asserted by its existing durability test. |
 | T04-R9 | Local changed-line coverage used `git diff HEAD`, omitting the PR's existing changes. | Fixed the validator comparison to use the merge-base range `origin/<base>...HEAD` and made `tools/validate.sh coverage` require the base ref for local runs. The recorded coverage run compares only the PR's changes against `origin/main`. |
 | T04-R10 | Critical coverage ownership did not include the active cancellation/runtime lifecycle implementation. | Extracted the active-turn cancellation and runtime lifecycle into `CopilotActiveTurn.cs`, added cancellation and precedence tests, and assigned it a 95% line / 90% branch critical-module gate. Final full-PR coverage passed both critical module gates. |
-| T04-R11 | Changed-line coverage compared directly to the base tip and could include unrelated base-branch commits. | Updated the validator to use the three-dot merge-base comparison for PR changes; `tools/validate.sh coverage` passed against `origin/main...HEAD` with 514/551 changed executable lines. |
+| T04-R11 | Changed-line coverage compared directly to the base tip and could include unrelated base-branch commits. | Updated the validator to use the three-dot merge-base comparison for PR changes; `tools/validate.sh coverage` passed against `origin/main...HEAD` with tracked worktree changes included. |
 | T04-R12 | The async iterator awaited the execution task twice, potentially replacing the original failure site during cleanup. | It now awaits execution once in the iterator's `finally` path; output completion no longer faults the reader independently, so the single await propagates execution errors. Release build and all 64 integration tests passed. |
 | T04-R13 | Terminal outcome persistence hard-coded `CancellationToken.None`, preventing a bounded wait. | `SetTerminalOutcomeAsync` now accepts and forwards a token to both persistence operations. The engine supplies a dedicated five-second persistence timeout, preserving terminal writes after turn cancellation while bounding shutdown; a canceled-token SQLite regression passes in the integration suite. |
 | T04-R14 | A tool-budget cancellation racing with caller/host cancellation was classified as caller cancellation due to catch ordering. | The operation-canceled handlers now give the recorded tool-budget failure precedence; the terminal-precedence regression verifies budget wins over cancellation and deadline. |
 | T04-R15 | Per-turn SDK runtime/workspace directories accumulated because production never removed them. | Runtime cleanup now deletes the turn directory after disposing session/client resources, attempts deletion after earlier cleanup failures, and classifies deletion failures as cleanup interruption. Integration tests verify cleanup ordering, removal, and failure aggregation. |
+| T04-R16 | A nonterminal event-persistence failure faulted the event pump before terminal persistence, potentially leaving a turn `Running`. | The pump now cancels/aborts the active runtime and returns the persistence failure to terminal handling, which records `Interrupted` with a safe reason code through the bounded atomic outcome path. The actual-runtime SDK contract injects the first event append failure and verifies the durable interrupted status/event; all 10 SDK contracts passed. |
+| T04-R17 | Local changed-line coverage omitted tracked staged and unstaged edits when a base ref was configured. | The validator now merges the PR merge-base diff with staged and unstaged tracked source diffs, plus untracked sources. Its gate self-test creates a temporary git repo with both a committed PR edit and a tracked worktree edit and requires both changed lines; the full coverage gate passed at 510/549 changed executable lines. |
 
 These findings were raised against the PR commit and fixed in the follow-up
 revision. Final validation results are recorded above; the review threads are

@@ -229,6 +229,7 @@ internal static class CoverageGate
         ExpectFailure(() => TestResults.VerifyDiscoveryXml(
             XDocument.Parse("<TestRun><ResultSummary><Counters total=\"0\" executed=\"0\" passed=\"0\" failed=\"0\" /></ResultSummary></TestRun>"),
             "missing discovery fixture"));
+        VerifyChangedLineDiscoveryIncludesTrackedWorktreeEdits();
     }
 
     internal static void Validate(string unitDirectory, string integrationDirectory)
@@ -606,6 +607,10 @@ internal static class CoverageGate
             : eventName == "push" ? "HEAD^...HEAD" : "HEAD";
         var diff = RunGit(root, ["diff", "--no-ext-diff", "--unified=0", comparison, "--", "src"]);
         ParseAddedLines(root, diff, changed);
+        var stagedDiff = RunGit(root, ["diff", "--cached", "--no-ext-diff", "--unified=0", "HEAD", "--", "src"]);
+        ParseAddedLines(root, stagedDiff, changed);
+        var worktreeDiff = RunGit(root, ["diff", "--no-ext-diff", "--unified=0", "HEAD", "--", "src"]);
+        ParseAddedLines(root, worktreeDiff, changed);
         var untracked = RunGit(root, ["ls-files", "--others", "--exclude-standard", "--", "src"]);
         foreach (var relativePath in untracked.Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries))
         {
@@ -624,6 +629,77 @@ internal static class CoverageGate
         }
 
         return changed;
+    }
+
+    private static void VerifyChangedLineDiscoveryIncludesTrackedWorktreeEdits()
+    {
+        var directory = Directory.CreateTempSubdirectory("jarvis-coverage-diff-");
+        var root = directory.FullName;
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(root, "src"));
+            var sourcePath = Path.Combine(root, "src", "Fixture.cs");
+            File.WriteAllText(
+                sourcePath,
+                """
+                namespace Fixture;
+                public sealed class CoverageFixture
+                {
+                    public void CommittedChange() { }
+                    public void TrackedWorktreeChange() { }
+                }
+                """);
+            RunGit(root, ["init", "--quiet", "-b", "main"]);
+            RunGit(root, ["config", "user.name", "Coverage Gate"]);
+            RunGit(root, ["config", "user.email", "coverage-gate@example.invalid"]);
+            RunGit(root, ["add", "src/Fixture.cs"]);
+            RunGit(root, ["commit", "--quiet", "-m", "base fixture"]);
+            RunGit(root, ["update-ref", "refs/remotes/origin/main", "HEAD"]);
+            File.WriteAllText(
+                sourcePath,
+                """
+                namespace Fixture;
+                public sealed class CoverageFixture
+                {
+                    public void CommittedChange(int value) { }
+                    public void TrackedWorktreeChange() { }
+                }
+                """);
+            RunGit(root, ["add", "src/Fixture.cs"]);
+            RunGit(root, ["commit", "--quiet", "-m", "committed fixture change"]);
+            File.WriteAllText(
+                sourcePath,
+                """
+                namespace Fixture;
+                public sealed class CoverageFixture
+                {
+                    public void CommittedChange(int value) { }
+                    public void TrackedWorktreeChange(int value) { }
+                }
+                """);
+
+            var previousBase = Environment.GetEnvironmentVariable("GITHUB_BASE_REF");
+            Environment.SetEnvironmentVariable("GITHUB_BASE_REF", "main");
+            try
+            {
+                var changes = ReadChangedSourceLines(root);
+                var absolutePath = Path.GetFullPath(sourcePath);
+                if (!changes.Contains(new CoverageLine(absolutePath, 4))
+                    || !changes.Contains(new CoverageLine(absolutePath, 5)))
+                {
+                    throw new ValidationException(
+                        "Changed-line discovery omitted committed or tracked worktree source edits.");
+                }
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("GITHUB_BASE_REF", previousBase);
+            }
+        }
+        finally
+        {
+            directory.Delete(recursive: true);
+        }
     }
 
     private static void ParseAddedLines(string root, string diff, ISet<CoverageLine> changed)

@@ -160,6 +160,7 @@ authority.
 | Explicit cancellation reaches a blocked host callback exactly once | `CopilotAgentEngineContractTests.CancelAsyncCancelsHostToolAndEmitsOnePersistedCancellationOutcome` |
 | SDK child-process crash becomes interruption; next turn starts a fresh runtime | `CopilotAgentEngineContractTests.RuntimeProcessCrashBecomesInterruptedAndNextTurnStartsFreshRuntime` |
 | Provider failure is explicit and does not include provider error content | `CopilotAgentEngineContractTests.ProviderFailureEmitsSafeFailureCodeWithoutLeakingProviderMessage` |
+| Event-persistence failure aborts runtime and commits an interrupted terminal outcome when storage recovers | `CopilotAgentEngineContractTests.EventPersistenceFailureInterruptsRuntimeAndPersistsTerminalOutcome` |
 | Terminal status and event commit atomically; stale compare-and-swap writes do not append an event | `CopilotTurnStateMachineTests.TurnStateMachineAppliesRunningAndTerminalTransitionsWithCompareAndSwap` |
 | Terminal persistence observes its bounded cancellation token | `CopilotTurnStateMachineTests.TurnStateMachineAppliesRunningAndTerminalTransitionsWithCompareAndSwap` |
 | Every terminal signal maps to one typed status/event pair | `CopilotTurnStateMachineTests.TurnStateMachineMapsEveryEngineSignalToOneTypedTerminalOutcome` |

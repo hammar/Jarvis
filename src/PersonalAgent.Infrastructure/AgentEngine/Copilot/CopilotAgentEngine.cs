@@ -137,7 +137,7 @@ public sealed class CopilotAgentEngine : IAgentEngine
             SingleWriter = false,
             AllowSynchronousContinuations = false
         });
-        var eventPump = PumpEventsAsync(request.TurnId, observed.Reader, output);
+        var eventPump = PumpEventsAsync(request.TurnId, observed.Reader, output, active);
         TurnStatus terminalStatus;
         AgentEvent terminalEvent;
 
@@ -209,7 +209,15 @@ public sealed class CopilotAgentEngine : IAgentEngine
         try
         {
             observed.Writer.TryComplete();
-            await eventPump;
+            if (await eventPump is not null)
+            {
+                terminalStatus = TurnStatus.Interrupted;
+                terminalEvent = new TurnInterrupted(
+                    request.TurnId,
+                    clock.UtcNow,
+                    "event_persistence_failed");
+            }
+
             var cancelledByHost = active.MarkTerminal();
             if (terminalStatus == TurnStatus.Completed)
             {
@@ -406,15 +414,35 @@ public sealed class CopilotAgentEngine : IAgentEngine
             ? CopilotTurnSignal.RuntimeCleanupFailed
             : CopilotTurnSignal.Failed;
 
-    private async Task PumpEventsAsync(
+    private async Task<Exception?> PumpEventsAsync(
         TurnId turnId,
         ChannelReader<AgentEvent> events,
-        ChannelWriter<AgentEvent> output)
+        ChannelWriter<AgentEvent> output,
+        CopilotActiveTurn active)
     {
-        await foreach (var item in events.ReadAllAsync())
+        try
         {
-            await PersistAndPublishAsync(item, output, CancellationToken.None);
+            await foreach (var item in events.ReadAllAsync())
+            {
+                await PersistAndPublishAsync(item, output, CancellationToken.None);
+            }
         }
+        catch (Exception exception)
+        {
+            active.CancelByHost();
+            try
+            {
+                await active.AbortAsync();
+            }
+            catch (Exception cleanupException)
+            {
+                return new AggregateException(exception, cleanupException);
+            }
+
+            return exception;
+        }
+
+        return null;
     }
 
     private async Task PersistAndPublishAsync(
