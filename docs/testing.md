@@ -55,6 +55,27 @@ reflected type-dependency, and Web non-composition source fixtures. The browser 
 Playwright smoke and confirms a deliberately incorrect browser assertion is
 reported as a failure.
 
+## Acceptance evidence and independent review
+
+For each change, report the exact revision and validation commands/results,
+the platforms and runtime behaviors exercised, and what remains unexercised.
+Mocks, in-process tests, actual SDK contracts, out-of-process E2E and opt-in
+live tests establish different evidence; do not present one as another.
+Passing automation demonstrates only the conditions it measured, not a
+guarantee of correctness or safety.
+
+Each PR also receives independent agentic review against its specification,
+acceptance criteria, implementation, tests, documentation and meaningful
+risks. Keep a cumulative finding ledger across review rounds, with an explicit
+disposition and evidence for every finding regardless of severity. Carry
+summary-only “Previously missed” findings forward even if a later review
+omits them; omission is not resolution. The owner accepts the requirements,
+validation evidence and limits, review dispositions and disclosed residual
+risks, and retains control of requirements, material scope/tradeoffs and risk
+acceptance. This is not a requirement for the owner to manually inspect or
+certify generated code. None of this replaces CI, coverage, architecture,
+security/privacy or conversation-resolution gates.
+
 ## Scenario mapping
 
 | Acceptance scenario | Test |
