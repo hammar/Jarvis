@@ -23,8 +23,16 @@ Enable foreign-key enforcement per connection and WAL at startup. Use SQLite's
 online backup facility; validate integrity and foreign keys, migrate a private
 copy, then replace the live file only after copy validation succeeds. Restore
 is an offline operation: the owner stops the Web host and workers first.
-Actions with `Unknown` outcomes remain durable and are never automatically
-replayed.
+Startup and restore serialize marker recovery with an exclusive lock file
+beside the database, held through initialization or replacement so another
+process cannot open SQLite during recovery. The lock file is persistent and
+reserved from backup/restore destinations. Actions with `Unknown` outcomes
+remain durable and are never automatically replayed.
+
+Conversation retention removes expired roots only when every associated turn
+is terminal (`Completed`, `Failed`, or `Cancelled`). Running, approval-waiting,
+and interrupted turns retain their conversation and reconnect/recovery state
+until explicitly resolved.
 
 Use optimistic compare-and-swap updates for versioned facts, approval requests,
 and action journal state. Keep job due-work leasing as an atomic persistence

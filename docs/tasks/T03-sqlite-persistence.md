@@ -76,8 +76,10 @@ an older schema with data preservation, FTS insert/update/delete, optimistic
 concurrency, approval expiry/single-use ownership checks, expired job-lease
 recovery and no-reclaim for completed outcomes, backup/corruption/restore,
 pending migration-on-copy and conflicting-schema preservation, and
-default/overridden retention including repeat/restart behavior. Backup and
-restore reject reserved recovery-artifact paths before cleanup or recovery.
+default/overridden retention including repeat/restart behavior, preserving
+conversations with unresolved turns. Backup and restore reject live sidecars
+and reserved recovery-artifact paths before cleanup or recovery; startup
+serializes marker recovery across processes.
 Infrastructure must meet the 80% line / 70% branch combined unit+integration
 coverage minimum.
 `SqliteApprovalStore.cs` is explicitly owned as a critical module at 95% line /

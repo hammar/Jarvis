@@ -33,14 +33,22 @@ public sealed class SqliteDatabase
     /// <summary>Gets the absolute path of the owned database file.</summary>
     public string DatabasePath { get; }
 
-    /// <summary>Creates the database directory, enables WAL, and applies all pending migrations.</summary>
+    /// <summary>
+    /// Acquires the per-database cross-process recovery lock, completes interrupted restore recovery,
+    /// then enables WAL and applies pending migrations before SQLite is opened by the host.
+    /// </summary>
     /// <param name="cancellationToken">Token that cancels initialization between database operations.</param>
     public async Task InitializeAsync(CancellationToken cancellationToken = default)
     {
-        await SqliteBackupRestoreService.RecoverInterruptedRestoreAsync(DatabasePath, cancellationToken);
         var directory = Path.GetDirectoryName(DatabasePath)
             ?? throw new InvalidOperationException("The SQLite database path must have a parent directory.");
         Directory.CreateDirectory(directory);
+        await using var recoveryLock = await SqliteBackupRestoreService.AcquireRestoreLockAsync(
+            DatabasePath,
+            cancellationToken);
+        await SqliteBackupRestoreService.RecoverInterruptedRestoreUnderLockAsync(
+            DatabasePath,
+            cancellationToken);
 
         await using var connection = await OpenConnectionAsync(cancellationToken);
         await using (var journalMode = connection.CreateCommand())

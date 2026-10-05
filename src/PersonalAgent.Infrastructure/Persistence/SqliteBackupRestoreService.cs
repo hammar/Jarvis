@@ -1,8 +1,12 @@
 using Microsoft.Data.Sqlite;
+using System.Diagnostics;
 
 namespace PersonalAgent.Infrastructure.Persistence;
 
-/// <summary>Creates consistent SQLite backups and restores only integrity-checked, migrated copies.</summary>
+/// <summary>
+/// Creates consistent SQLite backups and restores only integrity-checked, migrated copies while serializing
+/// replacement and startup recovery with a per-database cross-process lock.
+/// </summary>
 public sealed class SqliteBackupRestoreService
 {
     private const string PreparedRestore = "prepared";
@@ -93,6 +97,7 @@ public sealed class SqliteBackupRestoreService
     /// <summary>Restores from a verified backup after migrating a private copy of it.</summary>
     /// <remarks>
     /// The caller must stop application workers and ensure no database connections are in use before restore.
+    /// Restore shares the startup recovery lock and rejects the live database, sidecars, and reserved recovery files.
     /// The restore never replays jobs or changes an action's recorded Unknown outcome.
     /// </remarks>
     /// <param name="backupPath">Existing SQLite backup to restore.</param>
@@ -103,7 +108,11 @@ public sealed class SqliteBackupRestoreService
         ArgumentException.ThrowIfNullOrWhiteSpace(backupPath);
         var sourcePath = Path.GetFullPath(backupPath);
         EnsureNotRestoreArtifactPath(database.DatabasePath, sourcePath, nameof(backupPath));
-        await RecoverInterruptedRestoreAsync(database.DatabasePath, cancellationToken);
+        var directory = Path.GetDirectoryName(database.DatabasePath)
+            ?? throw new InvalidOperationException("The database path must have a parent directory.");
+        Directory.CreateDirectory(directory);
+        await using var recoveryLock = await AcquireRestoreLockAsync(database.DatabasePath, cancellationToken);
+        await RecoverInterruptedRestoreUnderLockAsync(database.DatabasePath, cancellationToken);
         if (!File.Exists(sourcePath))
         {
             throw new FileNotFoundException("The SQLite backup file was not found.", sourcePath);
@@ -115,9 +124,6 @@ public sealed class SqliteBackupRestoreService
         }
 
         await VerifyDatabaseAsync(sourcePath, cancellationToken);
-        var directory = Path.GetDirectoryName(database.DatabasePath)
-            ?? throw new InvalidOperationException("The database path must have a parent directory.");
-        Directory.CreateDirectory(directory);
         var restorePath = RestoreStagedPath(database.DatabasePath);
         var rollbackPath = RestoreRollbackPath(database.DatabasePath);
         var prepared = false;
@@ -154,7 +160,7 @@ public sealed class SqliteBackupRestoreService
             {
                 try
                 {
-                    await RecoverInterruptedRestoreAsync(database.DatabasePath, CancellationToken.None);
+                    await RecoverInterruptedRestoreUnderLockAsync(database.DatabasePath, CancellationToken.None);
                 }
                 catch (Exception recoveryFailure)
                 {
@@ -173,9 +179,40 @@ public sealed class SqliteBackupRestoreService
         }
     }
 
-    internal static async Task RecoverInterruptedRestoreAsync(
+    internal static async Task<FileStream> AcquireRestoreLockAsync(
         string databasePath,
         CancellationToken cancellationToken = default)
+    {
+        var lockPath = RestoreLockPath(databasePath);
+        var directory = Path.GetDirectoryName(lockPath)
+            ?? throw new InvalidOperationException("The database path must have a parent directory.");
+        Directory.CreateDirectory(directory);
+        var timeout = TimeSpan.FromSeconds(30);
+        var stopwatch = Stopwatch.StartNew();
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                return new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+            }
+            catch (IOException exception)
+            {
+                if (stopwatch.Elapsed >= timeout)
+                {
+                    throw new IOException(
+                        $"Timed out waiting for SQLite restore recovery lock '{Path.GetFileName(lockPath)}'.",
+                        exception);
+                }
+
+                await Task.Delay(TimeSpan.FromMilliseconds(50), cancellationToken);
+            }
+        }
+    }
+
+    internal static async Task RecoverInterruptedRestoreUnderLockAsync(
+        string databasePath,
+        CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         var markerPath = RestoreMarkerPath(databasePath);
@@ -307,6 +344,8 @@ public sealed class SqliteBackupRestoreService
 
     internal static string RestoreMarkerPath(string databasePath) => databasePath + ".restore-state";
 
+    internal static string RestoreLockPath(string databasePath) => databasePath + ".restore-lock";
+
     internal static string RestoreStagedPath(string databasePath) => databasePath + ".restore-staged";
 
     internal static string RestoreRollbackPath(string databasePath) => databasePath + ".restore-rollback";
@@ -324,7 +363,10 @@ public sealed class SqliteBackupRestoreService
             RestoreOriginalWalPath(databasePath),
             RestoreOriginalShmPath(databasePath),
             RestoreMarkerPath(databasePath) + ".tmp",
-            RestoreMarkerPath(databasePath)
+            RestoreMarkerPath(databasePath),
+            RestoreLockPath(databasePath),
+            databasePath + "-wal",
+            databasePath + "-shm"
         };
         if (restoreArtifacts.Any(artifact => PathsEqual(path, artifact)))
         {
@@ -381,7 +423,12 @@ public sealed class SqliteBackupRestoreService
     }
 
     private static bool PathsEqual(string first, string second) =>
-        string.Equals(Path.GetFullPath(first), Path.GetFullPath(second), StringComparison.Ordinal);
+        string.Equals(
+            Path.GetFullPath(first),
+            Path.GetFullPath(second),
+            OperatingSystem.IsWindows() || OperatingSystem.IsMacOS()
+                ? StringComparison.OrdinalIgnoreCase
+                : StringComparison.Ordinal);
 
     private static void DeleteDatabaseFiles(string path)
     {

@@ -22,11 +22,11 @@ public sealed record SqliteRetentionOptions(int ConversationRetentionDays = 90, 
 }
 
 /// <summary>Reports deterministic retention cleanup counts.</summary>
-/// <param name="ConversationsDeleted">Number of expired conversation roots removed with their messages and turns.</param>
+/// <param name="ConversationsDeleted">Number of expired conversation roots removed with their messages and terminal turns.</param>
 /// <param name="AuditEventsDeleted">Number of expired audit events removed.</param>
 public sealed record SqliteRetentionResult(int ConversationsDeleted, int AuditEventsDeleted);
 
-/// <summary>Deletes only expired ordinary conversation history and audit events.</summary>
+/// <summary>Deletes expired conversation history only when no unresolved turn would be lost, plus expired audit events.</summary>
 public sealed class SqliteRetentionService
 {
     private readonly SqliteDatabase database;
@@ -45,7 +45,7 @@ public sealed class SqliteRetentionService
         options.Validate();
     }
 
-    /// <summary>Deletes records strictly older than their configured UTC retention cutoff.</summary>
+    /// <summary>Deletes records strictly older than their configured UTC retention cutoff, preserving conversations with unresolved turns.</summary>
     /// <param name="cancellationToken">Token that cancels cleanup before commit.</param>
     /// <returns>Counts of deleted conversations and audit events.</returns>
     public async ValueTask<SqliteRetentionResult> CleanupExpiredAsync(CancellationToken cancellationToken)
@@ -60,7 +60,15 @@ public sealed class SqliteRetentionService
         await using (var delete = connection.CreateCommand())
         {
             delete.Transaction = transaction;
-            delete.CommandText = "DELETE FROM conversations WHERE updated_at_utc < $cutoff;";
+            delete.CommandText = """
+                DELETE FROM conversations
+                WHERE updated_at_utc < $cutoff
+                  AND NOT EXISTS (
+                      SELECT 1 FROM turns
+                      WHERE turns.conversation_id = conversations.id
+                        AND turns.status NOT IN ('Completed', 'Failed', 'Cancelled')
+                  );
+                """;
             delete.Parameters.AddWithValue("$cutoff", conversationCutoff);
             conversations = await delete.ExecuteNonQueryAsync(cancellationToken);
         }

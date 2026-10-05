@@ -460,8 +460,35 @@ public sealed class SqlitePersistenceTests
         var conversations = new SqliteConversationStore(database, clock);
         var oldConversation = ConversationId.New();
         var retainedConversation = ConversationId.New();
+        var runningConversation = ConversationId.New();
+        var approvalConversation = ConversationId.New();
+        var interruptedConversation = ConversationId.New();
         await conversations.AppendMessageAsync(Message(oldConversation, "expired"), CancellationToken.None);
         await conversations.AppendMessageAsync(Message(retainedConversation, "retained"), CancellationToken.None);
+        await conversations.AppendMessageAsync(Message(runningConversation, "running turn"), CancellationToken.None);
+        await conversations.AppendMessageAsync(Message(approvalConversation, "approval turn"), CancellationToken.None);
+        await conversations.AppendMessageAsync(Message(interruptedConversation, "interrupted turn"), CancellationToken.None);
+        var runningTurn = TurnId.New();
+        var approvalTurn = TurnId.New();
+        var interruptedTurn = TurnId.New();
+        await conversations.CreateTurnAsync(
+            runningTurn,
+            runningConversation,
+            TurnStatus.Running,
+            Now,
+            CancellationToken.None);
+        await conversations.CreateTurnAsync(
+            approvalTurn,
+            approvalConversation,
+            TurnStatus.WaitingForApproval,
+            Now,
+            CancellationToken.None);
+        await conversations.CreateTurnAsync(
+            interruptedTurn,
+            interruptedConversation,
+            TurnStatus.Interrupted,
+            Now,
+            CancellationToken.None);
 
         var audit = new SqliteAuditStore(database);
         await audit.AppendAsync(NewAudit(Now.AddDays(-31)), CancellationToken.None);
@@ -498,11 +525,16 @@ public sealed class SqlitePersistenceTests
                 WHERE id = $old_conversation;
                 UPDATE conversations SET updated_at_utc = $recent
                 WHERE id = $recent_conversation;
+                UPDATE conversations SET updated_at_utc = $old
+                WHERE id IN ($running_conversation, $approval_conversation, $interrupted_conversation);
                 """;
             update.Parameters.AddWithValue("$old", SqliteValueForTest(Now.AddDays(-91)));
             update.Parameters.AddWithValue("$recent", SqliteValueForTest(Now.AddDays(-89)));
             update.Parameters.AddWithValue("$old_conversation", oldConversation.Value.ToString("D"));
             update.Parameters.AddWithValue("$recent_conversation", retainedConversation.Value.ToString("D"));
+            update.Parameters.AddWithValue("$running_conversation", runningConversation.Value.ToString("D"));
+            update.Parameters.AddWithValue("$approval_conversation", approvalConversation.Value.ToString("D"));
+            update.Parameters.AddWithValue("$interrupted_conversation", interruptedConversation.Value.ToString("D"));
             await update.ExecuteNonQueryAsync();
         }
 
@@ -511,6 +543,30 @@ public sealed class SqlitePersistenceTests
         Assert.Equal(new SqliteRetentionResult(0, 0), await retention.CleanupExpiredAsync(CancellationToken.None));
         Assert.Empty(await conversations.ReadRecentAsync(oldConversation, 10, CancellationToken.None));
         Assert.Single(await conversations.ReadRecentAsync(retainedConversation, 10, CancellationToken.None));
+        Assert.Single(await conversations.ReadRecentAsync(runningConversation, 10, CancellationToken.None));
+        Assert.Single(await conversations.ReadRecentAsync(approvalConversation, 10, CancellationToken.None));
+        Assert.Single(await conversations.ReadRecentAsync(interruptedConversation, 10, CancellationToken.None));
+        await using (var connection = await database.OpenConnectionAsync())
+        {
+            await using var turns = connection.CreateCommand();
+            turns.CommandText = "SELECT id, status FROM turns WHERE id IN ($running, $approval, $interrupted) ORDER BY id;";
+            turns.Parameters.AddWithValue("$running", runningTurn.Value.ToString("D"));
+            turns.Parameters.AddWithValue("$approval", approvalTurn.Value.ToString("D"));
+            turns.Parameters.AddWithValue("$interrupted", interruptedTurn.Value.ToString("D"));
+            await using var reader = await turns.ExecuteReaderAsync();
+            var retainedTurns = new Dictionary<string, string>(StringComparer.Ordinal);
+            while (await reader.ReadAsync())
+            {
+                retainedTurns.Add(reader.GetString(0), reader.GetString(1));
+            }
+
+            Assert.Equal(3, retainedTurns.Count);
+            Assert.Equal(TurnStatus.Running.ToString(), retainedTurns[runningTurn.Value.ToString("D")]);
+            Assert.Equal(
+                TurnStatus.WaitingForApproval.ToString(),
+                retainedTurns[approvalTurn.Value.ToString("D")]);
+            Assert.Equal(TurnStatus.Interrupted.ToString(), retainedTurns[interruptedTurn.Value.ToString("D")]);
+        }
         Assert.NotNull(await memory.GetAsync(fact.Id, CancellationToken.None));
         Assert.Equal("Unknown", (await actions.GetAsync(unknownAction.Id, CancellationToken.None))!.Status);
         Assert.Single(await audit.ReadSinceAsync(Now.AddDays(-90), 10, CancellationToken.None));
@@ -632,20 +688,80 @@ public sealed class SqlitePersistenceTests
             file.Path + ".restore-original-wal",
             file.Path + ".restore-original-shm",
             SqliteBackupRestoreService.RestoreMarkerPath(file.Path) + ".tmp",
-            SqliteBackupRestoreService.RestoreMarkerPath(file.Path)
+            SqliteBackupRestoreService.RestoreMarkerPath(file.Path),
+            file.Path + "-wal",
+            file.Path + "-shm"
         };
         foreach (var artifactPath in artifactPaths)
         {
-            File.Copy(backupPath, artifactPath);
+            File.Copy(backupPath, artifactPath, overwrite: true);
             var originalBackup = await File.ReadAllBytesAsync(artifactPath);
 
             await Assert.ThrowsAsync<ArgumentException>(() => backups.RestoreAsync(artifactPath));
 
             Assert.Equal(originalBackup, await File.ReadAllBytesAsync(artifactPath));
-            File.Delete(artifactPath);
             await Assert.ThrowsAsync<ArgumentException>(() => backups.CreateBackupAsync(artifactPath));
-            Assert.False(File.Exists(artifactPath));
+            Assert.Equal(originalBackup, await File.ReadAllBytesAsync(artifactPath));
+
+            var caseVariant = TogglePathCase(artifactPath);
+            if (!string.Equals(caseVariant, artifactPath, StringComparison.Ordinal)
+                && File.Exists(caseVariant))
+            {
+                await Assert.ThrowsAsync<ArgumentException>(() => backups.RestoreAsync(caseVariant));
+                Assert.Equal(originalBackup, await File.ReadAllBytesAsync(artifactPath));
+                await Assert.ThrowsAsync<ArgumentException>(() => backups.CreateBackupAsync(caseVariant));
+                Assert.Equal(originalBackup, await File.ReadAllBytesAsync(artifactPath));
+            }
+
+            File.Delete(artifactPath);
         }
+
+        var lockPath = SqliteBackupRestoreService.RestoreLockPath(file.Path);
+        await Assert.ThrowsAsync<ArgumentException>(() => backups.RestoreAsync(lockPath));
+        await Assert.ThrowsAsync<ArgumentException>(() => backups.CreateBackupAsync(lockPath));
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task ConcurrentStartupSerializesPreparedRestoreRecovery()
+    {
+        using var file = IsolatedDatabaseFile.Create();
+        var database = new SqliteDatabase(file.Path);
+        await database.InitializeAsync();
+        var conversationId = ConversationId.New();
+        var message = Message(conversationId, "survives concurrent startup");
+        await new SqliteConversationStore(database, new MutableClock(Now))
+            .AppendMessageAsync(message, CancellationToken.None);
+
+        var rollbackPath = SqliteBackupRestoreService.RestoreRollbackPath(file.Path);
+        File.Copy(file.Path, rollbackPath);
+        CopyTestSidecar(file.Path + "-wal", file.Path + ".restore-original-wal");
+        CopyTestSidecar(file.Path + "-shm", file.Path + ".restore-original-shm");
+        await File.WriteAllTextAsync(file.Path, "interrupted replacement");
+        DeleteTestSidecar(file.Path + "-wal");
+        DeleteTestSidecar(file.Path + "-shm");
+        await File.WriteAllTextAsync(SqliteBackupRestoreService.RestoreMarkerPath(file.Path), "prepared");
+
+        var lockPath = SqliteBackupRestoreService.RestoreLockPath(file.Path);
+        Task startup;
+        await using (var heldLock = new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None))
+        {
+            startup = Task.WhenAll(
+                new SqliteDatabase(file.Path).InitializeAsync(),
+                new SqliteDatabase(file.Path).InitializeAsync());
+            var firstCompletion = await Task.WhenAny(startup, Task.Delay(TimeSpan.FromMilliseconds(250)));
+            Assert.NotSame(startup, firstCompletion);
+        }
+
+        await startup.WaitAsync(TimeSpan.FromSeconds(10));
+
+        var recovered = new SqliteDatabase(file.Path);
+        await using var verify = await recovered.OpenConnectionAsync();
+        await using var read = verify.CreateCommand();
+        read.CommandText = "SELECT content FROM messages WHERE message_id = $id;";
+        read.Parameters.AddWithValue("$id", message.MessageId.ToString("D"));
+        Assert.Equal(message.Content, (string?)await read.ExecuteScalarAsync());
+        Assert.False(File.Exists(SqliteBackupRestoreService.RestoreMarkerPath(file.Path)));
     }
 
     [Fact]
@@ -878,6 +994,25 @@ public sealed class SqlitePersistenceTests
 
     private static ConversationMessage Message(ConversationId id, string content) =>
         new(Guid.NewGuid(), id, "user", content, Now);
+
+    private static string TogglePathCase(string path) => new(path.Select(character =>
+        char.IsUpper(character) ? char.ToLowerInvariant(character) : char.ToUpperInvariant(character)).ToArray());
+
+    private static void CopyTestSidecar(string sourcePath, string destinationPath)
+    {
+        if (File.Exists(sourcePath))
+        {
+            File.Copy(sourcePath, destinationPath, overwrite: true);
+        }
+    }
+
+    private static void DeleteTestSidecar(string path)
+    {
+        if (File.Exists(path))
+        {
+            File.Delete(path);
+        }
+    }
 
     private static ActionJournalEntry NewAction(ActionId id, string status, DateTimeOffset at) =>
         new(id, "home.set_light", """{"entity_id":"light.test","state":"on"}""", "request-hash", status, at, at, 1);
