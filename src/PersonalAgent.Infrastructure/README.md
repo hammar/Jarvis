@@ -50,7 +50,9 @@ the way before replacement, and cleanup remains recoverable from the marker.
 Backup and
 restore reject live database sidecars and reserved recovery filenames,
 including the staging database's recovery marker, lock, and rollback names,
-symlink aliases, and case variants on Windows and macOS.
+live/staged rollback journals, symlink aliases, and case variants on Windows
+and macOS. Claims refresh the caller's time under the write transaction before
+calculating the lease deadline, so write-lock waits cannot consume the lease.
 Lease completion checks the current clock only after acquiring its write
 transaction, so waiting for another writer cannot authorize an expired lease.
 Restore never replays jobs or uncertain physical actions.

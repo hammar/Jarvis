@@ -629,7 +629,8 @@ public sealed class SqlitePersistenceTests
             }
         });
         var store = new SqliteJobStore(database, clock);
-        var lease = await store.ClaimDueAsync("worker", Now, TimeSpan.FromMinutes(1), CancellationToken.None);
+        var lease = await new SqliteJobStore(database, new MutableClock(Now))
+            .ClaimDueAsync("worker", Now, TimeSpan.FromMinutes(1), CancellationToken.None);
         Assert.NotNull(lease);
         await Assert.ThrowsAsync<PersistenceConcurrencyException>(
             async () => await store.CompleteAsync(lease, "Succeeded", CancellationToken.None));
@@ -641,6 +642,74 @@ public sealed class SqlitePersistenceTests
         Assert.Equal(DBNull.Value, await outcome.ExecuteScalarAsync());
         outcome.CommandText = "SELECT COUNT(*) FROM job_runs;";
         Assert.Equal(0L, (long)(await outcome.ExecuteScalarAsync())!);
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task ContendedClaimRefreshesItsDeadlineAfterTheWriterReleasesTheLock()
+    {
+        using var file = IsolatedDatabaseFile.Create();
+        var database = new SqliteDatabase(file.Path);
+        await database.InitializeAsync();
+        await using (var connection = await database.OpenConnectionAsync())
+        await using (var insert = connection.CreateCommand())
+        {
+            insert.CommandText = """
+                INSERT INTO jobs
+                    (id, owner_id, kind, payload_version, payload, time_zone_id, due_at_utc, enabled, misfire_policy)
+                VALUES ($id, 'owner', 'reminder', 1, '{}', 'UTC', $due, 1, 'Delayed');
+                """;
+            insert.Parameters.AddWithValue("$id", JobId.New().Value.ToString("D"));
+            insert.Parameters.AddWithValue("$due", Now.ToString("O"));
+            await insert.ExecuteNonQueryAsync();
+        }
+
+        var observedClock = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var clock = new CallbackClock(() =>
+        {
+            using var probe = new SqliteConnection(new SqliteConnectionStringBuilder
+            {
+                DataSource = file.Path,
+                Pooling = false,
+                DefaultTimeout = 1
+            }.ToString());
+            probe.Open();
+            using var command = probe.CreateCommand();
+            command.CommandText = "BEGIN IMMEDIATE;";
+            var busy = Assert.Throws<SqliteException>(() => command.ExecuteNonQuery());
+            Assert.Equal(5, busy.SqliteErrorCode);
+            observedClock.TrySetResult();
+            return Now.AddSeconds(2);
+        });
+        var store = new SqliteJobStore(database, clock);
+        await using var blocker = await database.OpenConnectionAsync();
+        await using var transaction = blocker.BeginTransaction(deferred: false);
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var claim = Task.Run(async () =>
+        {
+            started.TrySetResult();
+            return await store.ClaimDueAsync("worker", Now, TimeSpan.FromSeconds(1), CancellationToken.None);
+        });
+        try
+        {
+            await started.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            await transaction.CommitAsync();
+            var lease = await claim.WaitAsync(TimeSpan.FromSeconds(20));
+            Assert.NotNull(lease);
+            Assert.True(observedClock.Task.IsCompletedSuccessfully);
+            Assert.Equal(Now.AddSeconds(3), lease.LeaseExpiresAtUtc);
+            Assert.Null(await store.ClaimDueAsync(
+                "other-worker", Now.AddSeconds(2), TimeSpan.FromSeconds(1), CancellationToken.None));
+            await store.CompleteAsync(lease, "Succeeded", CancellationToken.None);
+        }
+        finally
+        {
+            if (!claim.IsCompleted)
+            {
+                await transaction.DisposeAsync();
+                await claim.WaitAsync(TimeSpan.FromSeconds(20));
+            }
+        }
     }
 
     [Fact]
@@ -881,6 +950,7 @@ public sealed class SqlitePersistenceTests
             SqliteBackupRestoreService.RestoreStagedPath(file.Path),
             SqliteBackupRestoreService.RestoreStagedPath(file.Path) + "-wal",
             SqliteBackupRestoreService.RestoreStagedPath(file.Path) + "-shm",
+            SqliteBackupRestoreService.RestoreStagedPath(file.Path) + "-journal",
             file.Path + ".restore-staged.restore-state",
             file.Path + ".restore-staged.restore-state.tmp",
             file.Path + ".restore-staged.restore-lock",
@@ -899,7 +969,8 @@ public sealed class SqlitePersistenceTests
             SqliteBackupRestoreService.RestoreMarkerPath(file.Path) + ".tmp",
             SqliteBackupRestoreService.RestoreMarkerPath(file.Path),
             file.Path + "-wal",
-            file.Path + "-shm"
+            file.Path + "-shm",
+            file.Path + "-journal"
         };
         foreach (var artifactPath in artifactPaths)
         {

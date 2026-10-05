@@ -12,7 +12,7 @@ public sealed class SqliteJobStore : IJobStore
 
     /// <summary>Creates a job store over the configured SQLite database.</summary>
     /// <param name="database">Database connection and migration owner.</param>
-    /// <param name="clock">UTC clock used to reject expired lease completions.</param>
+    /// <param name="clock">UTC clock sampled under the write transaction for lease claims and completions.</param>
     public SqliteJobStore(SqliteDatabase database, IClock clock)
     {
         this.database = database;
@@ -32,10 +32,13 @@ public sealed class SqliteJobStore : IJobStore
             throw new ArgumentOutOfRangeException(nameof(leaseDuration));
         }
 
-        var now = SqliteValue.Utc(nowUtc);
-        var expiry = SqliteValue.Utc(nowUtc.Add(leaseDuration));
         await using var connection = await database.OpenConnectionAsync(cancellationToken);
         await using var transaction = connection.BeginTransaction(deferred: false);
+        var currentUtc = clock.UtcNow;
+        var claimUtc = currentUtc > nowUtc ? currentUtc : nowUtc;
+        var expiresUtc = claimUtc.Add(leaseDuration);
+        var now = SqliteValue.Utc(claimUtc);
+        var expiry = SqliteValue.Utc(expiresUtc);
 
         string? id = null;
         var payloadVersion = 0;
@@ -98,7 +101,7 @@ public sealed class SqliteJobStore : IJobStore
         }
 
         await transaction.CommitAsync(cancellationToken);
-        return new JobLease(new JobId(System.Guid.Parse(id)), workerId, nowUtc.Add(leaseDuration), payloadVersion);
+        return new JobLease(new JobId(System.Guid.Parse(id)), workerId, expiresUtc, payloadVersion);
     }
 
     /// <inheritdoc />

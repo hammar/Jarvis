@@ -382,7 +382,7 @@ public interface IJobStore
 {
     /// <summary>Claims the next due job using an expiring lease.</summary>
     /// <param name="workerId">Stable identifier for this worker process.</param>
-    /// <param name="nowUtc">Current UTC instant from the injected clock.</param>
+    /// <param name="nowUtc">Caller-observed UTC instant. Storage refreshes it after obtaining the write transaction, never moving it backward.</param>
     /// <param name="leaseDuration">Maximum duration of the claimed lease.</param>
     /// <param name="cancellationToken">Token that cancels before the claim is committed.</param>
     /// <returns>A lease, or <see langword="null"/> when no job is due.</returns>

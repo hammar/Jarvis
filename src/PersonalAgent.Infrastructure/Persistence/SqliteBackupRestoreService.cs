@@ -397,6 +397,7 @@ public sealed class SqliteBackupRestoreService
             RestoreRetiredShmPath(databasePath),
             RestoreStagedPath(databasePath) + "-wal",
             RestoreStagedPath(databasePath) + "-shm",
+            RestoreStagedPath(databasePath) + "-journal",
             RestoreMarkerPath(RestoreStagedPath(databasePath)),
             RestoreMarkerPath(RestoreStagedPath(databasePath)) + ".tmp",
             RestoreLockPath(RestoreStagedPath(databasePath)),
@@ -410,7 +411,8 @@ public sealed class SqliteBackupRestoreService
             RestoreMarkerPath(databasePath),
             RestoreLockPath(databasePath),
             databasePath + "-wal",
-            databasePath + "-shm"
+            databasePath + "-shm",
+            databasePath + "-journal"
         };
         if (restoreArtifacts.Any(artifact => PathsEqual(path, artifact)))
         {
