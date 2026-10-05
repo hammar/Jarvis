@@ -1,0 +1,702 @@
+using System.Collections.Concurrent;
+using System.Runtime.CompilerServices;
+using System.Text.Json;
+using System.Threading.Channels;
+using GitHub.Copilot;
+using Microsoft.Extensions.AI;
+using PersonalAgent.Application;
+using PersonalAgent.Domain;
+using PersonalAgent.Infrastructure.Persistence;
+using PermissionDecision = GitHub.Copilot.Rpc.PermissionDecision;
+
+namespace PersonalAgent.Infrastructure.AgentEngine.Copilot;
+
+/// <summary>Runs bounded application turns in disposable, explicitly configured Copilot runtimes.</summary>
+/// <remarks>
+/// Each turn receives a fresh SDK client, runtime directory, session, provider configuration, and exact
+/// host-registered tool catalog. Runtime state is replaceable; turn status and ordered events are persisted
+/// through application-owned contracts. The native runtime is a trusted dependency per ADR 0001; this class
+/// does not claim OS-enforced network containment.
+/// </remarks>
+public sealed class CopilotAgentEngine : IAgentEngine
+{
+    private static readonly TimeSpan CleanupTimeout = TimeSpan.FromSeconds(5);
+    private readonly IConversationStore conversations;
+    private readonly IToolDispatcher dispatcher;
+    private readonly IClock clock;
+    private readonly CopilotAgentEngineOptions options;
+    private readonly ISecretResolver? secretResolver;
+    private readonly CopilotTurnStateMachine stateMachine;
+    private readonly ConcurrentDictionary<TurnId, ActiveTurn> activeTurns = new();
+
+    /// <summary>Creates an engine using durable application event storage and explicit provider settings.</summary>
+    /// <param name="conversations">Authoritative application turn and ordered-event store.</param>
+    /// <param name="dispatcher">Host policy boundary for every model-proposed tool call.</param>
+    /// <param name="clock">UTC clock for event timestamps.</param>
+    /// <param name="options">Trusted runtime and provider configuration.</param>
+    /// <param name="secretResolver">Optional server-side resolver for configured provider key references.</param>
+    public CopilotAgentEngine(
+        IConversationStore conversations,
+        IToolDispatcher dispatcher,
+        IClock clock,
+        CopilotAgentEngineOptions options,
+        ISecretResolver? secretResolver = null)
+    {
+        this.conversations = conversations ?? throw new ArgumentNullException(nameof(conversations));
+        this.dispatcher = dispatcher ?? throw new ArgumentNullException(nameof(dispatcher));
+        this.clock = clock ?? throw new ArgumentNullException(nameof(clock));
+        this.options = options ?? throw new ArgumentNullException(nameof(options));
+        this.secretResolver = secretResolver;
+        if (conversations is not IAtomicTurnOutcomeStore terminalOutcomes)
+        {
+            throw new ArgumentException(
+                "The conversation store must atomically persist terminal turn outcomes.",
+                nameof(conversations));
+        }
+
+        stateMachine = new CopilotTurnStateMachine(conversations, terminalOutcomes, clock);
+        ArgumentException.ThrowIfNullOrWhiteSpace(options.RuntimeDirectory);
+    }
+
+    /// <inheritdoc />
+    public async IAsyncEnumerable<AgentEvent> RunTurnAsync(
+        AgentTurnRequest request,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        ValidateRequest(request);
+        var active = new ActiveTurn(request.MaximumToolCalls);
+        if (!activeTurns.TryAdd(request.TurnId, active))
+        {
+            throw new InvalidOperationException("An engine turn with this identifier is already active.");
+        }
+
+        var events = Channel.CreateUnbounded<AgentEvent>(new UnboundedChannelOptions
+        {
+            SingleReader = true,
+            SingleWriter = false,
+            AllowSynchronousContinuations = false
+        });
+        var execution = ExecuteTurnAsync(request, active, events.Writer, cancellationToken);
+        try
+        {
+            await foreach (var item in events.Reader.ReadAllAsync(cancellationToken))
+            {
+                yield return item;
+            }
+
+            await execution;
+        }
+        finally
+        {
+            if (!execution.IsCompleted)
+            {
+                active.CancelByCaller();
+            }
+
+            try
+            {
+                await execution;
+            }
+            finally
+            {
+                activeTurns.TryRemove(new KeyValuePair<TurnId, ActiveTurn>(request.TurnId, active));
+            }
+        }
+    }
+
+    /// <inheritdoc />
+    public async ValueTask CancelAsync(TurnId turnId, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!activeTurns.TryGetValue(turnId, out var active))
+        {
+            return;
+        }
+
+        if (!active.CancelByHost())
+        {
+            return;
+        }
+
+        await active.AbortAsync(cancellationToken);
+    }
+
+    private async Task ExecuteTurnAsync(
+        AgentTurnRequest request,
+        ActiveTurn active,
+        ChannelWriter<AgentEvent> output,
+        CancellationToken callerToken)
+    {
+        using var deadline = new CancellationTokenSource(request.Deadline);
+        using var turnCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+            callerToken,
+            deadline.Token,
+            active.CancellationToken);
+        var observed = Channel.CreateUnbounded<AgentEvent>(new UnboundedChannelOptions
+        {
+            SingleReader = true,
+            SingleWriter = false,
+            AllowSynchronousContinuations = false
+        });
+        var eventPump = PumpEventsAsync(request.TurnId, observed.Reader, output);
+        TurnStatus terminalStatus;
+        AgentEvent terminalEvent;
+
+        Exception? failure = null;
+        try
+        {
+            await stateMachine.EnsureRunningAsync(request.TurnId, turnCancellation.Token);
+            observed.Writer.TryWrite(new TurnStarted(request.TurnId, clock.UtcNow));
+            observed.Writer.TryWrite(new RouteSelected(
+                request.TurnId,
+                clock.UtcNow,
+                request.Provider,
+                "explicit_host_provider"));
+
+            var provider = GetProvider(request.Provider);
+            var apiKey = await ResolveApiKeyAsync(provider, turnCancellation.Token);
+            await RunSdkSessionAsync(request, provider, apiKey, active, observed.Writer, turnCancellation.Token);
+            (terminalStatus, terminalEvent) = CopilotTurnStateMachine.CreateTerminalOutcome(
+                request.TurnId,
+                clock,
+                CopilotTurnSignal.Completed);
+        }
+        catch (OperationCanceledException) when (callerToken.IsCancellationRequested || active.CancelledByHost)
+        {
+            (terminalStatus, terminalEvent) = CopilotTurnStateMachine.CreateTerminalOutcome(
+                request.TurnId,
+                clock,
+                CopilotTurnSignal.Cancelled);
+        }
+        catch (OperationCanceledException) when (active.FailureCode is not null)
+        {
+            (terminalStatus, terminalEvent) = CopilotTurnStateMachine.CreateTerminalOutcome(
+                request.TurnId,
+                clock,
+                CopilotTurnSignal.ToolBudgetExceeded);
+        }
+        catch (OperationCanceledException) when (deadline.IsCancellationRequested)
+        {
+            (terminalStatus, terminalEvent) = CopilotTurnStateMachine.CreateTerminalOutcome(
+                request.TurnId,
+                clock,
+                CopilotTurnSignal.DeadlineExceeded);
+        }
+        catch (TimeoutException)
+        {
+            (terminalStatus, terminalEvent) = CopilotTurnStateMachine.CreateTerminalOutcome(
+                request.TurnId,
+                clock,
+                CopilotTurnSignal.DeadlineExceeded);
+        }
+        catch (Exception) when (deadline.IsCancellationRequested)
+        {
+            terminalStatus = TurnStatus.Interrupted;
+            terminalEvent = new TurnInterrupted(request.TurnId, clock.UtcNow, "runtime_cleanup_failed");
+        }
+        catch (Exception) when (callerToken.IsCancellationRequested || active.CancelledByHost)
+        {
+            terminalStatus = TurnStatus.Interrupted;
+            terminalEvent = new TurnInterrupted(request.TurnId, clock.UtcNow, "runtime_cleanup_failed");
+        }
+        catch (Exception)
+        {
+            (terminalStatus, terminalEvent) = CopilotTurnStateMachine.CreateTerminalOutcome(
+                request.TurnId,
+                clock,
+                CopilotTurnSignal.Failed);
+        }
+
+        try
+        {
+            observed.Writer.TryComplete();
+            await eventPump;
+            var cancelledByHost = active.MarkTerminal();
+            if (terminalStatus == TurnStatus.Completed)
+            {
+                var signal = active.FailureCode is not null
+                    ? CopilotTurnSignal.ToolBudgetExceeded
+                    : callerToken.IsCancellationRequested || cancelledByHost
+                        ? CopilotTurnSignal.Cancelled
+                        : deadline.IsCancellationRequested
+                            ? CopilotTurnSignal.DeadlineExceeded
+                            : CopilotTurnSignal.Completed;
+                (terminalStatus, terminalEvent) = CopilotTurnStateMachine.CreateTerminalOutcome(
+                    request.TurnId,
+                    clock,
+                    signal);
+            }
+
+            await stateMachine.SetTerminalOutcomeAsync(request.TurnId, terminalStatus, terminalEvent);
+            await output.WriteAsync(terminalEvent, CancellationToken.None);
+        }
+        catch (Exception exception)
+        {
+            failure = exception;
+            throw;
+        }
+        finally
+        {
+            output.TryComplete(failure);
+        }
+    }
+
+    private async Task RunSdkSessionAsync(
+        AgentTurnRequest request,
+        CopilotProviderOptions provider,
+        string? apiKey,
+        ActiveTurn active,
+        ChannelWriter<AgentEvent> events,
+        CancellationToken cancellationToken)
+    {
+        var turnDirectory = Path.Combine(options.RuntimeDirectory, $"turn-{request.TurnId.Value:N}");
+        var runtimeDirectory = Path.Combine(turnDirectory, "runtime");
+        var workingDirectory = Path.Combine(turnDirectory, "workspace");
+        EnsurePrivateDirectory(turnDirectory);
+        EnsurePrivateDirectory(runtimeDirectory);
+        EnsurePrivateDirectory(workingDirectory);
+
+        var client = new CopilotClient(new CopilotClientOptions
+        {
+            Mode = CopilotClientMode.Empty,
+            BaseDirectory = runtimeDirectory,
+            WorkingDirectory = workingDirectory,
+            UseLoggedInUser = false,
+            LogLevel = CopilotLogLevel.None,
+            Environment = CreateRuntimeEnvironment(runtimeDirectory)
+        });
+        active.SetClient(client);
+        CopilotSession? session = null;
+        IDisposable? subscription = null;
+        try
+        {
+            await client.StartAsync().WaitAsync(cancellationToken);
+            var tools = request.Tools.Select(tool =>
+                new CopilotToolFunction(tool, dispatcher, request.TurnId, events, active, clock)).ToArray();
+            var sessionConfig = new SessionConfig
+            {
+                Model = provider.Model,
+                Provider = new ProviderConfig
+                {
+                    Type = "openai",
+                    BaseUrl = provider.BaseUrl.AbsoluteUri,
+                    WireApi = provider.WireApi,
+                    ApiKey = apiKey
+                },
+                AvailableTools = tools.Select(tool => $"custom:{tool.Name}").ToArray(),
+                EnableSessionStore = false,
+                InfiniteSessions = new InfiniteSessionConfig { Enabled = false },
+                Streaming = true,
+                SystemMessage = new SystemMessageConfig
+                {
+                    Mode = SystemMessageMode.Replace,
+                    Content = request.Instructions
+                },
+                OnPermissionRequest = (_, _) =>
+                    Task.FromResult(PermissionDecision.Reject("Only host-registered tools are permitted.")),
+                Tools = tools
+            };
+            session = await client.CreateSessionAsync(sessionConfig);
+            active.SetSession(session);
+            subscription = session.On<SessionEvent>(item =>
+            {
+                if (item is AssistantMessageDeltaEvent delta)
+                {
+                    events.TryWrite(new TextDelta(request.TurnId, clock.UtcNow, delta.Data.DeltaContent));
+                }
+            });
+
+            var prompt = JsonSerializer.Serialize(new
+            {
+                packetId = request.Context.PacketId,
+                policyVersion = request.Context.PolicyVersion,
+                items = request.Context.Items
+            });
+            var turn = session.SendAndWaitAsync(new MessageOptions { Prompt = prompt });
+            var response = await turn.WaitAsync(cancellationToken);
+            if (response?.Data.Content is null)
+            {
+                throw new InvalidOperationException("The engine returned no final assistant response.");
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            await active.AbortAsync();
+            throw;
+        }
+        catch (TimeoutException)
+        {
+            await active.AbortAsync();
+            throw;
+        }
+        finally
+        {
+            try
+            {
+                subscription?.Dispose();
+                if (session is not null)
+                {
+                    await active.DisposeSessionAsync(session);
+                }
+            }
+            finally
+            {
+                await active.StopClientAsync();
+            }
+        }
+    }
+
+    private async Task PumpEventsAsync(
+        TurnId turnId,
+        ChannelReader<AgentEvent> events,
+        ChannelWriter<AgentEvent> output)
+    {
+        await foreach (var item in events.ReadAllAsync())
+        {
+            await PersistAndPublishAsync(item, output, CancellationToken.None);
+        }
+    }
+
+    private async Task PersistAndPublishAsync(
+        AgentEvent item,
+        ChannelWriter<AgentEvent> output,
+        CancellationToken cancellationToken)
+    {
+        var payload = JsonSerializer.Serialize(item, item.GetType());
+        await conversations.AppendTurnEventAsync(
+            item.TurnId,
+            item.GetType().Name,
+            payload,
+            item.OccurredAtUtc,
+            cancellationToken);
+        await output.WriteAsync(item, cancellationToken);
+    }
+
+    private CopilotProviderOptions GetProvider(ProviderKind provider) =>
+        (provider switch
+        {
+            ProviderKind.Local => options.LocalProvider,
+            ProviderKind.Cloud => options.CloudProvider,
+            _ => null
+        }) is { } selected
+            ? ValidateProvider(provider, selected)
+            : throw new InvalidOperationException("The explicitly selected provider is not configured.");
+
+    private static CopilotProviderOptions ValidateProvider(ProviderKind kind, CopilotProviderOptions provider)
+    {
+        if (string.IsNullOrWhiteSpace(provider.Model) ||
+            !provider.BaseUrl.IsAbsoluteUri ||
+            provider.BaseUrl.Scheme is not ("http" or "https"))
+        {
+            throw new InvalidOperationException("The selected provider configuration is invalid.");
+        }
+
+        if (kind == ProviderKind.Local && !provider.BaseUrl.IsLoopback)
+        {
+            throw new InvalidOperationException("The local inference endpoint must use a loopback address.");
+        }
+
+        if (kind == ProviderKind.Cloud &&
+            provider.BaseUrl.Scheme != Uri.UriSchemeHttps &&
+            !provider.BaseUrl.IsLoopback)
+        {
+            throw new InvalidOperationException("A non-loopback cloud inference endpoint must use HTTPS.");
+        }
+
+        return provider;
+    }
+
+    private async ValueTask<string?> ResolveApiKeyAsync(
+        CopilotProviderOptions provider,
+        CancellationToken cancellationToken)
+    {
+        if (provider.ApiKeyReference is null)
+        {
+            return null;
+        }
+
+        if (secretResolver is null)
+        {
+            throw new InvalidOperationException("The provider secret resolver is not configured.");
+        }
+
+        var secret = await secretResolver.ResolveAsync(provider.ApiKeyReference, cancellationToken);
+        return secret.IsEmpty ? null : new string(secret.Span);
+    }
+
+    private void ValidateRequest(AgentTurnRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        if (request.Deadline <= TimeSpan.Zero ||
+            request.Deadline == Timeout.InfiniteTimeSpan ||
+            request.Deadline > TimeSpan.FromMilliseconds(uint.MaxValue - 1))
+        {
+            throw new ArgumentOutOfRangeException(nameof(request), "The turn deadline must be a positive finite duration.");
+        }
+
+        if (request.MaximumToolCalls < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(request), "The tool-call budget cannot be negative.");
+        }
+
+        if (request.Tools is null || request.Tools.Select(tool => tool.Name).Distinct(StringComparer.Ordinal).Count() != request.Tools.Count)
+        {
+            throw new ArgumentException("The turn tool catalog must contain unique tool names.", nameof(request));
+        }
+
+        foreach (var tool in request.Tools)
+        {
+            ArgumentException.ThrowIfNullOrWhiteSpace(tool.Name);
+            using var schema = JsonDocument.Parse(tool.InputSchema);
+            if (schema.RootElement.ValueKind != JsonValueKind.Object)
+            {
+                throw new ArgumentException("Each registered tool input schema must be a JSON object.", nameof(request));
+            }
+        }
+
+        ArgumentException.ThrowIfNullOrWhiteSpace(request.Instructions);
+        ArgumentNullException.ThrowIfNull(request.Context);
+    }
+
+    private static IReadOnlyDictionary<string, string> CreateRuntimeEnvironment(string runtimeDirectory)
+    {
+        var temporaryDirectory = Path.Combine(runtimeDirectory, "tmp");
+        EnsurePrivateDirectory(temporaryDirectory);
+        return new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["HOME"] = runtimeDirectory,
+            ["USERPROFILE"] = runtimeDirectory,
+            ["TMPDIR"] = temporaryDirectory,
+            ["TMP"] = temporaryDirectory,
+            ["TEMP"] = temporaryDirectory,
+            ["XDG_CONFIG_HOME"] = Path.Combine(runtimeDirectory, "config"),
+            ["XDG_CACHE_HOME"] = Path.Combine(runtimeDirectory, "cache")
+        };
+    }
+
+    private static void EnsurePrivateDirectory(string path)
+    {
+        Directory.CreateDirectory(path);
+        if (!OperatingSystem.IsWindows())
+        {
+            File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+    }
+
+    private static async Task DisposeBoundedAsync(Task disposal)
+    {
+        await disposal.WaitAsync(CleanupTimeout);
+    }
+
+    private sealed class ActiveTurn
+    {
+        private readonly CancellationTokenSource stop = new();
+        private readonly SemaphoreSlim abortGate = new(1, 1);
+        private readonly SemaphoreSlim clientStopGate = new(1, 1);
+        private readonly object sync = new();
+        private CopilotClient? client;
+        private CopilotSession? session;
+        private int toolCalls;
+        private bool clientStopped;
+        private bool cancelledByHost;
+        private bool terminal;
+        private string? failureCode;
+
+        public ActiveTurn(int maximumToolCalls) => MaximumToolCalls = maximumToolCalls;
+
+        public int MaximumToolCalls { get; }
+        public CancellationToken CancellationToken => stop.Token;
+        public bool CancelledByHost
+        {
+            get
+            {
+                lock (sync)
+                {
+                    return cancelledByHost;
+                }
+            }
+        }
+        public string? FailureCode => Volatile.Read(ref failureCode);
+
+        public void SetClient(CopilotClient value) => Volatile.Write(ref client, value);
+        public void SetSession(CopilotSession value) => Volatile.Write(ref session, value);
+
+        public bool CancelByHost()
+        {
+            lock (sync)
+            {
+                if (terminal)
+                {
+                    return false;
+                }
+
+                cancelledByHost = true;
+            }
+
+            stop.Cancel();
+            return true;
+        }
+
+        public void CancelByCaller() => _ = CancelByHost();
+
+        public bool MarkTerminal()
+        {
+            lock (sync)
+            {
+                terminal = true;
+                return cancelledByHost;
+            }
+        }
+
+        public void FailForToolBudget()
+        {
+            Interlocked.CompareExchange(ref failureCode, "tool_budget_exceeded", null);
+            stop.Cancel();
+        }
+
+        public int IncrementToolCalls() => Interlocked.Increment(ref toolCalls);
+
+        public async Task AbortAsync(CancellationToken cancellationToken = default)
+        {
+            await abortGate.WaitAsync(cancellationToken);
+            try
+            {
+                var currentSession = Volatile.Read(ref session);
+                if (currentSession is not null)
+                {
+                    try
+                    {
+                        await currentSession.AbortAsync().WaitAsync(CleanupTimeout, cancellationToken);
+                    }
+                    catch (TimeoutException)
+                    {
+                        await StopClientAsync(cancellationToken);
+                    }
+                }
+                else
+                {
+                    await StopClientAsync(cancellationToken);
+                }
+            }
+            finally
+            {
+                abortGate.Release();
+            }
+        }
+
+        public async Task DisposeSessionAsync(CopilotSession value)
+        {
+            await abortGate.WaitAsync();
+            try
+            {
+                if (ReferenceEquals(Volatile.Read(ref session), value))
+                {
+                    Volatile.Write(ref session, null);
+                }
+
+                await DisposeBoundedAsync(value.DisposeAsync().AsTask());
+            }
+            finally
+            {
+                abortGate.Release();
+            }
+        }
+
+        public async Task StopClientAsync(CancellationToken cancellationToken = default)
+        {
+            await clientStopGate.WaitAsync(cancellationToken);
+            try
+            {
+                var currentClient = Volatile.Read(ref client);
+                if (currentClient is null || clientStopped)
+                {
+                    return;
+                }
+
+                try
+                {
+                    await currentClient.ForceStopAsync().WaitAsync(CleanupTimeout, cancellationToken);
+                }
+                finally
+                {
+                    await DisposeBoundedAsync(currentClient.DisposeAsync().AsTask());
+                    clientStopped = true;
+                }
+            }
+            finally
+            {
+                clientStopGate.Release();
+            }
+        }
+    }
+
+    private sealed class CopilotToolFunction : AIFunction
+    {
+        private readonly AgentToolDefinition definition;
+        private readonly IToolDispatcher dispatcher;
+        private readonly TurnId turnId;
+        private readonly ChannelWriter<AgentEvent> events;
+        private readonly ActiveTurn active;
+        private readonly IClock clock;
+        private readonly JsonElement schema;
+
+        public CopilotToolFunction(
+            AgentToolDefinition definition,
+            IToolDispatcher dispatcher,
+            TurnId turnId,
+            ChannelWriter<AgentEvent> events,
+            ActiveTurn active,
+            IClock clock)
+        {
+            this.definition = definition;
+            this.dispatcher = dispatcher;
+            this.turnId = turnId;
+            this.events = events;
+            this.active = active;
+            this.clock = clock;
+            schema = JsonDocument.Parse(definition.InputSchema).RootElement.Clone();
+        }
+
+        /// <inheritdoc />
+        public override string Name => definition.Name;
+
+        /// <inheritdoc />
+        public override string Description => "Host-registered capability; inputs are untrusted and validated by host policy.";
+
+        /// <inheritdoc />
+        public override JsonElement JsonSchema => schema;
+
+        /// <inheritdoc />
+        public override IReadOnlyDictionary<string, object?> AdditionalProperties { get; } =
+            new Dictionary<string, object?>(StringComparer.Ordinal)
+            {
+                ["skip_permission"] = true
+            };
+
+        /// <inheritdoc />
+        protected override async ValueTask<object?> InvokeCoreAsync(
+            AIFunctionArguments arguments,
+            CancellationToken cancellationToken)
+        {
+            var callId = Guid.NewGuid().ToString("N");
+            await events.WriteAsync(new ToolProposed(turnId, clock.UtcNow, callId, definition.Name), cancellationToken);
+            var budgetCount = active.IncrementToolCalls();
+            if (budgetCount > active.MaximumToolCalls)
+            {
+                active.FailForToolBudget();
+                const string reason = "tool_budget_exceeded";
+                await events.WriteAsync(new ToolCompleted(turnId, clock.UtcNow, callId, "Rejected"), CancellationToken.None);
+                return JsonSerializer.Serialize(new ToolDispatchResult("Rejected", null, reason));
+            }
+
+            var serializedArguments = JsonSerializer.Serialize(arguments);
+            var result = await dispatcher.DispatchAsync(
+                new ToolDispatchRequest(turnId, callId, definition.Name, serializedArguments),
+                cancellationToken);
+            await events.WriteAsync(
+                new ToolCompleted(turnId, clock.UtcNow, callId, result.Status),
+                CancellationToken.None);
+            return JsonSerializer.Serialize(result);
+        }
+    }
+}

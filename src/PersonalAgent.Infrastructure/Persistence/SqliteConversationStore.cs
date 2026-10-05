@@ -6,7 +6,7 @@ using PersonalAgent.Domain;
 namespace PersonalAgent.Infrastructure.Persistence;
 
 /// <summary>Persists conversation messages and assigns a durable per-conversation sequence.</summary>
-public sealed class SqliteConversationStore : IConversationStore
+public sealed class SqliteConversationStore : IConversationStore, IAtomicTurnOutcomeStore
 {
     private readonly SqliteDatabase database;
     private readonly IClock clock;
@@ -309,15 +309,108 @@ public sealed class SqliteConversationStore : IConversationStore
         DateTimeOffset occurredAtUtc,
         CancellationToken cancellationToken)
     {
+        ValidateTurnEvent(eventType, payloadJson);
+        await using var connection = await database.OpenConnectionAsync(cancellationToken);
+        await using var transaction = connection.BeginTransaction(deferred: false);
+        var persisted = await AppendTurnEventAsync(
+            connection,
+            transaction,
+            turnId,
+            eventType,
+            payloadJson,
+            occurredAtUtc,
+            cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+        return persisted;
+    }
+
+    /// <inheritdoc />
+    public async ValueTask<PersistedTurnEvent> UpdateTurnStatusAndAppendEventAsync(
+        TurnId turnId,
+        TurnStatus status,
+        long expectedVersion,
+        DateTimeOffset updatedAtUtc,
+        string eventType,
+        string payloadJson,
+        DateTimeOffset occurredAtUtc,
+        CancellationToken cancellationToken)
+    {
+        if (status is not (TurnStatus.Completed or TurnStatus.Failed or TurnStatus.Cancelled or TurnStatus.Interrupted))
+        {
+            throw new ArgumentOutOfRangeException(nameof(status), "A terminal turn status is required.");
+        }
+
+        if (expectedVersion < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(expectedVersion));
+        }
+
+        ValidateTurnEvent(eventType, payloadJson);
+        await using var connection = await database.OpenConnectionAsync(cancellationToken);
+        await using var transaction = connection.BeginTransaction(deferred: false);
+        await using (var update = connection.CreateCommand())
+        {
+            update.Transaction = transaction;
+            update.CommandText = """
+                UPDATE turns SET status = $status,
+                    updated_at_utc = CASE WHEN updated_at_utc < $updated THEN $updated ELSE updated_at_utc END,
+                    version = version + 1
+                WHERE id = $id AND version = $version;
+                """;
+            update.Parameters.AddWithValue("$status", status.ToString());
+            update.Parameters.AddWithValue("$updated", SqliteValue.Utc(updatedAtUtc));
+            update.Parameters.AddWithValue("$id", SqliteValue.Guid(turnId.Value));
+            update.Parameters.AddWithValue("$version", expectedVersion);
+            if (await update.ExecuteNonQueryAsync(cancellationToken) != 1)
+            {
+                throw new PersistenceConcurrencyException("The conversation turn changed or no longer exists.");
+            }
+        }
+
+        await using (var conversation = connection.CreateCommand())
+        {
+            conversation.Transaction = transaction;
+            conversation.CommandText = """
+                UPDATE conversations SET updated_at_utc =
+                    CASE WHEN updated_at_utc < $updated THEN $updated ELSE updated_at_utc END
+                WHERE id = (SELECT conversation_id FROM turns WHERE id = $id);
+                """;
+            conversation.Parameters.AddWithValue("$updated", SqliteValue.Utc(updatedAtUtc));
+            conversation.Parameters.AddWithValue("$id", SqliteValue.Guid(turnId.Value));
+            await conversation.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        var persisted = await AppendTurnEventAsync(
+            connection,
+            transaction,
+            turnId,
+            eventType,
+            payloadJson,
+            occurredAtUtc,
+            cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+        return persisted;
+    }
+
+    private static void ValidateTurnEvent(string eventType, string payloadJson)
+    {
         ArgumentException.ThrowIfNullOrWhiteSpace(eventType);
         using var payload = JsonDocument.Parse(payloadJson);
         if (payload.RootElement.ValueKind != JsonValueKind.Object)
         {
             throw new ArgumentException("Turn event payload must be a JSON object.", nameof(payloadJson));
         }
+    }
 
-        await using var connection = await database.OpenConnectionAsync(cancellationToken);
-        await using var transaction = connection.BeginTransaction(deferred: false);
+    private static async ValueTask<PersistedTurnEvent> AppendTurnEventAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        TurnId turnId,
+        string eventType,
+        string payloadJson,
+        DateTimeOffset occurredAtUtc,
+        CancellationToken cancellationToken)
+    {
         long sequence;
         await using (var nextSequence = connection.CreateCommand())
         {
@@ -360,7 +453,6 @@ public sealed class SqliteConversationStore : IConversationStore
             await update.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        await transaction.CommitAsync(cancellationToken);
         return new PersistedTurnEvent(
             eventId,
             turnId,

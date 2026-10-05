@@ -122,7 +122,10 @@ internal sealed class FakeOpenAiProvider : IAsyncDisposable
             await WriteJsonAsync(context.Response,
                 JsonSerializer.Serialize(new
                 {
-                    id = $"chatcmpl-jarvis-{index}", @object = "chat.completion", created = 0, model = "fixture-model",
+                    id = $"chatcmpl-jarvis-{index}",
+                    @object = "chat.completion",
+                    created = 0,
+                    model = "fixture-model",
                     choices = new[] { new { index = 0, message = new { role = "assistant", content = (string?)null,
                         tool_calls = new[] { new { id = $"call-jarvis-{index}", type = "function",
                             function = new { name = RequestedTool, arguments = "{\"key\":\"fixture-key\"}" } } } },
@@ -155,7 +158,10 @@ internal sealed class FakeOpenAiProvider : IAsyncDisposable
         }
         await WriteJsonAsync(context.Response, JsonSerializer.Serialize(new
         {
-            id = "chatcmpl-jarvis-final", @object = "chat.completion", created = 0, model = "fixture-model",
+            id = "chatcmpl-jarvis-final",
+            @object = "chat.completion",
+            created = 0,
+            model = "fixture-model",
             choices = new[] { new { index = 0, message = new { role = "assistant", content = answer }, finish_reason = "stop" } },
         }));
     }

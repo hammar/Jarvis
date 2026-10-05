@@ -118,6 +118,7 @@ internal static class CoverageGate
 
     private static readonly (string Name, string RelativePath, double Lines, double Branches)[] CriticalModules =
     [
+        ("Copilot turn terminal and cancellation state machine", "src/PersonalAgent.Infrastructure/AgentEngine/Copilot/CopilotTurnStateMachine.cs", 95, 90),
         ("Approval persistence invariants", "src/PersonalAgent.Infrastructure/Persistence/SqliteApprovalStore.cs", 95, 90),
         ("Action journal idempotency", "src/PersonalAgent.Infrastructure/Persistence/SqliteActionJournalStore.cs", 95, 90)
     ];
