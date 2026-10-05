@@ -55,6 +55,70 @@ reflected type-dependency, and Web non-composition source fixtures. The browser 
 Playwright smoke and confirms a deliberately incorrect browser assertion is
 reported as a failure.
 
+## Acceptance evidence and independent review
+
+For each change, report the exact revision and validation commands/results,
+the platforms and runtime behaviors exercised, and what remains unexercised.
+Mocks, in-process tests, actual SDK contracts, out-of-process E2E and opt-in
+live tests establish different evidence; do not present one as another.
+Passing automation demonstrates only the conditions it measured, not a
+guarantee of correctness or safety.
+
+Each PR also receives independent agentic review against its specification,
+acceptance criteria, implementation, tests, documentation and meaningful
+risks. Keep a cumulative finding ledger across review rounds, with an explicit
+disposition and evidence for every finding regardless of severity. Carry
+summary-only “Previously missed” findings forward even if a later review
+omits them; omission is not resolution. The owner accepts the requirements,
+validation evidence and limits, review dispositions and disclosed residual
+risks, and retains control of requirements, material scope/tradeoffs and risk
+acceptance. This is not a requirement for the owner to manually inspect or
+certify generated code. None of this replaces CI, coverage, architecture,
+security/privacy or conversation-resolution gates.
+
+## Unavoidable interactive or live E2E evidence
+
+Coding and independent review agents must automate agent-observable acceptance
+first, using existing API, browser, process and controlled-endpoint tests.
+Human participation is the exception, not a substitute for automation.
+Review agents must flag missing required evidence and request this procedure
+rather than asking the owner to certify code or inventing manual tests.
+
+For each genuinely unavoidable gap, identify the accepted scenario/criterion,
+the evidence missing, why available automation or agent access cannot obtain
+it, and its impact on acceptance. Classify it as required acceptance evidence
+or an optional opt-in live evaluation. Live credentials or real devices do not
+by themselves make a test mandatory. Do not silently change that classification
+or weaken gates: an unavailable required test remains unverified and blocks
+completion under its existing gate. Record optional unrun tests as limitations;
+owner acceptance of residual risk is not a waiver of mandatory checks.
+
+Provide a scenario-specific procedure before asking the owner to participate:
+the tested revision/profile, isolated data and backup prerequisites as needed,
+safe commands or UI steps, expected measurable outcomes, stop conditions,
+and cleanup/restoration of test-owned state. Prepare and execute everything
+the agent can safely run, including diagnostics, without touching real
+household state or credentials without authorization. Obtain explicit consent
+before credential use, cloud disclosure or physical writes, stating scope,
+data disclosure, cost or side effects as applicable. Have the owner configure
+secrets through protected local mechanisms; never solicit secret values in
+chat or logs. Do not retry an ambiguous physical write blindly.
+
+Collect and interpret privacy-redacted logs, traces and measurable outcomes
+yourself. Use `ask_user` only for consent or the minimum actions/observations
+unavailable to the agent, such as an actual physical effect that telemetry
+cannot verify; do not ask the owner to diagnose logs or confirm agent-observable
+facts. Redact secrets, raw prompts and private memory before sharing artifacts.
+Record failures and uncertainty honestly, not only successful outcomes.
+
+The task/PR handoff records the criterion and classification, exact revision
+and environment, steps actually executed versus unrun, measured results,
+owner-only observations, cleanup outcome, remaining acceptance gaps and
+disclosed residual risks. Coding/review agents must guide required participation
+before claiming completion; never mark an unrun test as passed. Preserve the
+independent finding ledger and the owner's evidence-based acceptance and merge
+authority.
+
 ## Scenario mapping
 
 | Acceptance scenario | Test |

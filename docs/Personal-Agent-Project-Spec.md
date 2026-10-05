@@ -1,8 +1,8 @@
 # Local-first personal assistant — development specification
 
-Version: 0.2 · 2026-10-03 · Status: proposed implementation baseline
+Version: 0.3 · 2026-10-05 · Status: proposed implementation baseline
 
-Revision 0.2 makes Aspire the development orchestration baseline and adds an enforceable agentic development workflow. Sections 18–21 and the companion AGENTS.md define the detailed requirements. They supersede the abbreviated workflow guidance in section 15.
+Revision 0.2 made Aspire the development orchestration baseline and added an enforceable agentic development workflow. Revision 0.3 records the owner's accepted agentic implementation/review policy: specifications and acceptance evidence, rather than owner manual inspection of generated code, govern acceptance. Sections 18–21 and the companion AGENTS.md define the detailed requirements. They supersede the abbreviated workflow guidance in section 15.
 
 ## 1. Purpose and decisions
 
@@ -462,6 +462,12 @@ Test layers:
 5. Browser E2E: Playwright drives real Razor UI through Aspire, including login, chat streaming, exact cloud packet review, approval/rejection, memory editing, reminder inbox and reconnect/cancel.
 6. Live evaluations: opt-in local/cloud/device smoke and model dataset; separate from mandatory credential-free CI.
 
+### Unavoidable interactive or live E2E evidence
+
+Coding and independent review agents automate all agent-observable acceptance checks first and minimize owner interaction. When an accepted criterion requires evidence that automation or available agent access cannot obtain, identify the exact criterion, missing evidence, reason automation cannot cover it, and acceptance impact. Do not invent arbitrary manual tests or silently promote optional opt-in live evaluations to mandatory checks. Required acceptance evidence remains required; unavailable execution is unverified and blocks completion under the applicable gate. Owner acceptance of disclosed residual risk does not waive mandatory checks.
+
+Prepare and run everything safely available to the agent. For unavoidable owner participation, provide safe concrete prerequisites, steps, expected measurable outcomes, stop conditions and cleanup. Obtain explicit consent before credential use, cloud disclosure or physical writes; never request secret values in chat or logs. Agents interpret privacy-redacted logs and measurable findings themselves, using `ask_user` only for consent, actions or observations they cannot obtain themselves. Record the exact revision, steps executed/unrun, measured results, owner-only observations, acceptance impact and residual risks in the task/PR handoff. This supports evidence-based owner acceptance, not manual code certification or a claim that unrun tests passed. See [testing guidance](testing.md#unavoidable-interactive-or-live-e2e-evidence) for the reporting procedure.
+
 Coverage defaults below are requirements chosen for this project, not industry standards. Calculate covered/coverable counts, not the mean of project percentages. Missing reports or expected assemblies with no report fail the gate.
 
 | Gate | Required coverage |
@@ -484,21 +490,21 @@ T02 must prove enforcement: synthetic low coverage fails, architecture violation
 
 ### Scope and work ownership
 
-Use one integration owner, scoped implementers and an independent review role. This is a development workflow; it does not authorize runtime multi-agent behavior. This is a solo personal project with one human owner: an independent agent review can provide findings, but it is not a human approval and never replaces the owner's review of the actual diff or merge decision. Start T01/T02 sequentially, then parallelize only independent tasks with merged contracts. Assign isolated branches/worktrees and explicit file ownership. Never let multiple agents edit shared contracts, migrations or composition concurrently. Rebase and review integration against the final merge base.
+Use one integration owner, scoped implementers and an independent agentic review role. This is a development workflow; it grants no automatic development privileges to the runtime assistant and does not authorize runtime multi-agent behavior. The owner intentionally does not manually inspect generated implementation code or certify its correctness. The owner controls and accepts requirements, acceptance criteria, material scope/tradeoffs, automated validation evidence, independent review dispositions, disclosed residual risks, and the merge decision. This owner acceptance is not a GitHub reviewer approval. Start T01/T02 sequentially, then parallelize only independent tasks with merged contracts. Assign isolated branches/worktrees and explicit file ownership. Never let multiple agents edit shared contracts, migrations or composition concurrently. Keep open PRs current with the final `main` merge base and report integrations.
 
 Each task brief states: objective, spec/acceptance IDs, in-scope files, excluded work, dependencies, design assumptions, required tests, documentation updates and completion criteria. Implement one coherent vertical slice per PR. Prefer fewer than approximately 400 non-generated changed lines where practical; this is a review target, not permission to omit required work or split an inseparable change artificially. Separate refactors from behavior changes unless the dependency is explained. No speculative abstractions or unrelated cleanups.
 
-### PR lifecycle
+### PR lifecycle and acceptance
 
-1. Implementer reads spec, AGENTS.md, relevant ADRs and current code; records a short task plan.
-2. Implement small changes, regression/acceptance tests and corresponding documentation.
-3. Run repository validation scripts; self-review diff for scope, architecture and unintended data disclosure.
-4. Open a PR only when explicitly authorized in the development session. Title and body explain problem, behavior, scope, relevant spec/scenario IDs, actual validation, migration impact and remaining limitations. No claims of checks not run.
-5. Request an independent review in a fresh review context or branch where useful; provide the original task and diff/merge base, not just the implementer’s summary. The reviewer examines code and tests, checks docs/architecture, runs relevant validation and records concrete findings with severity, path and evidence. This review is advisory and does not create a GitHub approval gate.
-6. Resolve findings, push changes and rerun required gates. The reviewer may recheck the changed revision. Scope/contract changes update task/spec/ADR rather than hiding in the PR description.
-7. Only the owner merges. An agent session must never merge, enable auto-merge or enqueue a merge on its own initiative; it may do so only after the owner’s explicit live instruction. The owner reviews the actual diff before merging. GitHub prevents PR authors from approving their own PR, so branch protection does not require an approving-review count; do not treat its absence as a gap or work around it.
+1. The implementer reads this specification, AGENTS.md, relevant accepted ADRs and current code; records a short task brief and identifies the exact requirements and acceptance criteria that govern the change. The owner remains the authority for requirements and approves material scope or tradeoffs.
+2. Implement the scoped change with meaningful tests and corresponding documentation. Treat implementation artifacts as lower-level output of the accepted specification; do not grant the product runtime automatic development or review privileges.
+3. Run the required repository validation scripts. Report actual results, the exact revision, and what platforms and runtime behaviors were and were not exercised. Distinguish deterministic fakes, in-process tests, actual SDK contracts, out-of-process E2E, and opt-in live behavior. Do not claim that checks prove properties beyond their tested scope.
+4. Open a PR only when explicitly authorized in the development session. Its title/body describe the problem, behavior, scope, applicable spec/scenario IDs, actual validation, migration impact, exercised/unexercised behavior, limitations and known residual risks. Do not claim checks that were not run.
+5. Every PR receives an independent agentic review against the original task/specification, acceptance criteria, changed implementation/tests/docs, and meaningful risks. Give the reviewer the exact commit and merge base plus the complete finding ledger from prior rounds, not only an implementer summary. The reviewer records findings with severity and evidence, including summary-only findings labelled “Previously missed.” This review is not a GitHub approval gate.
+6. Maintain one cumulative finding ledger across review rounds. Each finding, regardless of severity, receives an explicit disposition: fixed with verifying revision/check; not applicable with rationale; or accepted as a residual risk with the owner's explicit acceptance. Record summary-only findings even if no path or line was supplied. A finding omitted by a later review remains in the ledger and is not resolved by omission. Give every reviewer the ledger; update it after each review and preserve the dispositions in the PR/task record. All findings must be dispositioned before owner acceptance. Re-run applicable gates after changes and record the revision that was reviewed and validated. Changes to requirements/contracts update the specification, task brief or ADR instead of being hidden in the PR description.
+7. The owner accepts the applicable specification/acceptance criteria, automated validation evidence and limits, complete review dispositions, and disclosed residual risks; the owner makes decisions about requirements, material scope/tradeoffs and risk acceptance, not code certification. Only the owner merges. An agent session must never merge, enable auto-merge or enqueue a merge on its own initiative; only the owner's explicit action or explicit live instruction to the agent authorizes landing. GitHub prevents PR authors from approving their own PR, so branch protection does not require an approving-review count; do not treat its absence as a gap or work around it.
 
-Review must cover correctness, side effects, concurrency/retries, idempotency limits, model/context boundaries, tool permissions, upgrade preservation, dependency/version changes, test quality and documentation. Distinguish blocking defects from optional preferences. Do not require unnecessary design churn or blanket approval for routine reversible implementation choices.
+Independent review covers spec conformance and meaningful risks, including correctness, side effects, concurrency/retries, idempotency limits, model/context boundaries, tool permissions, upgrade preservation, dependency/version changes, test quality and documentation. Reviewers distinguish concrete defects from preferences and report evidence and uncertainty; no severity is exempt from disposition. This workflow does not lower or replace required CI, coverage, architecture, security/privacy, or conversation-resolution gates. Automated checks and agentic review are evidence, not guarantees, and must state important unexercised platforms or runtime behavior.
 
 ### Mandatory CI / branch protection
 
@@ -512,6 +518,6 @@ Use CODEOWNERS for contracts, policy/security boundaries, migrations and CI as o
 
 ### Handoff evidence
 
-Each task/PR ends with actual checks run and results, files owned/changed, contract/schema changes, acceptance IDs covered, docs updated, unresolved risks and follow-up tasks. A mock demo is labelled as such. Record review conclusions against the exact commit. “Implemented” requires evidence; no success stubs, disabled tests or swallowing errors.
+Each task/PR ends with actual checks run and results, files owned/changed, contract/schema changes, acceptance IDs covered, docs updated, exercised/unexercised behavior, the cumulative finding ledger with every disposition, disclosed residual risks and follow-up tasks. The owner explicitly accepts the requirement basis, evidence, dispositions and residual risks before deciding to merge; this does not require the owner to inspect generated code. A mock demo is labelled as such. Record review conclusions against the exact commit. “Implemented” requires evidence; no success stubs, disabled tests or swallowing errors.
 
-Revision 0.2 deliverables are the updated spec and the repository-ready AGENTS.md. They define the checks to implement; no repository, CI pipeline or branch protection has been created by writing this specification.
+Revision 0.2 deliverables were the updated spec and repository-ready AGENTS.md; they define the checks to implement, not controls enabled by writing documentation. Revision 0.3 updates the documentation acceptance policy only. It does not change runtime behavior, CI, coverage thresholds, branch protection or required checks.
