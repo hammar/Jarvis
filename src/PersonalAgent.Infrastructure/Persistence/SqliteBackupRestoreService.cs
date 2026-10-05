@@ -151,6 +151,7 @@ public sealed class SqliteBackupRestoreService
                 CopyFileDurably(database.DatabasePath, rollbackPath);
                 CopySidecarDurablyIfPresent(database.DatabasePath + "-wal", RestoreOriginalWalPath(database.DatabasePath));
                 CopySidecarDurablyIfPresent(database.DatabasePath + "-shm", RestoreOriginalShmPath(database.DatabasePath));
+                CopySidecarDurablyIfPresent(database.DatabasePath + "-journal", RestoreOriginalJournalPath(database.DatabasePath));
             }
 
             DurableFileSystem.FlushDirectory(directory);
@@ -266,6 +267,7 @@ public sealed class SqliteBackupRestoreService
             {
                 CopyFileDurably(savedWalPath, databasePath + "-wal");
             }
+            CopySidecarDurablyIfPresent(RestoreOriginalJournalPath(databasePath), databasePath + "-journal");
             DurableFileSystem.FlushDirectory(Path.GetDirectoryName(databasePath)!);
         }
         else if (string.Equals(state, PreparedRestoreWithoutOriginal, StringComparison.Ordinal))
@@ -378,11 +380,15 @@ public sealed class SqliteBackupRestoreService
 
     private static string RestoreOriginalShmPath(string databasePath) => databasePath + ".restore-original-shm";
 
+    private static string RestoreOriginalJournalPath(string databasePath) => databasePath + ".restore-original-journal";
+
     private static string RestoreRetiredDatabasePath(string databasePath) => databasePath + ".restore-retired-database";
 
     private static string RestoreRetiredWalPath(string databasePath) => databasePath + ".restore-retired-wal";
 
     private static string RestoreRetiredShmPath(string databasePath) => databasePath + ".restore-retired-shm";
+
+    private static string RestoreRetiredJournalPath(string databasePath) => databasePath + ".restore-retired-journal";
 
     private static void EnsureNotRestoreArtifactPath(string databasePath, string path, string parameterName)
     {
@@ -392,9 +398,11 @@ public sealed class SqliteBackupRestoreService
             RestoreRollbackPath(databasePath),
             RestoreOriginalWalPath(databasePath),
             RestoreOriginalShmPath(databasePath),
+            RestoreOriginalJournalPath(databasePath),
             RestoreRetiredDatabasePath(databasePath),
             RestoreRetiredWalPath(databasePath),
             RestoreRetiredShmPath(databasePath),
+            RestoreRetiredJournalPath(databasePath),
             RestoreStagedPath(databasePath) + "-wal",
             RestoreStagedPath(databasePath) + "-shm",
             RestoreStagedPath(databasePath) + "-journal",
@@ -404,9 +412,11 @@ public sealed class SqliteBackupRestoreService
             RestoreRollbackPath(RestoreStagedPath(databasePath)),
             RestoreOriginalWalPath(RestoreStagedPath(databasePath)),
             RestoreOriginalShmPath(RestoreStagedPath(databasePath)),
+            RestoreOriginalJournalPath(RestoreStagedPath(databasePath)),
             RestoreRetiredDatabasePath(RestoreStagedPath(databasePath)),
             RestoreRetiredWalPath(RestoreStagedPath(databasePath)),
             RestoreRetiredShmPath(RestoreStagedPath(databasePath)),
+            RestoreRetiredJournalPath(RestoreStagedPath(databasePath)),
             RestoreMarkerPath(databasePath) + ".tmp",
             RestoreMarkerPath(databasePath),
             RestoreLockPath(databasePath),
@@ -507,11 +517,14 @@ public sealed class SqliteBackupRestoreService
                      RestoreRollbackPath(databasePath),
                      RestoreOriginalWalPath(databasePath),
                      RestoreOriginalShmPath(databasePath),
+                     RestoreOriginalJournalPath(databasePath),
                      RestoreRetiredDatabasePath(databasePath),
                      RestoreRetiredWalPath(databasePath),
                      RestoreRetiredShmPath(databasePath),
+                     RestoreRetiredJournalPath(databasePath),
                      RestoreStagedPath(databasePath) + "-wal",
                      RestoreStagedPath(databasePath) + "-shm",
+                     RestoreStagedPath(databasePath) + "-journal",
                      RestoreMarkerPath(databasePath) + ".tmp",
                      RestoreMarkerPath(databasePath)
                  })
@@ -579,6 +592,7 @@ public sealed class SqliteBackupRestoreService
     {
         RetireSidecar(databasePath + "-wal", RestoreRetiredWalPath(databasePath));
         RetireSidecar(databasePath + "-shm", RestoreRetiredShmPath(databasePath));
+        RetireSidecar(databasePath + "-journal", RestoreRetiredJournalPath(databasePath));
     }
 
     private static void RetireSidecar(string sidecarPath, string retiredPath)
@@ -600,7 +614,7 @@ public sealed class SqliteBackupRestoreService
 
     private static void DeleteDatabaseSidecars(string path)
     {
-        foreach (var suffix in new[] { "-wal", "-shm" })
+        foreach (var suffix in new[] { "-wal", "-shm", "-journal" })
         {
             var sidecar = path + suffix;
             if (File.Exists(sidecar))

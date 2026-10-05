@@ -85,6 +85,9 @@ and reserved recovery-artifact paths before cleanup or recovery; startup
 serializes marker recovery across processes.
 Reservations include the staging database's own recovery marker, lock, and
 rollback names, plus live and staged SQLite rollback journals.
+Restore snapshots and retires an existing rollback journal along with WAL/SHM;
+rollback restores that journal with its original database, while successful
+replacement removes it so SQLite cannot replay old pages into restored data.
 Lease claims refresh the caller-observed instant using the injected clock
 inside the write transaction before calculating the deadline.
 Lease completion reads the expiry clock inside its acquired

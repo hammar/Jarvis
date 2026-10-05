@@ -957,15 +957,19 @@ public sealed class SqlitePersistenceTests
             file.Path + ".restore-staged.restore-rollback",
             file.Path + ".restore-staged.restore-original-wal",
             file.Path + ".restore-staged.restore-original-shm",
+            file.Path + ".restore-staged.restore-original-journal",
             file.Path + ".restore-staged.restore-retired-database",
             file.Path + ".restore-staged.restore-retired-wal",
             file.Path + ".restore-staged.restore-retired-shm",
+            file.Path + ".restore-staged.restore-retired-journal",
             SqliteBackupRestoreService.RestoreRollbackPath(file.Path),
             file.Path + ".restore-original-wal",
             file.Path + ".restore-original-shm",
+            file.Path + ".restore-original-journal",
             file.Path + ".restore-retired-database",
             file.Path + ".restore-retired-wal",
             file.Path + ".restore-retired-shm",
+            file.Path + ".restore-retired-journal",
             SqliteBackupRestoreService.RestoreMarkerPath(file.Path) + ".tmp",
             SqliteBackupRestoreService.RestoreMarkerPath(file.Path),
             file.Path + "-wal",
@@ -1255,6 +1259,92 @@ public sealed class SqlitePersistenceTests
         Assert.Equal(2L, (long)(await verify.ExecuteScalarAsync())!);
         Assert.False(File.Exists(SqliteBackupRestoreService.RestoreMarkerPath(file.Path)));
         Assert.False(File.Exists(rollbackPath));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("Category", "Integration")]
+    public async Task RestoreRetiresHotJournalAndFailedReplacementRecoversOriginal(bool failReplacement)
+    {
+        using var directory = IsolatedDirectory.Create();
+        var sourcePath = Path.Combine(directory.Path, "source.db");
+        var source = new SqliteDatabase(sourcePath);
+        await source.InitializeAsync();
+        await using (var connection = await source.OpenConnectionAsync())
+        await using (var create = connection.CreateCommand())
+        {
+            create.CommandText = """
+                CREATE TABLE hot_journal_fixture (id INTEGER PRIMARY KEY, value TEXT NOT NULL, padding BLOB);
+                WITH RECURSIVE numbers(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM numbers WHERE n < 100)
+                INSERT INTO hot_journal_fixture SELECT n, 'backup', zeroblob(4000) FROM numbers;
+                """;
+            await create.ExecuteNonQueryAsync();
+        }
+        var backupPath = Path.Combine(directory.Path, "backup.db");
+        await new SqliteBackupRestoreService(source).CreateBackupAsync(backupPath);
+        var livePath = Path.Combine(directory.Path, "live.db");
+        await using (var writer = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = sourcePath,
+            Pooling = false
+        }.ToString()))
+        {
+            await writer.OpenAsync();
+            await using var configure = writer.CreateCommand();
+            configure.CommandText = """
+                PRAGMA journal_mode = PERSIST;
+                PRAGMA synchronous = FULL;
+                PRAGMA cache_size = 1;
+                PRAGMA cache_spill = ON;
+                UPDATE hot_journal_fixture SET value = 'original';
+                """;
+            await configure.ExecuteNonQueryAsync();
+            await using var transaction = writer.BeginTransaction();
+            await using var dirty = writer.CreateCommand();
+            dirty.Transaction = transaction;
+            dirty.CommandText = "UPDATE hot_journal_fixture SET value = 'uncommitted';";
+            await dirty.ExecuteNonQueryAsync();
+            var journal = await File.ReadAllBytesAsync(sourcePath + "-journal");
+            Assert.Equal(new byte[] { 0xd9, 0xd5, 0x05, 0xf9, 0x20, 0xa1, 0x63, 0xd7 }, journal[..8]);
+            await transaction.CommitAsync();
+            var persistedJournal = await File.ReadAllBytesAsync(sourcePath + "-journal");
+            // PERSIST flushes the final records then zeros the first header on commit.
+            // Restore SQLite's captured header to model interruption before that zeroing.
+            journal[..28].CopyTo(persistedJournal, 0);
+            File.Copy(sourcePath, livePath);
+            await File.WriteAllBytesAsync(livePath + "-journal", persistedJournal);
+        }
+
+        var restore = new SqliteBackupRestoreService(
+            new SqliteDatabase(livePath),
+            failReplacement ? () => throw new IOException("replacement failed") : null);
+        if (failReplacement)
+        {
+            await Assert.ThrowsAsync<IOException>(() => restore.RestoreAsync(backupPath));
+            Assert.True(File.Exists(livePath + "-journal"));
+        }
+        else
+        {
+            await restore.RestoreAsync(backupPath);
+            Assert.False(File.Exists(livePath + "-journal"));
+        }
+
+        var reopened = new SqliteDatabase(livePath);
+        await reopened.InitializeAsync();
+        await using var verify = await reopened.OpenConnectionAsync();
+        await using var rows = verify.CreateCommand();
+        rows.CommandText = "SELECT DISTINCT value FROM hot_journal_fixture;";
+        await using (var reader = await rows.ExecuteReaderAsync())
+        {
+            Assert.True(await reader.ReadAsync());
+            Assert.Equal(failReplacement ? "original" : "backup", reader.GetString(0));
+            Assert.False(await reader.ReadAsync());
+        }
+        rows.CommandText = "PRAGMA integrity_check;";
+        Assert.Equal("ok", await rows.ExecuteScalarAsync());
+        Assert.False(File.Exists(livePath + ".restore-original-journal"));
+        Assert.False(File.Exists(livePath + ".restore-retired-journal"));
     }
 
     [Fact]

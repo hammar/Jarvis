@@ -56,6 +56,9 @@ calculating the lease deadline, so write-lock waits cannot consume the lease.
 Lease completion checks the current clock only after acquiring its write
 transaction, so waiting for another writer cannot authorize an expired lease.
 Restore never replays jobs or uncertain physical actions.
+Hot rollback journals are snapshotted and retired before replacement, and
+restored only with the original database during rollback. They cannot replay
+old database pages over a successful restore.
 Simulator and E2E Web processes require an explicit isolated
 `JARVIS_DATA_DIR`; AppHost supplies it for managed profiles. Schema downgrade
 is not automatic; restore a backup made for the prior binary. Use

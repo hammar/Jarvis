@@ -36,6 +36,9 @@ replacement on macOS/Linux. Windows does not support flushing directory
 handles through Win32, so use `MoveFileExW` with `MOVEFILE_WRITE_THROUGH` for
 critical renames. Retire live sidecars by write-through rename before
 replacement; marker-driven recovery makes retired-file cleanup repeatable.
+Include rollback-mode journals in the saved and retired sidecars: a hot
+journal must be restored only with its original database during rollback,
+never left beside a successful replacement where SQLite could replay it.
 On macOS/Linux, require an owner-private data directory (mode 700 or stricter)
 and restrict the database, sidecars, and recovery lock to mode 600. Windows
 deployments must keep the configured directory owned by the current account

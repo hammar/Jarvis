@@ -67,6 +67,7 @@ reported as a failure.
 | Lease completion checks expiry inside the acquired write transaction | `SqlitePersistenceTests.CompletionReadsExpiryClockOnlyAfterAcquiringTheWriteTransaction` |
 | Contended lease claims refresh the deadline inside the write transaction | `SqlitePersistenceTests.ContendedClaimRefreshesItsDeadlineAfterTheWriterReleasesTheLock` |
 | Live and staged rollback journals cannot be backup or restore paths | `SqlitePersistenceTests.BackupAndRestoreRejectRestoreArtifactsWithoutDeletingSourceBackup` |
+| Hot rollback journals cannot overwrite restored data and survive failed-replacement rollback | `SqlitePersistenceTests.RestoreRetiresHotJournalAndFailedReplacementRecoversOriginal` |
 | A frozen version-1 schema upgrades with working constraints and cascading retention | `SqlitePersistenceTests.UpgradedVersionOneSchemaSupportsWritesConstraintsAndRetention` |
 | Symlink aliases cannot bypass restore path reservations | `SqlitePersistenceTests.BackupAndRestoreRejectArtifactPathsReachedThroughDirectorySymlinks` |
 | Shared data directories are rejected and database files are private | `SqlitePersistenceTests.DatabaseRejectsSharedDataDirectoryAndRestrictsDatabasePermissions` |
