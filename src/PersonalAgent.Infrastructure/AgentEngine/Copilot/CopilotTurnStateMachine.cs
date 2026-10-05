@@ -11,6 +11,7 @@ internal enum CopilotTurnSignal
     Cancelled,
     ToolBudgetExceeded,
     DeadlineExceeded,
+    RuntimeCleanupFailed,
     Failed
 }
 
@@ -84,6 +85,8 @@ internal sealed class CopilotTurnStateMachine(
                 (TurnStatus.Failed, new TurnFailed(turnId, clock.UtcNow, "tool_budget_exceeded")),
             CopilotTurnSignal.DeadlineExceeded =>
                 (TurnStatus.Interrupted, new TurnInterrupted(turnId, clock.UtcNow, "engine_deadline_exceeded")),
+            CopilotTurnSignal.RuntimeCleanupFailed =>
+                (TurnStatus.Interrupted, new TurnInterrupted(turnId, clock.UtcNow, "runtime_cleanup_failed")),
             CopilotTurnSignal.Failed =>
                 (TurnStatus.Failed, new TurnFailed(turnId, clock.UtcNow, "engine_failure")),
             _ => throw new ArgumentOutOfRangeException(nameof(signal), "The engine terminal signal is not supported.")

@@ -101,12 +101,12 @@ Application contract is unchanged.
   build with nullable enabled and zero warnings/errors.
 - `tools/validate.sh architecture`: 6/6 tests passed.
 - `tools/validate.sh unit`: 8/8 discovered tests passed.
-- `tools/validate.sh integration`: 60/60 discovered tests passed.
+- `tools/validate.sh integration`: 61/61 discovered tests passed.
 - `tools/validate.sh sdk-contracts`: pinned SDK/runtime validation harness
   passed; 9/9 adapter SDK contract tests passed.
-- `tools/validate.sh coverage`: passed. Changed executable lines 381/421
-  (90.9%); Infrastructure 1638/1801 lines (90.9%) and 416/544 branches
-  (76.5%). The coverage gate also enforced the 95% line / 90% branch threshold
+- `tools/validate.sh coverage`: passed. Changed executable lines 39/39
+  (100.0%); Infrastructure 1670/1833 lines (91.1%) and 423/555 branches
+  (76.2%). The coverage gate also enforced the 95% line / 90% branch threshold
   for the owned terminal/cancellation state machine.
 - `tools/validate.sh aspire-e2e`: 2/2 tests passed.
 - `tools/validate.sh browser-e2e`: 1/1 browser test passed; the deliberate
@@ -126,10 +126,14 @@ Initial pre-PR worktree review findings and dispositions:
 |---|---|---|
 | T04-R1 | Terminal status and terminal event could be persisted in separate transactions. | Fixed with `IAtomicTurnOutcomeStore`; stale-version and combined status/event behavior are covered by `CopilotTurnStateMachineTests.TurnStateMachineAppliesRunningAndTerminalTransitionsWithCompareAndSwap`. Release integration and coverage gates passed after the change. |
 | T04-R2 | A failed/timed-out runtime stop could skip client disposal and prevent a later cleanup attempt. | Fixed by serializing client cleanup and attempting bounded disposal in a `finally` path. Release build, integration, SDK runtime contracts, and coverage gates passed after the change. |
+| T04-R3 | Atomic compare-and-swap could rewrite an already-terminal turn when called with its current version. | Fixed by excluding all terminal statuses in both status-update predicates. The SQLite integration regression verifies stale and current versions cannot change the status or append a second event. |
+| T04-R4 | Session/client cleanup exceptions were reported as generic engine failures rather than interrupted runtime cleanup. | Fixed with a cleanup exception classifier and interruption signal; cleanup now attempts all resources even when an earlier cleanup action throws. `RuntimeCleanupAttemptsEveryResourceAndReportsCleanupFailure` covers all cleanup failures and their classification. |
+| T04-R5 | No disconnect/reconnect cursor test proved ordered replay without repeating the tool or terminal event. | Fixed in `ActualRuntimeInvokesOnlyRegisteredToolAndForwardsHostOutcome`, which resumes SQLite event replay after the observed prefix and verifies sequence, event order, one tool dispatch, and one terminal event. |
+| T04-R6 | Changed-line coverage evidence was stale and calculated inconsistently. | Fixed using the final validation reports: 39/39 changed executable lines (100.0%). Infrastructure totals and integration discovery counts above are from the same final reports. |
 
-This review was against the uncommitted worktree. The eventual PR must retain
-these references and dispositions and receive its required independent review
-against the exact PR commit.
+These findings were raised against the PR commit and fixed in the follow-up
+revision. Final validation results are recorded above; the review threads are
+resolved with replies after the fixes were committed and pushed.
 
 ## Completion criteria
 

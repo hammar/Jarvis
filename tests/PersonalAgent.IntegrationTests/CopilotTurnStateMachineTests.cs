@@ -58,6 +58,16 @@ public sealed class CopilotTurnStateMachineTests
                 """{"reasonCode":"engine_failure"}""",
                 Now,
                 CancellationToken.None));
+        await Assert.ThrowsAsync<PersistenceConcurrencyException>(async () =>
+            await store.UpdateTurnStatusAndAppendEventAsync(
+                turnId,
+                TurnStatus.Failed,
+                savedTurn!.Version,
+                Now,
+                nameof(TurnFailed),
+                """{"reasonCode":"engine_failure"}""",
+                Now,
+                CancellationToken.None));
         Assert.Equal(TurnStatus.Completed, (await store.GetTurnAsync(turnId, CancellationToken.None))?.Status);
         Assert.Single(await store.ReadTurnEventsAfterAsync(turnId, 0, 10, CancellationToken.None));
     }
@@ -74,22 +84,71 @@ public sealed class CopilotTurnStateMachineTests
             CopilotTurnStateMachine.CreateTerminalOutcome(turnId, clock, CopilotTurnSignal.Cancelled),
             CopilotTurnStateMachine.CreateTerminalOutcome(turnId, clock, CopilotTurnSignal.ToolBudgetExceeded),
             CopilotTurnStateMachine.CreateTerminalOutcome(turnId, clock, CopilotTurnSignal.DeadlineExceeded),
+            CopilotTurnStateMachine.CreateTerminalOutcome(turnId, clock, CopilotTurnSignal.RuntimeCleanupFailed),
             CopilotTurnStateMachine.CreateTerminalOutcome(turnId, clock, CopilotTurnSignal.Failed)
         };
 
         Assert.Equal(
-            [TurnStatus.Completed, TurnStatus.Cancelled, TurnStatus.Failed, TurnStatus.Interrupted, TurnStatus.Failed],
+            [
+                TurnStatus.Completed,
+                TurnStatus.Cancelled,
+                TurnStatus.Failed,
+                TurnStatus.Interrupted,
+                TurnStatus.Interrupted,
+                TurnStatus.Failed
+            ],
             outcomes.Select(item => item.Status));
         Assert.Equal(
-            [typeof(TurnCompleted), typeof(TurnCancelled), typeof(TurnFailed), typeof(TurnInterrupted), typeof(TurnFailed)],
+            [
+                typeof(TurnCompleted),
+                typeof(TurnCancelled),
+                typeof(TurnFailed),
+                typeof(TurnInterrupted),
+                typeof(TurnInterrupted),
+                typeof(TurnFailed)
+            ],
             outcomes.Select(item => item.Event.GetType()));
         Assert.Equal("tool_budget_exceeded", Assert.IsType<TurnFailed>(outcomes[2].Event).ReasonCode);
         Assert.Equal("engine_deadline_exceeded", Assert.IsType<TurnInterrupted>(outcomes[3].Event).ReasonCode);
-        Assert.Equal("engine_failure", Assert.IsType<TurnFailed>(outcomes[4].Event).ReasonCode);
+        Assert.Equal("runtime_cleanup_failed", Assert.IsType<TurnInterrupted>(outcomes[4].Event).ReasonCode);
+        Assert.Equal("engine_failure", Assert.IsType<TurnFailed>(outcomes[5].Event).ReasonCode);
         Assert.All(outcomes, item => Assert.Equal(turnId, item.Event.TurnId));
         Assert.All(outcomes, item => Assert.Equal(Now, item.Event.OccurredAtUtc));
         Assert.Throws<ArgumentOutOfRangeException>(() =>
             CopilotTurnStateMachine.CreateTerminalOutcome(turnId, clock, (CopilotTurnSignal)int.MaxValue));
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task RuntimeCleanupAttemptsEveryResourceAndReportsCleanupFailure()
+    {
+        var attempts = new List<string>();
+
+        var exception = await Assert.ThrowsAsync<CopilotAgentEngine.RuntimeCleanupException>(() =>
+            CopilotAgentEngine.CleanupRuntimeAsync(
+                () =>
+                {
+                    attempts.Add("subscription");
+                    throw new InvalidOperationException("subscription cleanup");
+                },
+                () =>
+                {
+                    attempts.Add("session");
+                    return Task.FromException(new InvalidOperationException("session cleanup"));
+                },
+                () =>
+                {
+                    attempts.Add("client");
+                    return Task.FromException(new InvalidOperationException("client cleanup"));
+                }));
+
+        Assert.Equal(["subscription", "session", "client"], attempts);
+        var failures = Assert.IsType<AggregateException>(exception.InnerException);
+        Assert.Equal(3, failures.Flatten().InnerExceptions.Count);
+        Assert.Equal(CopilotTurnSignal.RuntimeCleanupFailed, CopilotAgentEngine.GetFailureSignal(exception));
+        Assert.Equal(
+            CopilotTurnSignal.Failed,
+            CopilotAgentEngine.GetFailureSignal(new InvalidOperationException("provider failure")));
     }
 
     private sealed class TestClock : IClock

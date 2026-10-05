@@ -154,13 +154,14 @@ authority.
 | Browser reaches actual AppHost Web resource | `BrowserSmokeTests.PlaywrightLoadsTheAspireSimulatorPage` |
 | SDK compatibility uses pinned actual runtime | T01 `--contracts` suite, `sdk-contracts-platform` on Linux/macOS |
 | Adapter streams events with explicit local/cloud provider and transcript isolation | `CopilotAgentEngineContractTests.ActualRuntimeStreamsEventsUsesExplicitProviderAndPersistsOrderedTerminalOutcome` |
-| Adapter exposes only the exact registered tool and forwards host outcome | `CopilotAgentEngineContractTests.ActualRuntimeInvokesOnlyRegisteredToolAndForwardsHostOutcome` |
+| Adapter exposes only the exact registered tool and forwards host outcome; reconnect replay resumes after the observed sequence without redispatching or duplicating the final event | `CopilotAgentEngineContractTests.ActualRuntimeInvokesOnlyRegisteredToolAndForwardsHostOutcome` |
 | Tool execution count cannot exceed the host budget | `CopilotAgentEngineContractTests.ActualRuntimeToolLoopCannotExceedHostBudget` |
 | Explicit cancellation reaches a blocked host callback exactly once | `CopilotAgentEngineContractTests.CancelAsyncCancelsHostToolAndEmitsOnePersistedCancellationOutcome` |
 | SDK child-process crash becomes interruption; next turn starts a fresh runtime | `CopilotAgentEngineContractTests.RuntimeProcessCrashBecomesInterruptedAndNextTurnStartsFreshRuntime` |
 | Provider failure is explicit and does not include provider error content | `CopilotAgentEngineContractTests.ProviderFailureEmitsSafeFailureCodeWithoutLeakingProviderMessage` |
 | Terminal status and event commit atomically; stale compare-and-swap writes do not append an event | `CopilotTurnStateMachineTests.TurnStateMachineAppliesRunningAndTerminalTransitionsWithCompareAndSwap` |
 | Every terminal signal maps to one typed status/event pair | `CopilotTurnStateMachineTests.TurnStateMachineMapsEveryEngineSignalToOneTypedTerminalOutcome` |
+| Cleanup attempts subscription, session, and client disposal and classifies uncertainty as interruption | `CopilotTurnStateMachineTests.RuntimeCleanupAttemptsEveryResourceAndReportsCleanupFailure` |
 | Prohibited dependency edges are rejected | `ArchitectureBoundaryTests` negative fixtures |
 | Missing discovery/report/low coverage fails | `PersonalAgent.Validation gate-self-test` |
 | Browser test failure is visible | `BrowserSmokeTests.DeliberatelyIncorrectBrowserAssertionFails` probe |

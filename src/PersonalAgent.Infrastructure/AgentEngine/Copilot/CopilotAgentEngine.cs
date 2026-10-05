@@ -199,12 +199,12 @@ public sealed class CopilotAgentEngine : IAgentEngine
             terminalStatus = TurnStatus.Interrupted;
             terminalEvent = new TurnInterrupted(request.TurnId, clock.UtcNow, "runtime_cleanup_failed");
         }
-        catch (Exception)
+        catch (Exception exception)
         {
             (terminalStatus, terminalEvent) = CopilotTurnStateMachine.CreateTerminalOutcome(
                 request.TurnId,
                 clock,
-                CopilotTurnSignal.Failed);
+                GetFailureSignal(exception));
         }
 
         try
@@ -331,20 +331,63 @@ public sealed class CopilotAgentEngine : IAgentEngine
         }
         finally
         {
-            try
-            {
-                subscription?.Dispose();
-                if (session is not null)
-                {
-                    await active.DisposeSessionAsync(session);
-                }
-            }
-            finally
-            {
-                await active.StopClientAsync();
-            }
+            await CleanupRuntimeAsync(
+                subscription is null ? null : subscription.Dispose,
+                session is null ? null : () => active.DisposeSessionAsync(session),
+                () => active.StopClientAsync());
         }
     }
+
+    internal static async Task CleanupRuntimeAsync(
+        Action? disposeSubscription,
+        Func<Task>? disposeSession,
+        Func<Task> stopClient)
+    {
+        Exception? cleanupFailure = null;
+        try
+        {
+            disposeSubscription?.Invoke();
+        }
+        catch (Exception exception)
+        {
+            cleanupFailure = exception;
+        }
+
+        try
+        {
+            if (disposeSession is not null)
+            {
+                await disposeSession();
+            }
+        }
+        catch (Exception exception)
+        {
+            cleanupFailure = cleanupFailure is null
+                ? exception
+                : new AggregateException(cleanupFailure, exception);
+        }
+
+        try
+        {
+            await stopClient();
+        }
+        catch (Exception exception)
+        {
+            cleanupFailure = cleanupFailure is null
+                ? exception
+                : new AggregateException(cleanupFailure, exception);
+        }
+
+        if (cleanupFailure is not null)
+        {
+            throw new RuntimeCleanupException(cleanupFailure);
+        }
+    }
+
+    internal static CopilotTurnSignal GetFailureSignal(Exception exception) =>
+        exception is RuntimeCleanupException
+            ? CopilotTurnSignal.RuntimeCleanupFailed
+            : CopilotTurnSignal.Failed;
 
     private async Task PumpEventsAsync(
         TurnId turnId,
@@ -487,6 +530,9 @@ public sealed class CopilotAgentEngine : IAgentEngine
     {
         await disposal.WaitAsync(CleanupTimeout);
     }
+
+    internal sealed class RuntimeCleanupException(Exception innerException)
+        : Exception("The Copilot runtime could not be cleanly stopped or disposed.", innerException);
 
     private sealed class ActiveTurn
     {

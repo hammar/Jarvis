@@ -85,6 +85,13 @@ public sealed class CopilotAgentEngineContractTests
         var events = await CollectAsync(engine.RunTurnAsync(
             CreateRequest(turnId, ProviderKind.Local, "tool contract", [new AgentToolDefinition(ToolName, ToolSchema, true)]),
             CancellationToken.None));
+        var persisted = await store.ReadTurnEventsAfterAsync(turnId, 0, 1000, CancellationToken.None);
+        var disconnectedPrefix = persisted.Take(1).ToArray();
+        var reconnectedSuffix = await store.ReadTurnEventsAfterAsync(
+            turnId,
+            disconnectedPrefix[^1].Sequence,
+            1000,
+            CancellationToken.None);
 
         Assert.True(dispatcher.Calls == 1,
             $"Expected one tool dispatch; got {dispatcher.Calls}. Exposed tools: {string.Join("|", provider.Requests.SelectMany(item => item.ToolNames))}. Events: {string.Join("|", events.Select(item => item.GetType().Name))}");
@@ -96,6 +103,16 @@ public sealed class CopilotAgentEngineContractTests
         using var args = System.Text.Json.JsonDocument.Parse(dispatcher.LastArguments!);
         Assert.Equal("fixture-key", args.RootElement.GetProperty("key").GetString());
         Assert.Equal(TurnStatus.Completed, (await store.GetTurnAsync(turnId, CancellationToken.None))?.Status);
+        Assert.Equal(
+            persisted.Select(item => item.Sequence),
+            disconnectedPrefix.Select(item => item.Sequence).Concat(reconnectedSuffix.Select(item => item.Sequence)));
+        Assert.Equal(
+            persisted.Select(item => item.EventType),
+            disconnectedPrefix.Select(item => item.EventType).Concat(reconnectedSuffix.Select(item => item.EventType)));
+        Assert.Single(
+            disconnectedPrefix.Concat(reconnectedSuffix),
+            item => item.EventType == nameof(TurnCompleted));
+        Assert.Equal(1, dispatcher.Calls);
     }
 
     [Fact]

@@ -248,7 +248,8 @@ public sealed class SqliteConversationStore : IConversationStore, IAtomicTurnOut
             UPDATE turns SET status = $status,
                 updated_at_utc = CASE WHEN updated_at_utc < $updated THEN $updated ELSE updated_at_utc END,
                 version = version + 1
-            WHERE id = $id AND version = $version;
+            WHERE id = $id AND version = $version
+                AND status NOT IN ('Completed', 'Failed', 'Cancelled', 'Interrupted');
             """;
         command.Parameters.AddWithValue("$status", status.ToString());
         command.Parameters.AddWithValue("$updated", SqliteValue.Utc(updatedAtUtc));
@@ -355,7 +356,8 @@ public sealed class SqliteConversationStore : IConversationStore, IAtomicTurnOut
                 UPDATE turns SET status = $status,
                     updated_at_utc = CASE WHEN updated_at_utc < $updated THEN $updated ELSE updated_at_utc END,
                     version = version + 1
-                WHERE id = $id AND version = $version;
+                WHERE id = $id AND version = $version
+                    AND status NOT IN ('Completed', 'Failed', 'Cancelled', 'Interrupted');
                 """;
             update.Parameters.AddWithValue("$status", status.ToString());
             update.Parameters.AddWithValue("$updated", SqliteValue.Utc(updatedAtUtc));
