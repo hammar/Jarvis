@@ -37,8 +37,9 @@ lines / 85% branches; combined unit+integration first-party runtime at 85% /
 75%; each runtime assembly at 80% / 70%; approval persistence invariants in
 `SqliteApprovalStore.cs` and action-journal idempotency in
 `SqliteActionJournalStore.cs`, plus the Copilot turn terminal and cancellation
-state machine in `AgentEngine/Copilot/CopilotTurnStateMachine.cs`, at 95% /
-90%; changed executable lines at 90%.
+state machine in `AgentEngine/Copilot/CopilotTurnStateMachine.cs` and active
+turn cancellation/runtime lifecycle in `AgentEngine/Copilot/CopilotActiveTurn.cs`,
+at 95% / 90%; changed executable lines at 90%.
 The coverage validator requires each critical source file to exist at its
 exact owned path, so renaming it cannot silently remove the gate. A module with no coverable lines
 does not count as evidence of passing its threshold; runtime assemblies with
@@ -161,7 +162,8 @@ authority.
 | Provider failure is explicit and does not include provider error content | `CopilotAgentEngineContractTests.ProviderFailureEmitsSafeFailureCodeWithoutLeakingProviderMessage` |
 | Terminal status and event commit atomically; stale compare-and-swap writes do not append an event | `CopilotTurnStateMachineTests.TurnStateMachineAppliesRunningAndTerminalTransitionsWithCompareAndSwap` |
 | Every terminal signal maps to one typed status/event pair | `CopilotTurnStateMachineTests.TurnStateMachineMapsEveryEngineSignalToOneTypedTerminalOutcome` |
-| Cleanup attempts subscription, session, and client disposal and classifies uncertainty as interruption | `CopilotTurnStateMachineTests.RuntimeCleanupAttemptsEveryResourceAndReportsCleanupFailure` |
+| Active-turn cancellation, tool-budget transitions, and terminal-signal precedence | `CopilotTurnStateMachineTests.ActiveTurnCancellationAndBudgetTransitionsAreHostControlled`, `CopilotTurnStateMachineTests.ActiveTurnSelectsTerminalOutcomeByBudgetCancellationDeadlinePrecedence` |
+| Interrupted turns are terminal and excluded from post-restart recovery work | `SqlitePersistenceTests.NonterminalTurnStateAndVersionCanBeRecoveredAfterRestart` |
 | Prohibited dependency edges are rejected | `ArchitectureBoundaryTests` negative fixtures |
 | Missing discovery/report/low coverage fails | `PersonalAgent.Validation gate-self-test` |
 | Browser test failure is visible | `BrowserSmokeTests.DeliberatelyIncorrectBrowserAssertionFails` probe |

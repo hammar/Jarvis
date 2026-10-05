@@ -207,7 +207,7 @@ public sealed class SqliteConversationStore : IConversationStore, IAtomicTurnOut
         command.CommandText = """
             SELECT id, conversation_id, status, created_at_utc, updated_at_utc, version
             FROM turns
-            WHERE status NOT IN ('Completed', 'Failed', 'Cancelled')
+            WHERE status NOT IN ('Completed', 'Failed', 'Cancelled', 'Interrupted')
             ORDER BY updated_at_utc, id
             LIMIT $maximum;
             """;

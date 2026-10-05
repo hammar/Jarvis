@@ -119,6 +119,7 @@ internal static class CoverageGate
     private static readonly (string Name, string RelativePath, double Lines, double Branches)[] CriticalModules =
     [
         ("Copilot turn terminal and cancellation state machine", "src/PersonalAgent.Infrastructure/AgentEngine/Copilot/CopilotTurnStateMachine.cs", 95, 90),
+        ("Copilot active-turn cancellation and runtime lifecycle", "src/PersonalAgent.Infrastructure/AgentEngine/Copilot/CopilotActiveTurn.cs", 95, 90),
         ("Approval persistence invariants", "src/PersonalAgent.Infrastructure/Persistence/SqliteApprovalStore.cs", 95, 90),
         ("Action journal idempotency", "src/PersonalAgent.Infrastructure/Persistence/SqliteActionJournalStore.cs", 95, 90)
     ];
@@ -601,7 +602,7 @@ internal static class CoverageGate
         var baseRef = Environment.GetEnvironmentVariable("GITHUB_BASE_REF");
         var eventName = Environment.GetEnvironmentVariable("GITHUB_EVENT_NAME");
         var comparison = !string.IsNullOrWhiteSpace(baseRef)
-            ? $"origin/{baseRef}...HEAD"
+            ? $"origin/{baseRef}"
             : eventName == "push" ? "HEAD^...HEAD" : "HEAD";
         var diff = RunGit(root, ["diff", "--no-ext-diff", "--unified=0", comparison, "--", "src"]);
         ParseAddedLines(root, diff, changed);

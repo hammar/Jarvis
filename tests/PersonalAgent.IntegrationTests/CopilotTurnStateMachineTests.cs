@@ -124,7 +124,7 @@ public sealed class CopilotTurnStateMachineTests
     {
         var attempts = new List<string>();
 
-        var exception = await Assert.ThrowsAsync<CopilotAgentEngine.RuntimeCleanupException>(() =>
+        var exception = await Assert.ThrowsAsync<RuntimeCleanupException>(() =>
             CopilotAgentEngine.CleanupRuntimeAsync(
                 () =>
                 {
@@ -149,6 +149,61 @@ public sealed class CopilotTurnStateMachineTests
         Assert.Equal(
             CopilotTurnSignal.Failed,
             CopilotAgentEngine.GetFailureSignal(new InvalidOperationException("provider failure")));
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task ActiveTurnCancellationAndBudgetTransitionsAreHostControlled()
+    {
+        var active = new CopilotActiveTurn(2);
+        Assert.False(active.CancelledByHost);
+        Assert.Null(active.FailureCode);
+        Assert.Equal(2, active.MaximumToolCalls);
+        Assert.Equal(1, active.IncrementToolCalls());
+        Assert.Equal(2, active.IncrementToolCalls());
+        await active.AbortAsync();
+
+        Assert.True(active.CancelByHost());
+        Assert.True(active.CancellationToken.IsCancellationRequested);
+        Assert.True(active.CancelledByHost);
+        Assert.True(active.MarkTerminal());
+        Assert.False(active.CancelByHost());
+
+        var callerCancelled = new CopilotActiveTurn(0);
+        callerCancelled.CancelByCaller();
+        Assert.True(callerCancelled.CancellationToken.IsCancellationRequested);
+        Assert.True(callerCancelled.MarkTerminal());
+
+        var budgetExceeded = new CopilotActiveTurn(0);
+        budgetExceeded.FailForToolBudget();
+        budgetExceeded.FailForToolBudget();
+        Assert.Equal("tool_budget_exceeded", budgetExceeded.FailureCode);
+        Assert.True(budgetExceeded.CancellationToken.IsCancellationRequested);
+        Assert.False(budgetExceeded.MarkTerminal());
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public void ActiveTurnSelectsTerminalOutcomeByBudgetCancellationDeadlinePrecedence()
+    {
+        Assert.Equal(
+            CopilotTurnSignal.Completed,
+            CopilotActiveTurn.SelectCompletedSignal(false, false, false));
+        Assert.Equal(
+            CopilotTurnSignal.DeadlineExceeded,
+            CopilotActiveTurn.SelectCompletedSignal(false, false, true));
+        Assert.Equal(
+            CopilotTurnSignal.Cancelled,
+            CopilotActiveTurn.SelectCompletedSignal(false, true, false));
+        Assert.Equal(
+            CopilotTurnSignal.Cancelled,
+            CopilotActiveTurn.SelectCompletedSignal(false, true, true));
+        Assert.Equal(
+            CopilotTurnSignal.ToolBudgetExceeded,
+            CopilotActiveTurn.SelectCompletedSignal(true, false, false));
+        Assert.Equal(
+            CopilotTurnSignal.ToolBudgetExceeded,
+            CopilotActiveTurn.SelectCompletedSignal(true, true, true));
     }
 
     private sealed class TestClock : IClock

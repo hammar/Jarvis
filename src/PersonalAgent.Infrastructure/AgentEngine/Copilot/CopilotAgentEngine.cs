@@ -20,14 +20,14 @@ namespace PersonalAgent.Infrastructure.AgentEngine.Copilot;
 /// </remarks>
 public sealed class CopilotAgentEngine : IAgentEngine
 {
-    private static readonly TimeSpan CleanupTimeout = TimeSpan.FromSeconds(5);
+    internal static readonly TimeSpan CleanupTimeout = TimeSpan.FromSeconds(5);
     private readonly IConversationStore conversations;
     private readonly IToolDispatcher dispatcher;
     private readonly IClock clock;
     private readonly CopilotAgentEngineOptions options;
     private readonly ISecretResolver? secretResolver;
     private readonly CopilotTurnStateMachine stateMachine;
-    private readonly ConcurrentDictionary<TurnId, ActiveTurn> activeTurns = new();
+    private readonly ConcurrentDictionary<TurnId, CopilotActiveTurn> activeTurns = new();
 
     /// <summary>Creates an engine using durable application event storage and explicit provider settings.</summary>
     /// <param name="conversations">Authoritative application turn and ordered-event store.</param>
@@ -64,7 +64,7 @@ public sealed class CopilotAgentEngine : IAgentEngine
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
         ValidateRequest(request);
-        var active = new ActiveTurn(request.MaximumToolCalls);
+        var active = new CopilotActiveTurn(request.MaximumToolCalls);
         if (!activeTurns.TryAdd(request.TurnId, active))
         {
             throw new InvalidOperationException("An engine turn with this identifier is already active.");
@@ -99,7 +99,7 @@ public sealed class CopilotAgentEngine : IAgentEngine
             }
             finally
             {
-                activeTurns.TryRemove(new KeyValuePair<TurnId, ActiveTurn>(request.TurnId, active));
+                activeTurns.TryRemove(new KeyValuePair<TurnId, CopilotActiveTurn>(request.TurnId, active));
             }
         }
     }
@@ -123,7 +123,7 @@ public sealed class CopilotAgentEngine : IAgentEngine
 
     private async Task ExecuteTurnAsync(
         AgentTurnRequest request,
-        ActiveTurn active,
+        CopilotActiveTurn active,
         ChannelWriter<AgentEvent> output,
         CancellationToken callerToken)
     {
@@ -214,13 +214,10 @@ public sealed class CopilotAgentEngine : IAgentEngine
             var cancelledByHost = active.MarkTerminal();
             if (terminalStatus == TurnStatus.Completed)
             {
-                var signal = active.FailureCode is not null
-                    ? CopilotTurnSignal.ToolBudgetExceeded
-                    : callerToken.IsCancellationRequested || cancelledByHost
-                        ? CopilotTurnSignal.Cancelled
-                        : deadline.IsCancellationRequested
-                            ? CopilotTurnSignal.DeadlineExceeded
-                            : CopilotTurnSignal.Completed;
+                var signal = CopilotActiveTurn.SelectCompletedSignal(
+                    active.FailureCode is not null,
+                    callerToken.IsCancellationRequested || cancelledByHost,
+                    deadline.IsCancellationRequested);
                 (terminalStatus, terminalEvent) = CopilotTurnStateMachine.CreateTerminalOutcome(
                     request.TurnId,
                     clock,
@@ -245,7 +242,7 @@ public sealed class CopilotAgentEngine : IAgentEngine
         AgentTurnRequest request,
         CopilotProviderOptions provider,
         string? apiKey,
-        ActiveTurn active,
+        CopilotActiveTurn active,
         ChannelWriter<AgentEvent> events,
         CancellationToken cancellationToken)
     {
@@ -296,7 +293,7 @@ public sealed class CopilotAgentEngine : IAgentEngine
                     Task.FromResult(PermissionDecision.Reject("Only host-registered tools are permitted.")),
                 Tools = tools
             };
-            session = await client.CreateSessionAsync(sessionConfig);
+            session = await client.CreateSessionAsync(sessionConfig).WaitAsync(cancellationToken);
             active.SetSession(session);
             subscription = session.On<SessionEvent>(item =>
             {
@@ -526,154 +523,9 @@ public sealed class CopilotAgentEngine : IAgentEngine
         }
     }
 
-    private static async Task DisposeBoundedAsync(Task disposal)
+    internal static async Task DisposeBoundedAsync(Task disposal)
     {
         await disposal.WaitAsync(CleanupTimeout);
-    }
-
-    internal sealed class RuntimeCleanupException(Exception innerException)
-        : Exception("The Copilot runtime could not be cleanly stopped or disposed.", innerException);
-
-    private sealed class ActiveTurn
-    {
-        private readonly CancellationTokenSource stop = new();
-        private readonly SemaphoreSlim abortGate = new(1, 1);
-        private readonly SemaphoreSlim clientStopGate = new(1, 1);
-        private readonly object sync = new();
-        private CopilotClient? client;
-        private CopilotSession? session;
-        private int toolCalls;
-        private bool clientStopped;
-        private bool cancelledByHost;
-        private bool terminal;
-        private string? failureCode;
-
-        public ActiveTurn(int maximumToolCalls) => MaximumToolCalls = maximumToolCalls;
-
-        public int MaximumToolCalls { get; }
-        public CancellationToken CancellationToken => stop.Token;
-        public bool CancelledByHost
-        {
-            get
-            {
-                lock (sync)
-                {
-                    return cancelledByHost;
-                }
-            }
-        }
-        public string? FailureCode => Volatile.Read(ref failureCode);
-
-        public void SetClient(CopilotClient value) => Volatile.Write(ref client, value);
-        public void SetSession(CopilotSession value) => Volatile.Write(ref session, value);
-
-        public bool CancelByHost()
-        {
-            lock (sync)
-            {
-                if (terminal)
-                {
-                    return false;
-                }
-
-                cancelledByHost = true;
-            }
-
-            stop.Cancel();
-            return true;
-        }
-
-        public void CancelByCaller() => _ = CancelByHost();
-
-        public bool MarkTerminal()
-        {
-            lock (sync)
-            {
-                terminal = true;
-                return cancelledByHost;
-            }
-        }
-
-        public void FailForToolBudget()
-        {
-            Interlocked.CompareExchange(ref failureCode, "tool_budget_exceeded", null);
-            stop.Cancel();
-        }
-
-        public int IncrementToolCalls() => Interlocked.Increment(ref toolCalls);
-
-        public async Task AbortAsync(CancellationToken cancellationToken = default)
-        {
-            await abortGate.WaitAsync(cancellationToken);
-            try
-            {
-                var currentSession = Volatile.Read(ref session);
-                if (currentSession is not null)
-                {
-                    try
-                    {
-                        await currentSession.AbortAsync().WaitAsync(CleanupTimeout, cancellationToken);
-                    }
-                    catch (TimeoutException)
-                    {
-                        await StopClientAsync(cancellationToken);
-                    }
-                }
-                else
-                {
-                    await StopClientAsync(cancellationToken);
-                }
-            }
-            finally
-            {
-                abortGate.Release();
-            }
-        }
-
-        public async Task DisposeSessionAsync(CopilotSession value)
-        {
-            await abortGate.WaitAsync();
-            try
-            {
-                if (ReferenceEquals(Volatile.Read(ref session), value))
-                {
-                    Volatile.Write(ref session, null);
-                }
-
-                await DisposeBoundedAsync(value.DisposeAsync().AsTask());
-            }
-            finally
-            {
-                abortGate.Release();
-            }
-        }
-
-        public async Task StopClientAsync(CancellationToken cancellationToken = default)
-        {
-            await clientStopGate.WaitAsync(cancellationToken);
-            try
-            {
-                var currentClient = Volatile.Read(ref client);
-                if (currentClient is null || clientStopped)
-                {
-                    return;
-                }
-
-                try
-                {
-                    await currentClient.ForceStopAsync().WaitAsync(CleanupTimeout, cancellationToken);
-                }
-                finally
-                {
-                    await DisposeBoundedAsync(currentClient.DisposeAsync().AsTask());
-                    clientStopped = true;
-                }
-            }
-            finally
-            {
-                clientStopGate.Release();
-            }
-        }
     }
 
     private sealed class CopilotToolFunction : AIFunction
@@ -682,7 +534,7 @@ public sealed class CopilotAgentEngine : IAgentEngine
         private readonly IToolDispatcher dispatcher;
         private readonly TurnId turnId;
         private readonly ChannelWriter<AgentEvent> events;
-        private readonly ActiveTurn active;
+        private readonly CopilotActiveTurn active;
         private readonly IClock clock;
         private readonly JsonElement schema;
 
@@ -691,7 +543,7 @@ public sealed class CopilotAgentEngine : IAgentEngine
             IToolDispatcher dispatcher,
             TurnId turnId,
             ChannelWriter<AgentEvent> events,
-            ActiveTurn active,
+            CopilotActiveTurn active,
             IClock clock)
         {
             this.definition = definition;

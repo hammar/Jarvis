@@ -51,6 +51,8 @@ Application contract is unchanged.
 - `tests/PersonalAgent.SdkContractTests/`
 - `tests/PersonalAgent.IntegrationTests/` (linked actual-runtime adapter
   contracts are also run under the integration coverage collector)
+- `tools/validate.sh` and `tools/PersonalAgent.Validation/Program.cs`
+  (full-base changed-line measurement and critical cancellation coverage)
 - `tools/PersonalAgent.Validation/Program.cs` (critical turn state-machine
   coverage ownership)
 - `docs/architecture.md`, `docs/testing.md`, and this brief
@@ -101,13 +103,14 @@ Application contract is unchanged.
   build with nullable enabled and zero warnings/errors.
 - `tools/validate.sh architecture`: 6/6 tests passed.
 - `tools/validate.sh unit`: 8/8 discovered tests passed.
-- `tools/validate.sh integration`: 61/61 discovered tests passed.
+- `tools/validate.sh integration`: 63/63 discovered tests passed.
 - `tools/validate.sh sdk-contracts`: pinned SDK/runtime validation harness
   passed; 9/9 adapter SDK contract tests passed.
-- `tools/validate.sh coverage`: passed. Changed executable lines 39/39
-  (100.0%); Infrastructure 1670/1833 lines (91.1%) and 423/555 branches
-  (76.2%). The coverage gate also enforced the 95% line / 90% branch threshold
-  for the owned terminal/cancellation state machine.
+- `tools/validate.sh coverage`: passed against `origin/main`. Changed
+  executable lines 498/538 (92.6%); Infrastructure 1683/1841 lines (91.4%)
+  and 430/555 branches (77.5%). The gate enforces 95% line / 90% branch
+  thresholds for both the terminal state machine and active-turn cancellation
+  and runtime lifecycle module.
 - `tools/validate.sh aspire-e2e`: 2/2 tests passed.
 - `tools/validate.sh browser-e2e`: 1/1 browser test passed; the deliberate
   failing-browser probe failed as expected and was recognized by the gate.
@@ -129,7 +132,11 @@ Initial pre-PR worktree review findings and dispositions:
 | T04-R3 | Atomic compare-and-swap could rewrite an already-terminal turn when called with its current version. | Fixed by excluding all terminal statuses in both status-update predicates. The SQLite integration regression verifies stale and current versions cannot change the status or append a second event. |
 | T04-R4 | Session/client cleanup exceptions were reported as generic engine failures rather than interrupted runtime cleanup. | Fixed with a cleanup exception classifier and interruption signal; cleanup now attempts all resources even when an earlier cleanup action throws. `RuntimeCleanupAttemptsEveryResourceAndReportsCleanupFailure` covers all cleanup failures and their classification. |
 | T04-R5 | No disconnect/reconnect cursor test proved ordered replay without repeating the tool or terminal event. | Fixed in `ActualRuntimeInvokesOnlyRegisteredToolAndForwardsHostOutcome`, which resumes SQLite event replay after the observed prefix and verifies sequence, event order, one tool dispatch, and one terminal event. |
-| T04-R6 | Changed-line coverage evidence was stale and calculated inconsistently. | Fixed using the final validation reports: 39/39 changed executable lines (100.0%). Infrastructure totals and integration discovery counts above are from the same final reports. |
+| T04-R6 | Changed-line coverage evidence was stale and calculated inconsistently. | The earlier 39/39 uncommitted-diff metric was superseded; see T04-R9 for the corrected full-PR comparison against `origin/main` and its final changed-line result. |
+| T04-R7 | Session creation did not observe turn cancellation/deadline. | Fixed by awaiting `CreateSessionAsync` with the linked turn token; the SDK contract/runtime suite passes with the bounded session lifecycle. |
+| T04-R8 | Interrupted terminal turns were returned as nonterminal recovery work. | Fixed by excluding `Interrupted` in `ReadNonterminalTurnsAsync`; the SQLite restart/recovery test now verifies interrupted turns are not returned. Retention intentionally continues to preserve interrupted conversations, as asserted by its existing durability test. |
+| T04-R9 | Local changed-line coverage used `git diff HEAD`, omitting the PR's existing changes. | Fixed the validator comparison to diff against the configured base worktree and made `tools/validate.sh coverage` require/fetch-check `origin/main` for local runs. The recorded coverage run compared the entire PR against `origin/main`. |
+| T04-R10 | Critical coverage ownership did not include the active cancellation/runtime lifecycle implementation. | Extracted the active-turn cancellation and runtime lifecycle into `CopilotActiveTurn.cs`, added cancellation and precedence tests, and assigned it a 95% line / 90% branch critical-module gate. Final full-PR coverage passed both critical module gates. |
 
 These findings were raised against the PR commit and fixed in the follow-up
 revision. Final validation results are recorded above; the review threads are
