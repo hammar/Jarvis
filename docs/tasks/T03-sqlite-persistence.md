@@ -22,9 +22,9 @@ originates from issue #4 and depends on completed T02 (#3).
 - Implement Infrastructure repositories for the existing conversation and
   memory contracts, job lease storage, plus approval, action-journal, and audit
   storage.
-- Extend `IConversationStore` with durable turn-state and ordered-event
-  operations required by the specification; T02 exposed message operations
-  only.
+- Extend `IConversationStore` with durable turn-state reads, bounded
+  nonterminal-turn recovery inspection, and ordered-event operations required
+  by the specification; T02 exposed message operations only.
 - Add minimal Application persistence interfaces for approval records, action
   journals, and audit events, which T02 did not define. Do not add their
   approval or action use-case policies.
@@ -46,6 +46,7 @@ claim, or automatic replay of jobs/actions during restore.
 `src/PersonalAgent.Infrastructure/Persistence/`,
 `src/PersonalAgent.Infrastructure/PersonalAgent.Infrastructure.csproj`,
 `src/PersonalAgent.Infrastructure/README.md`,
+`src/PersonalAgent.AppHost/AppHost.cs`,
 `src/PersonalAgent.Web/Program.cs`,
 `tests/PersonalAgent.TestSupport/IsolatedDatabaseFile.cs`,
 `tests/PersonalAgent.IntegrationTests/`,
@@ -61,7 +62,9 @@ claim, or automatic replay of jobs/actions during restore.
   transaction; no automatic downgrade.
 - Enable foreign keys on each connection and WAL at startup. Persist data
   outside the deployment folder under `JARVIS_DATA_DIR`, falling back to
-  per-user LocalApplicationData.
+  per-user LocalApplicationData `Jarvis`. If only the prior AppHost
+  `PersonalAgent` database exists, continue using it; if both defaults contain
+  a database, require an explicit path rather than silently choosing one.
 - Conversation/audit retention defaults are 90/30 days, configurable from
   1–3650 days. Retention leaves facts, jobs, active action state, approvals,
   and `Unknown` outcomes intact.
@@ -80,6 +83,10 @@ default/overridden retention including repeat/restart behavior, preserving
 conversations with unresolved turns. Backup and restore reject live sidecars
 and reserved recovery-artifact paths before cleanup or recovery; startup
 serializes marker recovery across processes.
+Rollback snapshots and marker/rename directory entries are flushed before
+recovery states advance. macOS/Linux data and backup directories must be
+owner-private; database, sidecar, and lock files are restricted to owner-only
+permissions. Windows validates the configured directory owner and access ACL.
 Infrastructure must meet the 80% line / 70% branch combined unit+integration
 coverage minimum.
 `SqliteApprovalStore.cs` is explicitly owned as a critical module at 95% line /

@@ -312,6 +312,23 @@ public interface IConversationStore
         DateTimeOffset createdAtUtc,
         CancellationToken cancellationToken);
 
+    /// <summary>Reads the current persisted state and optimistic-concurrency version for a turn.</summary>
+    /// <param name="turnId">Turn identifier to inspect.</param>
+    /// <param name="cancellationToken">Token that cancels the read.</param>
+    /// <returns>The persisted turn, or null when the identifier is unknown.</returns>
+    ValueTask<ConversationTurn?> GetTurnAsync(
+        TurnId turnId,
+        CancellationToken cancellationToken);
+
+    /// <summary>Reads a bounded, stable-ordered page of nonterminal turns for recovery inspection.</summary>
+    /// <remarks>Returned state is authoritative for inspection; it does not authorize replaying interrupted work.</remarks>
+    /// <param name="maximumTurns">Maximum turns to return, from 1 through 1000.</param>
+    /// <param name="cancellationToken">Token that cancels the read.</param>
+    /// <returns>Nonterminal turns ordered by their latest state or event timestamp.</returns>
+    ValueTask<IReadOnlyList<ConversationTurn>> ReadNonterminalTurnsAsync(
+        int maximumTurns,
+        CancellationToken cancellationToken);
+
     /// <summary>Updates turn lifecycle state using expected-version concurrency.</summary>
     /// <param name="turnId">Turn to update.</param>
     /// <param name="status">New host-owned lifecycle status.</param>

@@ -1,10 +1,19 @@
 using Microsoft.Data.Sqlite;
+using System.Runtime.Versioning;
+using System.Security.AccessControl;
+using System.Security.Principal;
 
 namespace PersonalAgent.Infrastructure.Persistence;
 
 /// <summary>Owns a single SQLite database file, its connections, and forward-only schema migrations.</summary>
 public sealed class SqliteDatabase
 {
+    private const UnixFileMode OwnerPrivateDirectory =
+        UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute;
+    private const UnixFileMode OwnerPrivateFile = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+    private const UnixFileMode NonOwnerPermissions =
+        UnixFileMode.GroupRead | UnixFileMode.GroupWrite | UnixFileMode.GroupExecute |
+        UnixFileMode.OtherRead | UnixFileMode.OtherWrite | UnixFileMode.OtherExecute;
     private static readonly (int Version, string ResourceName)[] Migrations =
     [
         (1, "PersonalAgent.Infrastructure.Persistence.Migrations.001-initial.sql"),
@@ -42,7 +51,7 @@ public sealed class SqliteDatabase
     {
         var directory = Path.GetDirectoryName(DatabasePath)
             ?? throw new InvalidOperationException("The SQLite database path must have a parent directory.");
-        Directory.CreateDirectory(directory);
+        EnsurePrivateDataDirectory(directory);
         await using var recoveryLock = await SqliteBackupRestoreService.AcquireRestoreLockAsync(
             DatabasePath,
             cancellationToken);
@@ -63,6 +72,10 @@ public sealed class SqliteDatabase
 
         await ApplyMigrationsAsync(connection, cancellationToken);
         await EnsureForeignKeysAreValidAsync(connection, cancellationToken);
+        RestrictFilePermissions(DatabasePath);
+        RestrictFilePermissions(DatabasePath + "-wal");
+        RestrictFilePermissions(DatabasePath + "-shm");
+        RestrictFilePermissions(SqliteBackupRestoreService.RestoreLockPath(DatabasePath));
     }
 
     /// <summary>Opens a configured connection with foreign-key enforcement and a bounded busy timeout.</summary>
@@ -70,6 +83,8 @@ public sealed class SqliteDatabase
     /// <returns>An open connection owned by the caller.</returns>
     public async Task<SqliteConnection> OpenConnectionAsync(CancellationToken cancellationToken = default)
     {
+        EnsurePrivateDataDirectory(Path.GetDirectoryName(DatabasePath)
+            ?? throw new InvalidOperationException("The SQLite database path must have a parent directory."));
         var connection = new SqliteConnection(connectionString);
         try
         {
@@ -77,6 +92,9 @@ public sealed class SqliteDatabase
             await using var command = connection.CreateCommand();
             command.CommandText = "PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 10000;";
             await command.ExecuteNonQueryAsync(cancellationToken);
+            RestrictFilePermissions(DatabasePath);
+            RestrictFilePermissions(DatabasePath + "-wal");
+            RestrictFilePermissions(DatabasePath + "-shm");
             return connection;
         }
         catch
@@ -84,6 +102,125 @@ public sealed class SqliteDatabase
             await connection.DisposeAsync();
             throw;
         }
+    }
+
+    internal static void EnsurePrivateDataDirectory(string directory)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            if (!Directory.Exists(directory))
+            {
+                Directory.CreateDirectory(directory, OwnerPrivateDirectory);
+            }
+
+            var resolvedDirectory = new DirectoryInfo(directory).ResolveLinkTarget(returnFinalTarget: true)?.FullName
+                ?? Path.GetFullPath(directory);
+            var permissions = File.GetUnixFileMode(resolvedDirectory);
+            if ((permissions & NonOwnerPermissions) != 0)
+            {
+                throw new UnauthorizedAccessException(
+                    $"SQLite data directory '{Path.GetFullPath(directory)}' must be private to the current user (mode 700 or stricter).");
+            }
+
+            return;
+        }
+
+        if (Directory.Exists(directory))
+        {
+            ValidatePrivateWindowsDirectory(directory);
+            return;
+        }
+
+        Directory.CreateDirectory(directory);
+        var security = new DirectorySecurity();
+        security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+        var userSid = CurrentWindowsUserSid();
+        security.SetOwner(userSid);
+        foreach (var sid in AllowedWindowsSids(userSid))
+        {
+            security.AddAccessRule(new FileSystemAccessRule(
+                sid,
+                FileSystemRights.FullControl,
+                InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+                PropagationFlags.None,
+                AccessControlType.Allow));
+        }
+
+        new DirectoryInfo(directory).SetAccessControl(security);
+        ValidatePrivateWindowsDirectory(directory);
+    }
+
+    internal static void RestrictFilePermissions(string path)
+    {
+        if (!File.Exists(path))
+        {
+            return;
+        }
+
+        if (OperatingSystem.IsWindows())
+        {
+            var security = new FileSecurity();
+            security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+            var userSid = CurrentWindowsUserSid();
+            security.SetOwner(userSid);
+            foreach (var sid in AllowedWindowsSids(userSid))
+            {
+                security.AddAccessRule(new FileSystemAccessRule(
+                    sid,
+                    FileSystemRights.FullControl,
+                    AccessControlType.Allow));
+            }
+
+            new FileInfo(path).SetAccessControl(security);
+            return;
+        }
+
+        File.SetUnixFileMode(path, OwnerPrivateFile);
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static void ValidatePrivateWindowsDirectory(string directory)
+    {
+        var security = new DirectoryInfo(directory).GetAccessControl(
+            AccessControlSections.Access | AccessControlSections.Owner);
+        var userSid = CurrentWindowsUserSid();
+        if (security.GetOwner(typeof(SecurityIdentifier)) is not SecurityIdentifier owner
+            || !owner.Equals(userSid))
+        {
+            throw new UnauthorizedAccessException(
+                $"SQLite data directory '{Path.GetFullPath(directory)}' must be owned by the current user.");
+        }
+
+        var allowedSids = AllowedWindowsSids(userSid);
+        foreach (FileSystemAccessRule rule in security.GetAccessRules(
+                     includeExplicit: true,
+                     includeInherited: true,
+                     targetType: typeof(SecurityIdentifier)))
+        {
+            if (rule.AccessControlType == AccessControlType.Allow
+                && (rule.IdentityReference is not SecurityIdentifier identity
+                    || !allowedSids.Any(allowedSid => allowedSid.Equals(identity))))
+            {
+                throw new UnauthorizedAccessException(
+                    $"SQLite data directory '{Path.GetFullPath(directory)}' grants access to an unapproved Windows identity.");
+            }
+        }
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static SecurityIdentifier[] AllowedWindowsSids(SecurityIdentifier userSid) =>
+    [
+        userSid,
+        new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null),
+        new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null)
+    ];
+
+    [SupportedOSPlatform("windows")]
+    private static SecurityIdentifier CurrentWindowsUserSid()
+    {
+        using var identity = WindowsIdentity.GetCurrent();
+        return identity.User
+            ?? throw new UnauthorizedAccessException("Could not determine the current Windows user SID.");
     }
 
     private static async Task ApplyMigrationsAsync(

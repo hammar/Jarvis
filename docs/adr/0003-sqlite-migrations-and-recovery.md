@@ -29,6 +29,15 @@ process cannot open SQLite during recovery. The lock file is persistent and
 reserved from backup/restore destinations. Actions with `Unknown` outcomes
 remain durable and are never automatically replayed.
 
+Flush rollback snapshots and their directory entries before publishing the
+prepared marker. Flush marker contents before atomic rename and flush the
+containing directory after rename, sidecar deletion, and database replacement.
+On macOS/Linux, require an owner-private data directory (mode 700 or stricter)
+and restrict the database, sidecars, and recovery lock to mode 600. Windows
+deployments must keep the configured directory owned by the current account
+and limit allowed ACL entries to that account, SYSTEM, and built-in
+Administrators; broader access is rejected.
+
 Conversation retention removes expired roots only when every associated turn
 is terminal (`Completed`, `Failed`, or `Cancelled`). Running, approval-waiting,
 and interrupted turns retain their conversation and reconnect/recovery state

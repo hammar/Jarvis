@@ -9,6 +9,11 @@ builder.Services.AddRazorPages();
 builder.Services.AddHealthChecks();
 
 var profile = builder.Configuration["JARVIS_PROFILE"] ?? "Local";
+if (profile is not ("Simulator" or "Local" or "Hybrid" or "E2E"))
+{
+    throw new InvalidOperationException("JARVIS_PROFILE must be Simulator, Local, Hybrid, or E2E.");
+}
+
 if ((profile is "Simulator" or "E2E") && string.IsNullOrWhiteSpace(builder.Configuration["JARVIS_DATA_DIR"]))
 {
     throw new InvalidOperationException($"{profile} profile requires an explicit isolated JARVIS_DATA_DIR.");

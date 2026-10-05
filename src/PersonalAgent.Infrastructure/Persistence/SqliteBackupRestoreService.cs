@@ -29,6 +29,7 @@ public sealed class SqliteBackupRestoreService
     }
 
     /// <summary>Creates a consistent SQLite backup at a new destination file.</summary>
+    /// <remarks>The live database and backup destination directories must be private to this user.</remarks>
     /// <param name="backupPath">Destination path; an existing file is never overwritten.</param>
     /// <param name="cancellationToken">Token checked before and after SQLite's backup operation.</param>
     /// <returns>A task that completes after backup integrity has been verified.</returns>
@@ -42,7 +43,9 @@ public sealed class SqliteBackupRestoreService
             throw new ArgumentException("The backup destination must differ from the live database path.", nameof(backupPath));
         }
 
-        Directory.CreateDirectory(Path.GetDirectoryName(destinationPath)
+        SqliteDatabase.EnsurePrivateDataDirectory(Path.GetDirectoryName(database.DatabasePath)
+            ?? throw new InvalidOperationException("The database path must have a parent directory."));
+        SqliteDatabase.EnsurePrivateDataDirectory(Path.GetDirectoryName(destinationPath)
             ?? throw new InvalidOperationException("The backup path must have a parent directory."));
         var reservedDestination = false;
         try
@@ -51,6 +54,7 @@ public sealed class SqliteBackupRestoreService
             await using (var reserved = new FileStream(destinationPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
             {
                 reservedDestination = true;
+                SqliteDatabase.RestrictFilePermissions(destinationPath);
             }
 
             await using (var source = await OpenReadOnlyConnectionAsync(database.DatabasePath, cancellationToken))
@@ -61,6 +65,7 @@ public sealed class SqliteBackupRestoreService
 
             cancellationToken.ThrowIfCancellationRequested();
             await VerifyDatabaseAsync(destinationPath, cancellationToken);
+            SqliteDatabase.RestrictFilePermissions(destinationPath);
         }
         catch
         {
@@ -80,6 +85,7 @@ public sealed class SqliteBackupRestoreService
     {
         var directory = Path.GetDirectoryName(database.DatabasePath)
             ?? throw new InvalidOperationException("The database path must have a parent directory.");
+        SqliteDatabase.EnsurePrivateDataDirectory(directory);
         var copyPath = Path.Combine(directory, $".upgrade-check-{System.Guid.NewGuid():N}.db");
         try
         {
@@ -110,7 +116,7 @@ public sealed class SqliteBackupRestoreService
         EnsureNotRestoreArtifactPath(database.DatabasePath, sourcePath, nameof(backupPath));
         var directory = Path.GetDirectoryName(database.DatabasePath)
             ?? throw new InvalidOperationException("The database path must have a parent directory.");
-        Directory.CreateDirectory(directory);
+        SqliteDatabase.EnsurePrivateDataDirectory(directory);
         await using var recoveryLock = await AcquireRestoreLockAsync(database.DatabasePath, cancellationToken);
         await RecoverInterruptedRestoreUnderLockAsync(database.DatabasePath, cancellationToken);
         if (!File.Exists(sourcePath))
@@ -134,23 +140,29 @@ public sealed class SqliteBackupRestoreService
             var restored = new SqliteDatabase(restorePath);
             await restored.InitializeAsync(cancellationToken);
             await VerifyDatabaseAsync(restorePath, cancellationToken);
+            FlushFileContents(restorePath);
+            FlushExistingSidecar(restorePath + "-wal");
+            FlushExistingSidecar(restorePath + "-shm");
             cancellationToken.ThrowIfCancellationRequested();
 
             var originalExists = File.Exists(database.DatabasePath);
             if (originalExists)
             {
-                File.Copy(database.DatabasePath, rollbackPath, overwrite: true);
-                CopySidecarIfPresent(database.DatabasePath + "-wal", RestoreOriginalWalPath(database.DatabasePath));
-                CopySidecarIfPresent(database.DatabasePath + "-shm", RestoreOriginalShmPath(database.DatabasePath));
+                CopyFileDurably(database.DatabasePath, rollbackPath);
+                CopySidecarDurablyIfPresent(database.DatabasePath + "-wal", RestoreOriginalWalPath(database.DatabasePath));
+                CopySidecarDurablyIfPresent(database.DatabasePath + "-shm", RestoreOriginalShmPath(database.DatabasePath));
             }
 
+            DurableFileSystem.FlushDirectory(directory);
             WriteRestoreMarker(
                 database.DatabasePath,
                 originalExists ? PreparedRestore : PreparedRestoreWithoutOriginal);
             prepared = true;
             DeleteDatabaseSidecars(database.DatabasePath);
+            DurableFileSystem.FlushDirectory(directory);
             beforeReplacement?.Invoke();
             File.Move(restorePath, database.DatabasePath, overwrite: true);
+            DurableFileSystem.FlushDirectory(directory);
             WriteRestoreMarker(database.DatabasePath, CommittedRestore);
             DeleteRestoreArtifacts(database.DatabasePath);
         }
@@ -186,7 +198,7 @@ public sealed class SqliteBackupRestoreService
         var lockPath = RestoreLockPath(databasePath);
         var directory = Path.GetDirectoryName(lockPath)
             ?? throw new InvalidOperationException("The database path must have a parent directory.");
-        Directory.CreateDirectory(directory);
+        SqliteDatabase.EnsurePrivateDataDirectory(directory);
         var timeout = TimeSpan.FromSeconds(30);
         var stopwatch = Stopwatch.StartNew();
         while (true)
@@ -194,7 +206,17 @@ public sealed class SqliteBackupRestoreService
             cancellationToken.ThrowIfCancellationRequested();
             try
             {
-                return new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+                var stream = new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+                try
+                {
+                    SqliteDatabase.RestrictFilePermissions(lockPath);
+                    return stream;
+                }
+                catch
+                {
+                    stream.Dispose();
+                    throw;
+                }
             }
             catch (IOException exception)
             {
@@ -238,12 +260,13 @@ public sealed class SqliteBackupRestoreService
             }
 
             DeleteDatabaseSidecars(databasePath);
-            File.Copy(rollbackPath, databasePath, overwrite: true);
+            CopyFileDurably(rollbackPath, databasePath);
             var savedWalPath = RestoreOriginalWalPath(databasePath);
             if (File.Exists(savedWalPath))
             {
-                File.Copy(savedWalPath, databasePath + "-wal", overwrite: true);
+                CopyFileDurably(savedWalPath, databasePath + "-wal");
             }
+            DurableFileSystem.FlushDirectory(Path.GetDirectoryName(databasePath)!);
         }
         else if (string.Equals(state, PreparedRestoreWithoutOriginal, StringComparison.Ordinal))
         {
@@ -392,19 +415,51 @@ public sealed class SqliteBackupRestoreService
             stream.Flush(flushToDisk: true);
         }
 
+        SqliteDatabase.RestrictFilePermissions(temporaryPath);
         File.Move(temporaryPath, markerPath, overwrite: true);
+        DurableFileSystem.FlushDirectory(Path.GetDirectoryName(databasePath)!);
     }
 
-    private static void CopySidecarIfPresent(string sourcePath, string destinationPath)
+    private static void CopySidecarDurablyIfPresent(string sourcePath, string destinationPath)
     {
         if (File.Exists(sourcePath))
         {
-            File.Copy(sourcePath, destinationPath, overwrite: true);
+            CopyFileDurably(sourcePath, destinationPath);
         }
+    }
+
+    private static void CopyFileDurably(string sourcePath, string destinationPath)
+    {
+        using var source = new FileStream(sourcePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+        using var destination = new FileStream(
+            destinationPath,
+            FileMode.Create,
+            FileAccess.Write,
+            FileShare.None,
+            bufferSize: 81920,
+            FileOptions.WriteThrough);
+        source.CopyTo(destination);
+        destination.Flush(flushToDisk: true);
+        SqliteDatabase.RestrictFilePermissions(destinationPath);
+    }
+
+    private static void FlushExistingSidecar(string path)
+    {
+        if (File.Exists(path))
+        {
+            FlushFileContents(path);
+        }
+    }
+
+    private static void FlushFileContents(string path)
+    {
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.Read);
+        stream.Flush(flushToDisk: true);
     }
 
     private static void DeleteRestoreArtifacts(string databasePath)
     {
+        var changed = false;
         foreach (var path in new[]
                  {
                      RestoreStagedPath(databasePath),
@@ -418,17 +473,52 @@ public sealed class SqliteBackupRestoreService
             if (File.Exists(path))
             {
                 File.Delete(path);
+                changed = true;
             }
+        }
+
+        if (changed)
+        {
+            DurableFileSystem.FlushDirectory(Path.GetDirectoryName(databasePath)!);
         }
     }
 
     private static bool PathsEqual(string first, string second) =>
         string.Equals(
-            Path.GetFullPath(first),
-            Path.GetFullPath(second),
+            ResolvePathAliases(first),
+            ResolvePathAliases(second),
             OperatingSystem.IsWindows() || OperatingSystem.IsMacOS()
                 ? StringComparison.OrdinalIgnoreCase
                 : StringComparison.Ordinal);
+
+    private static string ResolvePathAliases(string path)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return DurableFileSystem.ResolvePath(path);
+        }
+
+        var fullPath = Path.GetFullPath(path);
+        var root = Path.GetPathRoot(fullPath)
+            ?? throw new ArgumentException("Path must be fully qualified.", nameof(path));
+        var current = root;
+        var components = fullPath[root.Length..]
+            .Split([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar], StringSplitOptions.RemoveEmptyEntries);
+        for (var index = 0; index < components.Length; index++)
+        {
+            current = Path.Combine(current, components[index]);
+            if (Directory.Exists(current))
+            {
+                current = new DirectoryInfo(current).ResolveLinkTarget(returnFinalTarget: true)?.FullName ?? current;
+            }
+            else if (index == components.Length - 1 && File.Exists(current))
+            {
+                current = new FileInfo(current).ResolveLinkTarget(returnFinalTarget: true)?.FullName ?? current;
+            }
+        }
+
+        return Path.GetFullPath(current);
+    }
 
     private static void DeleteDatabaseFiles(string path)
     {

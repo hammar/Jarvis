@@ -3,6 +3,9 @@ using PersonalAgent.Application;
 using PersonalAgent.Domain;
 using PersonalAgent.Infrastructure.Persistence;
 using PersonalAgent.TestSupport;
+using System.Runtime.Versioning;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using Xunit;
 
 namespace PersonalAgent.IntegrationTests;
@@ -23,6 +26,25 @@ public sealed class SqlitePersistenceTests
             System.IO.Path.Combine("/user/local", "Jarvis"),
             SqliteDataDirectory.Resolve("  ", "/user/local"));
         Assert.Throws<InvalidOperationException>(() => SqliteDataDirectory.Resolve(null, " "));
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public void DataDirectoryPreservesLegacyAppHostStateAndRejectsAmbiguousDefaults()
+    {
+        using var directory = IsolatedDirectory.Create();
+        var previousAppHostDirectory = Path.Combine(directory.Path, "PersonalAgent");
+        Directory.CreateDirectory(previousAppHostDirectory);
+        File.WriteAllText(Path.Combine(previousAppHostDirectory, "jarvis.db"), "legacy");
+        Assert.Equal(
+            previousAppHostDirectory,
+            SqliteDataDirectory.Resolve(null, directory.Path));
+
+        var currentDirectory = Path.Combine(directory.Path, "Jarvis");
+        Directory.CreateDirectory(currentDirectory);
+        File.WriteAllText(Path.Combine(currentDirectory, "jarvis.db"), "current");
+        Assert.Throws<InvalidOperationException>(
+            () => SqliteDataDirectory.Resolve(null, directory.Path));
     }
 
     [Fact]
@@ -169,6 +191,58 @@ public sealed class SqlitePersistenceTests
         Assert.Equal([first], beginning);
         await Assert.ThrowsAsync<PersistenceConcurrencyException>(
             async () => await reopened.UpdateTurnStatusAsync(turnId, TurnStatus.Failed, turn.Version, Now, CancellationToken.None));
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task NonterminalTurnStateAndVersionCanBeRecoveredAfterRestart()
+    {
+        using var file = IsolatedDatabaseFile.Create();
+        var database = new SqliteDatabase(file.Path);
+        await database.InitializeAsync();
+        var store = new SqliteConversationStore(database, new MutableClock(Now));
+        var turnId = TurnId.New();
+        var conversationId = ConversationId.New();
+        var created = await store.CreateTurnAsync(
+            turnId,
+            conversationId,
+            TurnStatus.Received,
+            Now,
+            CancellationToken.None);
+        await store.AppendTurnEventAsync(
+            turnId,
+            "turn.progress",
+            """{"state":"observed"}""",
+            Now.AddSeconds(10),
+            CancellationToken.None);
+        var updated = await store.UpdateTurnStatusAsync(
+            turnId,
+            TurnStatus.Routing,
+            created.Version,
+            Now.AddSeconds(5),
+            CancellationToken.None);
+
+        var reopened = new SqliteConversationStore(new SqliteDatabase(file.Path), new MutableClock(Now));
+        var recovered = await reopened.GetTurnAsync(turnId, CancellationToken.None);
+        var nonterminal = await reopened.ReadNonterminalTurnsAsync(10, CancellationToken.None);
+
+        Assert.NotNull(recovered);
+        Assert.Equal(TurnStatus.Routing, recovered.Status);
+        Assert.Equal(2, recovered.Version);
+        Assert.Equal(Now.AddSeconds(10), recovered.UpdatedAtUtc);
+        Assert.Equal(updated, recovered);
+        Assert.Equal([recovered], nonterminal);
+        Assert.Null(await reopened.GetTurnAsync(TurnId.New(), CancellationToken.None));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
+            async () => await reopened.ReadNonterminalTurnsAsync(0, CancellationToken.None));
+
+        await reopened.UpdateTurnStatusAsync(
+            turnId,
+            TurnStatus.Completed,
+            recovered.Version,
+            Now.AddSeconds(20),
+            CancellationToken.None);
+        Assert.Empty(await reopened.ReadNonterminalTurnsAsync(10, CancellationToken.None));
     }
 
     [Fact]
@@ -723,6 +797,122 @@ public sealed class SqlitePersistenceTests
 
     [Fact]
     [Trait("Category", "Integration")]
+    public async Task BackupAndRestoreRejectArtifactPathsReachedThroughDirectorySymlinks()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var file = IsolatedDatabaseFile.Create();
+        var database = new SqliteDatabase(file.Path);
+        await database.InitializeAsync();
+        var backups = new SqliteBackupRestoreService(database);
+        var backupPath = Path.Combine(Path.GetDirectoryName(file.Path)!, "symlink-source.db");
+        await backups.CreateBackupAsync(backupPath);
+
+        var directory = Path.GetDirectoryName(file.Path)!;
+        var alias = Path.Combine(directory, "data-link");
+        Directory.CreateSymbolicLink(alias, directory);
+        var aliasedRollback = Path.Combine(
+            alias,
+            Path.GetFileName(SqliteBackupRestoreService.RestoreRollbackPath(file.Path)));
+        File.Copy(backupPath, aliasedRollback);
+        var originalBackup = await File.ReadAllBytesAsync(aliasedRollback);
+
+        await Assert.ThrowsAsync<ArgumentException>(() => backups.RestoreAsync(aliasedRollback));
+        Assert.Equal(originalBackup, await File.ReadAllBytesAsync(aliasedRollback));
+        await Assert.ThrowsAsync<ArgumentException>(() => backups.CreateBackupAsync(aliasedRollback));
+        Assert.Equal(originalBackup, await File.ReadAllBytesAsync(aliasedRollback));
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task DatabaseRejectsSharedDataDirectoryAndRestrictsDatabasePermissions()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var directory = IsolatedDirectory.Create();
+        var privatePermissions =
+            UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute;
+        File.SetUnixFileMode(
+            directory.Path,
+            privatePermissions | UnixFileMode.GroupRead | UnixFileMode.GroupExecute);
+        var databasePath = Path.Combine(directory.Path, "jarvis.db");
+        var database = new SqliteDatabase(databasePath);
+
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => database.InitializeAsync());
+
+        File.SetUnixFileMode(directory.Path, privatePermissions);
+        await database.InitializeAsync();
+        var databasePermissions = File.GetUnixFileMode(databasePath);
+        var lockPermissions = File.GetUnixFileMode(SqliteBackupRestoreService.RestoreLockPath(databasePath));
+        var nonOwnerPermissions =
+            UnixFileMode.GroupRead | UnixFileMode.GroupWrite | UnixFileMode.GroupExecute |
+            UnixFileMode.OtherRead | UnixFileMode.OtherWrite | UnixFileMode.OtherExecute;
+        Assert.Equal((UnixFileMode)0, databasePermissions & nonOwnerPermissions);
+        Assert.Equal((UnixFileMode)0, lockPermissions & nonOwnerPermissions);
+
+        await using var connection = await database.OpenConnectionAsync();
+        var walPermissions = databasePath + "-wal";
+        if (File.Exists(walPermissions))
+        {
+            Assert.Equal((UnixFileMode)0, File.GetUnixFileMode(walPermissions) & nonOwnerPermissions);
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task WindowsDatabaseRejectsDirectoriesGrantingAccessToOtherUsers()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            await VerifyWindowsDatabaseAclAsync();
+        }
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static async Task VerifyWindowsDatabaseAclAsync()
+    {
+        using var directory = IsolatedDirectory.Create();
+        var privatePath = Path.Combine(directory.Path, "private");
+        var database = new SqliteDatabase(Path.Combine(privatePath, "jarvis.db"));
+        await database.InitializeAsync();
+        var currentUserSid = WindowsIdentity.GetCurrent().User!;
+        var allowedSids = new[]
+        {
+            currentUserSid,
+            new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null),
+            new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null)
+        };
+        var privateAcl = new DirectoryInfo(privatePath).GetAccessControl(
+            AccessControlSections.Access | AccessControlSections.Owner);
+        Assert.Equal(currentUserSid, privateAcl.GetOwner(typeof(SecurityIdentifier)));
+        Assert.All(
+            privateAcl.GetAccessRules(true, true, typeof(SecurityIdentifier)).Cast<FileSystemAccessRule>()
+                .Where(rule => rule.AccessControlType == AccessControlType.Allow),
+            rule => Assert.Contains(
+                allowedSids,
+                allowedSid => allowedSid.Equals(rule.IdentityReference)));
+
+        var sharedPath = Path.Combine(directory.Path, "shared");
+        Directory.CreateDirectory(sharedPath);
+        var sharedAcl = new DirectoryInfo(sharedPath).GetAccessControl();
+        sharedAcl.AddAccessRule(new FileSystemAccessRule(
+            new SecurityIdentifier(WellKnownSidType.WorldSid, null),
+            FileSystemRights.FullControl,
+            AccessControlType.Allow));
+        new DirectoryInfo(sharedPath).SetAccessControl(sharedAcl);
+
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(
+            () => new SqliteDatabase(Path.Combine(sharedPath, "jarvis.db")).InitializeAsync());
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
     public async Task ConcurrentStartupSerializesPreparedRestoreRecovery()
     {
         using var file = IsolatedDatabaseFile.Create();
@@ -977,7 +1167,8 @@ public sealed class SqlitePersistenceTests
 
         var missingDirectoryDatabase = new SqliteDatabase(
             System.IO.Path.Combine(System.IO.Path.GetDirectoryName(damagedFile.Path)!, "missing", "database.db"));
-        await Assert.ThrowsAsync<SqliteException>(async () => await missingDirectoryDatabase.OpenConnectionAsync());
+        await using var createdInPrivateDirectory = await missingDirectoryDatabase.OpenConnectionAsync();
+        Assert.True(Directory.Exists(System.IO.Path.GetDirectoryName(missingDirectoryDatabase.DatabasePath)));
     }
 
     [Fact]

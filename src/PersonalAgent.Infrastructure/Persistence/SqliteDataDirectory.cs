@@ -21,6 +21,16 @@ public static class SqliteDataDirectory
                 "Set JARVIS_DATA_DIR or configure a local application-data directory.");
         }
 
-        return Path.Combine(localApplicationDataPath, "Jarvis");
+        var currentDirectory = Path.Combine(localApplicationDataPath, "Jarvis");
+        var previousAppHostDirectory = Path.Combine(localApplicationDataPath, "PersonalAgent");
+        var currentDatabaseExists = File.Exists(Path.Combine(currentDirectory, "jarvis.db"));
+        var previousDatabaseExists = File.Exists(Path.Combine(previousAppHostDirectory, "jarvis.db"));
+        if (currentDatabaseExists && previousDatabaseExists)
+        {
+            throw new InvalidOperationException(
+                "Both default SQLite data directories contain jarvis.db. Set JARVIS_DATA_DIR explicitly to select the database to use.");
+        }
+
+        return previousDatabaseExists ? previousAppHostDirectory : currentDirectory;
     }
 }

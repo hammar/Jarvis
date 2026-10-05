@@ -73,10 +73,13 @@ schema migrations, FTS5 synchronization, and implementations of the
 Application storage contracts. Conversation storage includes messages, turns,
 and ordered event cursors; memory, jobs, approvals, action journals, and audit
 use separate storage operations. Web composition selects `JARVIS_DATA_DIR` (or
-the per-user LocalApplicationData `Jarvis` directory when unset); the database
-file is `jarvis.db`, outside the deployment folder. `Microsoft.Data.Sqlite`
-is confined to Infrastructure and integration tests. Domain and Application
-remain independent of SQLite.
+the per-user LocalApplicationData `Jarvis` directory when unset). It reuses
+the previous AppHost `PersonalAgent` location only when that is the sole
+default database; if both default locations contain data, startup requires an
+explicit path. AppHost leaves the Local/Hybrid fallback to Web so both launch
+modes resolve the same store. The database file is `jarvis.db`, outside the
+deployment folder. `Microsoft.Data.Sqlite` is confined to Infrastructure and
+integration tests. Domain and Application remain independent of SQLite.
 
 Migrations use SQLite `user_version` and apply each embedded SQL migration
 inside its own immediate transaction. Foreign keys are enabled per connection;

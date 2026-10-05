@@ -20,6 +20,13 @@ public sealed class IsolatedDirectory : IDisposable
     public static IsolatedDirectory Create()
     {
         var directory = Directory.CreateTempSubdirectory("jarvis-test-");
+        if (!OperatingSystem.IsWindows())
+        {
+            File.SetUnixFileMode(
+                directory.FullName,
+                UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+
         return new IsolatedDirectory(directory.FullName);
     }
 

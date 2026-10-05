@@ -62,6 +62,12 @@ reported as a failure.
 | Strong application IDs are independent | `IdentifierContractTests` |
 | Real SQLite file persists across connections and stays test-owned | `SqliteAndWebSmokeTests.SqlitePersistsDataInAnIsolatedTestDatabase` |
 | Restore recovery artifacts cannot be used as backup paths | `SqlitePersistenceTests.BackupAndRestoreRejectRestoreArtifactsWithoutDeletingSourceBackup` |
+| Symlink aliases cannot bypass restore path reservations | `SqlitePersistenceTests.BackupAndRestoreRejectArtifactPathsReachedThroughDirectorySymlinks` |
+| Shared data directories are rejected and database files are private | `SqlitePersistenceTests.DatabaseRejectsSharedDataDirectoryAndRestrictsDatabasePermissions` |
+| Windows data directories reject ACL access for other identities | `SqlitePersistenceTests.WindowsDatabaseRejectsDirectoriesGrantingAccessToOtherUsers` |
+| Turn state/version survive restart and nonterminal recovery reads are bounded | `SqlitePersistenceTests.NonterminalTurnStateAndVersionCanBeRecoveredAfterRestart` |
+| Existing default databases are preserved and ambiguous defaults fail closed | `SqlitePersistenceTests.DataDirectoryPreservesLegacyAppHostStateAndRejectsAmbiguousDefaults` |
+| Direct Web startup rejects unsupported profiles before persistence access | `SqliteAndWebSmokeTests.DirectHostRejectsUnsupportedProfilesBeforeOpeningStorage` |
 | Concurrent startup recovers a prepared restore once | `SqlitePersistenceTests.ConcurrentStartupSerializesPreparedRestoreRecovery` |
 | Expired conversations with unresolved turns survive retention | `SqlitePersistenceTests.RetentionUsesDefaultAndOverrideWindowsAndKeepsDurableState` |
 | Razor host works without external services | `SqliteAndWebSmokeTests.RazorHostServesTheConfiguredProfileWithoutExternalServices` |

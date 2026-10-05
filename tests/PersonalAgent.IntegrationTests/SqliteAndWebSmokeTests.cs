@@ -90,6 +90,19 @@ public sealed class SqliteAndWebSmokeTests
         Assert.Contains("requires an explicit isolated JARVIS_DATA_DIR", exception.Message, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("simulator")]
+    [InlineData("Unknown")]
+    [Trait("Category", "Integration")]
+    public void DirectHostRejectsUnsupportedProfilesBeforeOpeningStorage(string profile)
+    {
+        using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(web =>
+            web.UseSetting("JARVIS_PROFILE", profile));
+
+        var exception = Assert.Throws<InvalidOperationException>(() => factory.CreateClient());
+        Assert.Contains("JARVIS_PROFILE must be Simulator, Local, Hybrid, or E2E", exception.Message, StringComparison.Ordinal);
+    }
+
     [Fact]
     [Trait("Category", "Integration")]
     public async Task DevelopmentHealthEndpointsAreNotMappedInProduction()

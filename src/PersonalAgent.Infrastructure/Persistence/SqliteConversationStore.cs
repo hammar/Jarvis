@@ -175,6 +175,54 @@ public sealed class SqliteConversationStore : IConversationStore
     }
 
     /// <inheritdoc />
+    public async ValueTask<ConversationTurn?> GetTurnAsync(
+        TurnId turnId,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = await database.OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT id, conversation_id, status, created_at_utc, updated_at_utc, version
+            FROM turns WHERE id = $id;
+            """;
+        command.Parameters.AddWithValue("$id", SqliteValue.Guid(turnId.Value));
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        return await reader.ReadAsync(cancellationToken)
+            ? ReadTurn(reader)
+            : null;
+    }
+
+    /// <inheritdoc />
+    public async ValueTask<IReadOnlyList<ConversationTurn>> ReadNonterminalTurnsAsync(
+        int maximumTurns,
+        CancellationToken cancellationToken)
+    {
+        if (maximumTurns is < 1 or > 1000)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maximumTurns), "The turn limit must be from 1 through 1000.");
+        }
+
+        await using var connection = await database.OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT id, conversation_id, status, created_at_utc, updated_at_utc, version
+            FROM turns
+            WHERE status NOT IN ('Completed', 'Failed', 'Cancelled')
+            ORDER BY updated_at_utc, id
+            LIMIT $maximum;
+            """;
+        command.Parameters.AddWithValue("$maximum", maximumTurns);
+        var turns = new List<ConversationTurn>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            turns.Add(ReadTurn(reader));
+        }
+
+        return turns;
+    }
+
+    /// <inheritdoc />
     public async ValueTask<ConversationTurn> UpdateTurnStatusAsync(
         TurnId turnId,
         TurnStatus status,
@@ -197,7 +245,9 @@ public sealed class SqliteConversationStore : IConversationStore
         await using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = """
-            UPDATE turns SET status = $status, updated_at_utc = $updated, version = version + 1
+            UPDATE turns SET status = $status,
+                updated_at_utc = CASE WHEN updated_at_utc < $updated THEN $updated ELSE updated_at_utc END,
+                version = version + 1
             WHERE id = $id AND version = $version;
             """;
         command.Parameters.AddWithValue("$status", status.ToString());
@@ -365,4 +415,13 @@ public sealed class SqliteConversationStore : IConversationStore
 
         return events;
     }
+
+    private static ConversationTurn ReadTurn(SqliteDataReader reader) =>
+        new(
+            new TurnId(System.Guid.Parse(reader.GetString(0))),
+            new ConversationId(System.Guid.Parse(reader.GetString(1))),
+            Enum.Parse<TurnStatus>(reader.GetString(2), ignoreCase: false),
+            SqliteValue.DateTimeOffset(reader.GetString(3)),
+            SqliteValue.DateTimeOffset(reader.GetString(4)),
+            reader.GetInt64(5));
 }
