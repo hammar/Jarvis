@@ -44,9 +44,15 @@ public sealed class SqliteJobStore : IJobStore
             candidate.Transaction = transaction;
             candidate.CommandText = """
                 SELECT id, payload_version
-                FROM jobs
+                FROM jobs AS due_job
                 WHERE enabled = 1 AND due_at_utc <= $now
                   AND (lease_owner IS NULL OR lease_expires_at_utc <= $now)
+                  AND NOT EXISTS (
+                      SELECT 1 FROM job_runs
+                      WHERE job_id = due_job.id
+                        AND scheduled_occurrence_utc = due_job.due_at_utc
+                        AND completed_at_utc IS NOT NULL
+                  )
                 ORDER BY due_at_utc, id
                 LIMIT 1;
                 """;
@@ -73,7 +79,13 @@ public sealed class SqliteJobStore : IJobStore
                 SET lease_owner = $owner, lease_expires_at_utc = $expires,
                     attempt_count = attempt_count + 1, version = version + 1
                 WHERE id = $id AND enabled = 1 AND due_at_utc <= $now
-                  AND (lease_owner IS NULL OR lease_expires_at_utc <= $now);
+                  AND (lease_owner IS NULL OR lease_expires_at_utc <= $now)
+                  AND NOT EXISTS (
+                      SELECT 1 FROM job_runs
+                      WHERE job_id = jobs.id
+                        AND scheduled_occurrence_utc = jobs.due_at_utc
+                        AND completed_at_utc IS NOT NULL
+                  );
                 """;
             claim.Parameters.AddWithValue("$owner", workerId);
             claim.Parameters.AddWithValue("$expires", expiry);
@@ -124,9 +136,10 @@ public sealed class SqliteJobStore : IJobStore
             run.CommandText = """
                 INSERT INTO job_runs
                     (id, job_id, scheduled_occurrence_utc, status, started_at_utc, completed_at_utc)
-                VALUES ($id, $job_id, $occurrence, $status, $now, $now)
+                VALUES ($id, $job_id, $occurrence, $status, NULL, $now)
                 ON CONFLICT(job_id, scheduled_occurrence_utc) DO UPDATE SET
-                    status = excluded.status, completed_at_utc = excluded.completed_at_utc;
+                    status = excluded.status, started_at_utc = NULL,
+                    completed_at_utc = excluded.completed_at_utc;
                 """;
             run.Parameters.AddWithValue("$id", SqliteValue.Guid(System.Guid.NewGuid()));
             run.Parameters.AddWithValue("$job_id", SqliteValue.Guid(lease.Id.Value));

@@ -95,7 +95,9 @@ public sealed class SqliteActionJournalStore : IActionJournalStore
         }
 
         await using var connection = await database.OpenConnectionAsync(cancellationToken);
+        await using var transaction = connection.BeginTransaction(deferred: false);
         await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText = """
             UPDATE actions SET status = $status, updated_at_utc = $updated, version = version + 1
             WHERE id = $id AND version = $version;
@@ -109,8 +111,27 @@ public sealed class SqliteActionJournalStore : IActionJournalStore
             throw new PersistenceConcurrencyException("The action journal entry changed or no longer exists.");
         }
 
-        return await GetAsync(id, cancellationToken)
-            ?? throw new InvalidOperationException("The updated action journal entry could not be read.");
+        ActionJournalEntry result;
+        await using (var read = connection.CreateCommand())
+        {
+            read.Transaction = transaction;
+            read.CommandText = """
+                SELECT id, action_type, canonical_arguments, request_hash, status,
+                       created_at_utc, updated_at_utc, version
+                FROM actions WHERE id = $id;
+                """;
+            read.Parameters.AddWithValue("$id", SqliteValue.Guid(id.Value));
+            await using var reader = await read.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                throw new InvalidDataException("The updated action journal entry could not be read.");
+            }
+
+            result = ReadEntry(reader);
+        }
+
+        await transaction.CommitAsync(cancellationToken);
+        return result;
     }
 
     private static ActionJournalEntry ReadEntry(SqliteDataReader reader) =>

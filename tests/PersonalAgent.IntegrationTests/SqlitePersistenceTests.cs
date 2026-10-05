@@ -62,42 +62,7 @@ public sealed class SqlitePersistenceTests
         using var file = IsolatedDatabaseFile.Create();
         var conversationId = ConversationId.New();
         var messageId = Guid.NewGuid();
-        await using (var connection = new SqliteConnection(new SqliteConnectionStringBuilder
-        {
-            DataSource = file.Path,
-            ForeignKeys = true
-        }.ToString()))
-        {
-            await connection.OpenAsync();
-            await using var createLegacy = connection.CreateCommand();
-            createLegacy.CommandText = """
-                CREATE TABLE conversations (
-                    id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, title TEXT NOT NULL DEFAULT '',
-                    created_at_utc TEXT NOT NULL, updated_at_utc TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 1);
-                CREATE TABLE turns (
-                    id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES conversations(id),
-                    status TEXT NOT NULL, created_at_utc TEXT NOT NULL, updated_at_utc TEXT NOT NULL,
-                    version INTEGER NOT NULL DEFAULT 1);
-                CREATE TABLE messages (
-                    message_id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES conversations(id),
-                    turn_id TEXT REFERENCES turns(id), sequence INTEGER NOT NULL, role TEXT NOT NULL,
-                    content TEXT NOT NULL, created_at_utc TEXT NOT NULL);
-                CREATE TABLE turn_events (
-                    event_id TEXT PRIMARY KEY, turn_id TEXT NOT NULL REFERENCES turns(id),
-                    sequence INTEGER NOT NULL, event_type TEXT NOT NULL, payload_json TEXT NOT NULL,
-                    occurred_at_utc TEXT NOT NULL);
-                INSERT INTO conversations VALUES
-                    ($conversation, 'owner', '', '2026-01-01T00:00:00.0000000+00:00',
-                     '2026-01-02T00:00:00.0000000+00:00', 1);
-                INSERT INTO messages VALUES
-                    ($message, $conversation, NULL, 1, 'user', 'before upgrade',
-                     '2026-01-02T00:00:00.0000000+00:00');
-                PRAGMA user_version = 1;
-                """;
-            createLegacy.Parameters.AddWithValue("$conversation", conversationId.Value.ToString("D"));
-            createLegacy.Parameters.AddWithValue("$message", messageId.ToString("D"));
-            await createLegacy.ExecuteNonQueryAsync();
-        }
+        await CreateVersionOneFixtureAsync(file.Path, conversationId, messageId);
 
         var database = new SqliteDatabase(file.Path);
         await database.InitializeAsync();
@@ -112,6 +77,69 @@ public sealed class SqlitePersistenceTests
         await using var table = migrated.CreateCommand();
         table.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'cloud_consents';";
         Assert.Equal(1L, (long)(await table.ExecuteScalarAsync())!);
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task ValidateUpgradeOnCopyAppliesPendingMigrationWithoutChangingLiveDatabase()
+    {
+        using var file = IsolatedDatabaseFile.Create();
+        var conversationId = ConversationId.New();
+        var messageId = Guid.NewGuid();
+        await CreateVersionOneFixtureAsync(file.Path, conversationId, messageId);
+
+        await new SqliteBackupRestoreService(new SqliteDatabase(file.Path)).ValidateUpgradeOnCopyAsync();
+
+        await using var live = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = file.Path
+        }.ToString());
+        await live.OpenAsync();
+        Assert.Equal(1, await UserVersionAsync(live));
+        await using var preservedData = live.CreateCommand();
+        preservedData.CommandText = "SELECT content FROM messages WHERE message_id = $id;";
+        preservedData.Parameters.AddWithValue("$id", messageId.ToString("D"));
+        Assert.Equal("before upgrade", (string?)await preservedData.ExecuteScalarAsync());
+        await using var unchangedSchema = live.CreateCommand();
+        unchangedSchema.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'cloud_consents';";
+        Assert.Equal(0L, (long)(await unchangedSchema.ExecuteScalarAsync())!);
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task ValidateUpgradeOnCopyRejectsConflictingSchemaWithoutChangingOriginal()
+    {
+        using var file = IsolatedDatabaseFile.Create();
+        await using (var connection = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = file.Path
+        }.ToString()))
+        {
+            await connection.OpenAsync();
+            await using var createConflict = connection.CreateCommand();
+            createConflict.CommandText = """
+                CREATE TABLE conversations (id TEXT PRIMARY KEY);
+                INSERT INTO conversations VALUES ('original');
+                PRAGMA user_version = 0;
+                """;
+            await createConflict.ExecuteNonQueryAsync();
+        }
+
+        await Assert.ThrowsAsync<SqliteException>(
+            () => new SqliteBackupRestoreService(new SqliteDatabase(file.Path)).ValidateUpgradeOnCopyAsync());
+
+        await using var original = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = file.Path
+        }.ToString());
+        await original.OpenAsync();
+        Assert.Equal(0, await UserVersionAsync(original));
+        await using var rows = original.CreateCommand();
+        rows.CommandText = "SELECT id FROM conversations;";
+        Assert.Equal("original", (string?)await rows.ExecuteScalarAsync());
+        await using var absent = original.CreateCommand();
+        absent.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'memory_facts';";
+        Assert.Equal(0L, (long)(await absent.ExecuteScalarAsync())!);
     }
 
     [Fact]
@@ -371,6 +399,51 @@ public sealed class SqlitePersistenceTests
         Assert.Equal("Unknown", (string?)await runs.ExecuteScalarAsync());
     }
 
+    [Theory]
+    [InlineData("Succeeded")]
+    [InlineData("Unknown")]
+    [Trait("Category", "Integration")]
+    public async Task CompletedJobOccurrenceCannotBeClaimedAgain(string outcome)
+    {
+        using var file = IsolatedDatabaseFile.Create();
+        var database = new SqliteDatabase(file.Path);
+        await database.InitializeAsync();
+        var jobId = JobId.New();
+        await using (var connection = await database.OpenConnectionAsync())
+        await using (var command = connection.CreateCommand())
+        {
+            command.CommandText = """
+                INSERT INTO jobs
+                    (id, owner_id, kind, payload_version, payload, time_zone_id, due_at_utc, enabled, misfire_policy)
+                VALUES ($id, 'owner', 'reminder', 1, '{}', 'America/Los_Angeles', $due, 1, 'Delayed');
+                """;
+            command.Parameters.AddWithValue("$id", jobId.Value.ToString("D"));
+            command.Parameters.AddWithValue("$due", SqliteValueForTest(Now.AddMinutes(-1)));
+            await command.ExecuteNonQueryAsync();
+        }
+
+        var clock = new MutableClock(Now);
+        var store = new SqliteJobStore(database, clock);
+        var lease = await store.ClaimDueAsync("worker", Now, TimeSpan.FromMinutes(2), CancellationToken.None);
+        Assert.NotNull(lease);
+        clock.UtcNow = Now.AddMinutes(1);
+        await store.CompleteAsync(lease!, outcome, CancellationToken.None);
+
+        Assert.Null(await store.ClaimDueAsync("worker-retry", clock.UtcNow, TimeSpan.FromMinutes(2), CancellationToken.None));
+        await Assert.ThrowsAsync<PersistenceConcurrencyException>(
+            async () => await store.CompleteAsync(lease!, "Succeeded", CancellationToken.None));
+        await using var verify = await database.OpenConnectionAsync();
+        await using var run = verify.CreateCommand();
+        run.CommandText = "SELECT status, started_at_utc, completed_at_utc FROM job_runs WHERE job_id = $id;";
+        run.Parameters.AddWithValue("$id", jobId.Value.ToString("D"));
+        await using var reader = await run.ExecuteReaderAsync();
+        Assert.True(await reader.ReadAsync());
+        Assert.Equal(outcome, reader.GetString(0));
+        Assert.True(reader.IsDBNull(1));
+        Assert.Equal(Now.AddMinutes(1).ToString("O"), reader.GetString(2));
+        Assert.False(await reader.ReadAsync());
+    }
+
     [Fact]
     [Trait("Category", "Integration")]
     public async Task RetentionUsesDefaultAndOverrideWindowsAndKeepsDurableState()
@@ -397,7 +470,9 @@ public sealed class SqlitePersistenceTests
         var actions = new SqliteActionJournalStore(database);
         var unknownAction = NewAction(ActionId.New(), "Prepared", Now);
         await actions.CreateAsync(unknownAction, CancellationToken.None);
-        await actions.UpdateStatusAsync(unknownAction.Id, "Unknown", 1, Now, CancellationToken.None);
+        var unknownResult = await actions.UpdateStatusAsync(unknownAction.Id, "Unknown", 1, Now, CancellationToken.None);
+        Assert.Equal("Unknown", unknownResult.Status);
+        Assert.Equal(2, unknownResult.Version);
         await using (var connection = await database.OpenConnectionAsync())
         await using (var insertJob = connection.CreateCommand())
         {
@@ -604,6 +679,47 @@ public sealed class SqlitePersistenceTests
 
     private static AuditEventRecord NewAudit(DateTimeOffset at) =>
         new(Guid.NewGuid(), "turn.completed", "turn-1", """{"status":"Completed"}""", at);
+
+    private static async Task CreateVersionOneFixtureAsync(
+        string databasePath,
+        ConversationId conversationId,
+        Guid messageId)
+    {
+        await using var connection = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = databasePath,
+            ForeignKeys = true
+        }.ToString());
+        await connection.OpenAsync();
+        await using var createLegacy = connection.CreateCommand();
+        createLegacy.CommandText = """
+            CREATE TABLE conversations (
+                id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, title TEXT NOT NULL DEFAULT '',
+                created_at_utc TEXT NOT NULL, updated_at_utc TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 1);
+            CREATE TABLE turns (
+                id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES conversations(id),
+                status TEXT NOT NULL, created_at_utc TEXT NOT NULL, updated_at_utc TEXT NOT NULL,
+                version INTEGER NOT NULL DEFAULT 1);
+            CREATE TABLE messages (
+                message_id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES conversations(id),
+                turn_id TEXT REFERENCES turns(id), sequence INTEGER NOT NULL, role TEXT NOT NULL,
+                content TEXT NOT NULL, created_at_utc TEXT NOT NULL);
+            CREATE TABLE turn_events (
+                event_id TEXT PRIMARY KEY, turn_id TEXT NOT NULL REFERENCES turns(id),
+                sequence INTEGER NOT NULL, event_type TEXT NOT NULL, payload_json TEXT NOT NULL,
+                occurred_at_utc TEXT NOT NULL);
+            INSERT INTO conversations VALUES
+                ($conversation, 'owner', '', '2026-01-01T00:00:00.0000000+00:00',
+                 '2026-01-02T00:00:00.0000000+00:00', 1);
+            INSERT INTO messages VALUES
+                ($message, $conversation, NULL, 1, 'user', 'before upgrade',
+                 '2026-01-02T00:00:00.0000000+00:00');
+            PRAGMA user_version = 1;
+            """;
+        createLegacy.Parameters.AddWithValue("$conversation", conversationId.Value.ToString("D"));
+        createLegacy.Parameters.AddWithValue("$message", messageId.ToString("D"));
+        await createLegacy.ExecuteNonQueryAsync();
+    }
 
     private static async Task<bool> TryUpdateAsync(SqliteMemoryStore store, MemoryFact fact, long expectedVersion)
     {

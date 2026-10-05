@@ -27,8 +27,10 @@ identity rather than averaging project percentages.
 
 Enforced targets follow AGENTS.md: Domain and Application unit-only at 90%
 lines / 85% branches; combined unit+integration first-party runtime at 85% /
-75%; each runtime assembly at 80% / 70%; critical modules at 95% / 90% when
-implemented; changed executable lines at 90%. A module with no coverable lines
+75%; each runtime assembly at 80% / 70%; approval persistence invariants in
+`SqliteApprovalStore.cs` at 95% / 90%; changed executable lines at 90%. The
+coverage validator requires that critical source file to exist at its exact
+owned path, so renaming it cannot silently remove the gate. A module with no coverable lines
 does not count as evidence of passing its threshold; runtime assemblies with
 no coverable lines fail, and branch coverage is N/A only when a module has no
 coverable branches. Thresholds apply as executable production code is
@@ -38,10 +40,10 @@ in-process coverage. No broad Infrastructure exclusion is allowed: the
 currently empty Infrastructure assembly activates its per-assembly 80%/70%
 requirement as soon as it contains handwritten C#.
 
-The `gate-self-test` operation runs low-line, low-branch, empty-coverage,
-missing-report, and zero-discovery fixtures through the same validator used by CI. Architecture
-tests include forbidden project-reference, reflected type-dependency, and
-Web non-composition source fixtures. The browser check runs the expected
+The `gate-self-test` operation runs low-line, low-branch, low-critical-module,
+empty-coverage, missing-report, and zero-discovery fixtures through the same
+validator used by CI. Architecture tests include forbidden project-reference,
+reflected type-dependency, and Web non-composition source fixtures. The browser check runs the expected
 Playwright smoke and confirms a deliberately incorrect browser assertion is
 reported as a failure.
 

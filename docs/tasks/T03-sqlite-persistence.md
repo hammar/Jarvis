@@ -74,10 +74,13 @@ claim, or automatic replay of jobs/actions during restore.
 Real SQLite integration tests cover fresh migrations and reopen, upgrade from
 an older schema with data preservation, FTS insert/update/delete, optimistic
 concurrency, approval expiry/single-use ownership checks, expired job-lease
-recovery, backup/corruption/restore, migration-on-copy, and default/overridden
-retention including repeat/restart behavior. Infrastructure must meet the
-80% line / 70% branch combined unit+integration coverage minimum; any
-policy-adjacent journal invariant is held to the critical-module gate.
+recovery and no-reclaim for completed outcomes, backup/corruption/restore,
+pending migration-on-copy and conflicting-schema preservation, and
+default/overridden retention including repeat/restart behavior. Infrastructure
+must meet the 80% line / 70% branch combined unit+integration coverage minimum.
+`SqliteApprovalStore.cs` is explicitly owned as a critical module at 95% line /
+90% branch coverage, enforced by the coverage validator and its negative
+fixture.
 
 Update `docs/architecture.md` with storage ownership and restore boundaries,
 and `src/PersonalAgent.Infrastructure/README.md` with local migration and

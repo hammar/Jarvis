@@ -116,6 +116,11 @@ internal static class CoverageGate
         "PersonalAgent.ServiceDefaults"
     ];
 
+    private static readonly (string Name, string RelativePath, double Lines, double Branches)[] CriticalModules =
+    [
+        ("Approval persistence invariants", "src/PersonalAgent.Infrastructure/Persistence/SqliteApprovalStore.cs", 95, 90)
+    ];
+
     internal static void RunSelfTests()
     {
         var healthy = new CoverageMetrics();
@@ -157,6 +162,39 @@ internal static class CoverageGate
         }
 
         ExpectFailure(() => EnforceThreshold("low branch coverage fixture", lowBranchCoverage, 90, 85));
+        var mergedBranches = new CoverageMetrics();
+        var branchLine = new CoverageLine("merged-branch-fixture.cs", 1);
+        AddBranches(
+            mergedBranches,
+            new CoverageMetrics(),
+            branchLine,
+            XElement.Parse(
+                """<line number="1" hits="0" branch="True" condition-coverage="0% (0/2)"><conditions><condition number="193" type="jump" coverage="0%" /></conditions></line>"""),
+            "first branch report fixture");
+        AddBranches(
+            mergedBranches,
+            new CoverageMetrics(),
+            branchLine,
+            XElement.Parse(
+                """<line number="1" hits="1" branch="True" condition-coverage="100% (2/2)"><conditions><condition number="175" type="jump" coverage="100%" /></conditions></line>"""),
+            "second branch report fixture");
+        if (mergedBranches.Branches.Count != 2 || mergedBranches.CoveredBranches.Count != 2)
+        {
+            throw new ValidationException("Equivalent branches from separate reports were not merged by source position.");
+        }
+
+        var lowCriticalModule = new CoverageMetrics();
+        for (var line = 1; line <= 100; line++)
+        {
+            lowCriticalModule.AddLine(new CoverageLine("approval-fixture.cs", line), line <= 94);
+        }
+
+        for (var branch = 1; branch <= 20; branch++)
+        {
+            lowCriticalModule.AddBranch($"approval-fixture.cs:1:{branch}", branch <= 17);
+        }
+
+        ExpectFailure(() => EnforceThreshold("critical module fixture", lowCriticalModule, 95, 90));
         ExpectFailure(() => RequireReports([], "missing report fixture"));
         ExpectFailure(() => TestResults.VerifyDiscoveryXml(
             XDocument.Parse("<TestRun><ResultSummary><Counters total=\"0\" executed=\"0\" passed=\"0\" failed=\"0\" /></ResultSummary></TestRun>"),
@@ -217,6 +255,18 @@ internal static class CoverageGate
 
         EnforceThreshold("combined unit + integration runtime", runtime, 85, 75, allowNoLines: false);
         EnforceChangedLineThreshold(root, combined.AllAssemblies);
+        foreach (var module in CriticalModules)
+        {
+            var sourcePath = Path.GetFullPath(Path.Combine(root, module.RelativePath));
+            if (!File.Exists(sourcePath) || IsGeneratedSource(sourcePath))
+            {
+                throw new ValidationException(
+                    $"Critical-module ownership source is missing or generated: {module.RelativePath}.");
+            }
+
+            var metrics = SelectSourceFile(combined.AllAssemblies, sourcePath);
+            EnforceThreshold(module.Name, metrics, module.Lines, module.Branches, allowNoLines: false);
+        }
 
         Console.WriteLine("Coverage thresholds passed. Totals use unique source lines and branch conditions.");
         foreach (var (name, metrics) in combined.Assemblies.OrderBy(pair => pair.Key, StringComparer.Ordinal))
@@ -235,6 +285,24 @@ internal static class CoverageGate
         return Directory.Exists(sourceDirectory)
             && Directory.EnumerateFiles(sourceDirectory, "*.cs", SearchOption.AllDirectories)
                 .Any(path => !IsGeneratedSource(path));
+    }
+
+    private static CoverageMetrics SelectSourceFile(CoverageMetrics source, string sourcePath)
+    {
+        var metrics = new CoverageMetrics();
+        foreach (var line in source.Lines.Where(line =>
+                     string.Equals(Path.GetFullPath(line.File), sourcePath, StringComparison.Ordinal)))
+        {
+            metrics.AddLine(line, source.CoveredLines.Contains(line));
+        }
+
+        var branchPrefix = sourcePath + ":";
+        foreach (var branch in source.Branches.Where(branch => branch.StartsWith(branchPrefix, StringComparison.Ordinal)))
+        {
+            metrics.AddBranch(branch, source.CoveredBranches.Contains(branch));
+        }
+
+        return metrics;
     }
 
     private static IReadOnlyList<string> RequireReports(IEnumerable<string> reportPaths, string layer)
@@ -315,19 +383,21 @@ internal static class CoverageGate
         XElement lineElement,
         string reportPath)
     {
-        var conditions = lineElement.Element("conditions")?.Elements("condition").ToArray() ?? [];
-        if (conditions.Length > 0)
+        var coverageText = (string?)lineElement.Attribute("condition-coverage");
+        if (coverageText is not null)
         {
-            foreach (var condition in conditions)
+            var match = Regex.Match(coverageText, @"\((\d+)/(\d+)\)", RegexOptions.CultureInvariant);
+            if (!match.Success
+                || !int.TryParse(match.Groups[1].Value, CultureInfo.InvariantCulture, out var coveredCount)
+                || !int.TryParse(match.Groups[2].Value, CultureInfo.InvariantCulture, out var totalCount))
             {
-                var index = (string?)condition.Attribute("number") ?? "unknown";
-                var coverage = (string?)condition.Attribute("coverage") ?? "0%";
-                var covered = double.TryParse(
-                    coverage.TrimEnd('%'),
-                    NumberStyles.Number,
-                    CultureInfo.InvariantCulture,
-                    out var percent) && percent >= 100;
-                var key = $"{line.File}:{line.Number}:{index}";
+                throw new ValidationException($"Coverage report contains invalid branch counts: {reportPath}.");
+            }
+
+            for (var branch = 0; branch < totalCount; branch++)
+            {
+                var key = $"{line.File}:{line.Number}:{branch}";
+                var covered = branch < coveredCount;
                 assembly.AddBranch(key, covered);
                 allAssemblies.AddBranch(key, covered);
             }
@@ -335,24 +405,16 @@ internal static class CoverageGate
             return;
         }
 
-        var coverageText = (string?)lineElement.Attribute("condition-coverage");
-        if (coverageText is null)
+        var conditions = lineElement.Element("conditions")?.Elements("condition").ToArray() ?? [];
+        for (var index = 0; index < conditions.Length; index++)
         {
-            return;
-        }
-
-        var match = Regex.Match(coverageText, @"\((\d+)/(\d+)\)", RegexOptions.CultureInvariant);
-        if (!match.Success
-            || !int.TryParse(match.Groups[1].Value, CultureInfo.InvariantCulture, out var coveredCount)
-            || !int.TryParse(match.Groups[2].Value, CultureInfo.InvariantCulture, out var totalCount))
-        {
-            throw new ValidationException($"Coverage report contains invalid branch counts: {reportPath}.");
-        }
-
-        for (var branch = 0; branch < totalCount; branch++)
-        {
-            var key = $"{line.File}:{line.Number}:{branch}";
-            var covered = branch < coveredCount;
+            var coverage = (string?)conditions[index].Attribute("coverage") ?? "0%";
+            var covered = double.TryParse(
+                coverage.TrimEnd('%'),
+                NumberStyles.Number,
+                CultureInfo.InvariantCulture,
+                out var percent) && percent >= 100;
+            var key = $"{line.File}:{line.Number}:{index}";
             assembly.AddBranch(key, covered);
             allAssemblies.AddBranch(key, covered);
         }
