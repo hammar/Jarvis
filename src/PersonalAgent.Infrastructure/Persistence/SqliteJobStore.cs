@@ -109,10 +109,9 @@ public sealed class SqliteJobStore : IJobStore
     {
         ArgumentNullException.ThrowIfNull(lease);
         ArgumentException.ThrowIfNullOrWhiteSpace(outcome);
-        var now = SqliteValue.Utc(clock.UtcNow);
-
         await using var connection = await database.OpenConnectionAsync(cancellationToken);
         await using var transaction = connection.BeginTransaction(deferred: false);
+        var now = SqliteValue.Utc(clock.UtcNow);
         string occurrence;
         await using (var lookup = connection.CreateCommand())
         {

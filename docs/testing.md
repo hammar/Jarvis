@@ -63,6 +63,9 @@ reported as a failure.
 | Real SQLite file persists across connections and stays test-owned | `SqliteAndWebSmokeTests.SqlitePersistsDataInAnIsolatedTestDatabase` |
 | Restore recovery artifacts cannot be used as backup paths | `SqlitePersistenceTests.BackupAndRestoreRejectRestoreArtifactsWithoutDeletingSourceBackup` |
 | Staging WAL/SHM aliases cannot consume a backup source | `SqlitePersistenceTests.BackupAndRestoreRejectRestoreArtifactsWithoutDeletingSourceBackup` |
+| Staging recovery markers, locks, and rollback names cannot be backup paths | `SqlitePersistenceTests.BackupAndRestoreRejectRestoreArtifactsWithoutDeletingSourceBackup` |
+| Lease completion checks expiry inside the acquired write transaction | `SqlitePersistenceTests.CompletionReadsExpiryClockOnlyAfterAcquiringTheWriteTransaction` |
+| A frozen version-1 schema upgrades with working constraints and cascading retention | `SqlitePersistenceTests.UpgradedVersionOneSchemaSupportsWritesConstraintsAndRetention` |
 | Symlink aliases cannot bypass restore path reservations | `SqlitePersistenceTests.BackupAndRestoreRejectArtifactPathsReachedThroughDirectorySymlinks` |
 | Shared data directories are rejected and database files are private | `SqlitePersistenceTests.DatabaseRejectsSharedDataDirectoryAndRestrictsDatabasePermissions` |
 | Windows data directories reject ACL access for other identities | `SqlitePersistenceTests.WindowsDatabaseRejectsDirectoriesGrantingAccessToOtherUsers` |

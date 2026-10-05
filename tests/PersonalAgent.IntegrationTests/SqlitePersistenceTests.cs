@@ -103,6 +103,65 @@ public sealed class SqlitePersistenceTests
 
     [Fact]
     [Trait("Category", "Integration")]
+    public async Task UpgradedVersionOneSchemaSupportsWritesConstraintsAndRetention()
+    {
+        using var file = IsolatedDatabaseFile.Create();
+        var conversationId = ConversationId.New();
+        await CreateVersionOneFixtureAsync(file.Path, conversationId, Guid.NewGuid());
+        var database = new SqliteDatabase(file.Path);
+        await database.InitializeAsync();
+        var clock = new MutableClock(Now);
+        var store = new SqliteConversationStore(database, clock);
+        var appended = Message(conversationId, "after upgrade");
+        await store.AppendMessageAsync(appended, CancellationToken.None);
+        var turnId = TurnId.New();
+        var turn = await store.CreateTurnAsync(
+            turnId, conversationId, TurnStatus.Received, Now, CancellationToken.None);
+        await store.AppendTurnEventAsync(turnId, "turn.started", "{}", Now, CancellationToken.None);
+        await store.UpdateTurnStatusAsync(
+            turnId, TurnStatus.Completed, turn.Version, Now, CancellationToken.None);
+
+        await using (var connection = await database.OpenConnectionAsync())
+        await using (var invalid = connection.CreateCommand())
+        {
+            invalid.CommandText = """
+                INSERT INTO messages
+                    (message_id, conversation_id, sequence, role, content, created_at_utc)
+                VALUES ($id, $conversation, 1, 'user', 'duplicate sequence', $now);
+                """;
+            invalid.Parameters.AddWithValue("$id", Guid.NewGuid().ToString("D"));
+            invalid.Parameters.AddWithValue("$conversation", conversationId.Value.ToString("D"));
+            invalid.Parameters.AddWithValue("$now", Now.ToString("O"));
+            var duplicate = await Assert.ThrowsAsync<SqliteException>(
+                async () => await invalid.ExecuteNonQueryAsync());
+            Assert.Equal(19, duplicate.SqliteErrorCode);
+            invalid.CommandText = "UPDATE turns SET version = 0 WHERE id = $id;";
+            invalid.Parameters["$id"].Value = turnId.Value.ToString("D");
+            var invalidVersion = await Assert.ThrowsAsync<SqliteException>(
+                async () => await invalid.ExecuteNonQueryAsync());
+            Assert.Equal(19, invalidVersion.SqliteErrorCode);
+            invalid.CommandText = "UPDATE messages SET role = 'invalid' WHERE message_id = $id;";
+            invalid.Parameters["$id"].Value = appended.MessageId.ToString("D");
+            var invalidRole = await Assert.ThrowsAsync<SqliteException>(
+                async () => await invalid.ExecuteNonQueryAsync());
+            Assert.Equal(19, invalidRole.SqliteErrorCode);
+        }
+
+        Assert.Equal(2, (await store.ReadRecentAsync(conversationId, 10, CancellationToken.None)).Count);
+        clock.UtcNow = Now.AddDays(91);
+        var deleted = await new SqliteRetentionService(database, clock, new SqliteRetentionOptions())
+            .CleanupExpiredAsync(CancellationToken.None);
+        Assert.Equal(1, deleted.ConversationsDeleted);
+        Assert.Empty(await store.ReadRecentAsync(conversationId, 10, CancellationToken.None));
+        Assert.Null(await store.GetTurnAsync(turnId, CancellationToken.None));
+        await using var verify = await database.OpenConnectionAsync();
+        await using var events = verify.CreateCommand();
+        events.CommandText = "SELECT COUNT(*) FROM turn_events;";
+        Assert.Equal(0L, (long)(await events.ExecuteScalarAsync())!);
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
     public async Task ValidateUpgradeOnCopyAppliesPendingMigrationWithoutChangingLiveDatabase()
     {
         using var file = IsolatedDatabaseFile.Create();
@@ -524,6 +583,68 @@ public sealed class SqlitePersistenceTests
 
     [Fact]
     [Trait("Category", "Integration")]
+    public async Task CompletionReadsExpiryClockOnlyAfterAcquiringTheWriteTransaction()
+    {
+        using var file = IsolatedDatabaseFile.Create();
+        var database = new SqliteDatabase(file.Path);
+        await database.InitializeAsync();
+        var jobId = JobId.New();
+        await using (var connection = await database.OpenConnectionAsync())
+        await using (var insert = connection.CreateCommand())
+        {
+            insert.CommandText = """
+                INSERT INTO jobs
+                    (id, owner_id, kind, payload_version, payload, time_zone_id, due_at_utc, enabled, misfire_policy)
+                VALUES ($id, 'owner', 'reminder', 1, '{}', 'UTC', $due, 1, 'Delayed');
+                """;
+            insert.Parameters.AddWithValue("$id", jobId.Value.ToString("D"));
+            insert.Parameters.AddWithValue("$due", Now.ToString("O"));
+            await insert.ExecuteNonQueryAsync();
+        }
+
+        var clockReadUnderWriteLock = false;
+        var clock = new CallbackClock(() =>
+        {
+            // A second writer distinguishes a clock read inside the transaction from a stale pre-lock read.
+            using var probe = new SqliteConnection(new SqliteConnectionStringBuilder
+            {
+                DataSource = file.Path,
+                Pooling = false,
+                DefaultTimeout = 1
+            }.ToString());
+            probe.Open();
+            using var command = probe.CreateCommand();
+            command.CommandText = "BEGIN IMMEDIATE;";
+            try
+            {
+                command.ExecuteNonQuery();
+                command.CommandText = "ROLLBACK;";
+                command.ExecuteNonQuery();
+                return Now;
+            }
+            catch (SqliteException exception) when (exception.SqliteErrorCode == 5)
+            {
+                clockReadUnderWriteLock = true;
+                return Now.AddMinutes(2);
+            }
+        });
+        var store = new SqliteJobStore(database, clock);
+        var lease = await store.ClaimDueAsync("worker", Now, TimeSpan.FromMinutes(1), CancellationToken.None);
+        Assert.NotNull(lease);
+        await Assert.ThrowsAsync<PersistenceConcurrencyException>(
+            async () => await store.CompleteAsync(lease, "Succeeded", CancellationToken.None));
+        Assert.True(clockReadUnderWriteLock);
+        await using var verify = await database.OpenConnectionAsync();
+        await using var outcome = verify.CreateCommand();
+        outcome.CommandText = "SELECT outcome FROM jobs WHERE id = $id;";
+        outcome.Parameters.AddWithValue("$id", jobId.Value.ToString("D"));
+        Assert.Equal(DBNull.Value, await outcome.ExecuteScalarAsync());
+        outcome.CommandText = "SELECT COUNT(*) FROM job_runs;";
+        Assert.Equal(0L, (long)(await outcome.ExecuteScalarAsync())!);
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
     public async Task RetentionUsesDefaultAndOverrideWindowsAndKeepsDurableState()
     {
         Assert.Equal(new SqliteRetentionOptions(), new SqliteRetentionOptions(90, 30));
@@ -760,6 +881,15 @@ public sealed class SqlitePersistenceTests
             SqliteBackupRestoreService.RestoreStagedPath(file.Path),
             SqliteBackupRestoreService.RestoreStagedPath(file.Path) + "-wal",
             SqliteBackupRestoreService.RestoreStagedPath(file.Path) + "-shm",
+            file.Path + ".restore-staged.restore-state",
+            file.Path + ".restore-staged.restore-state.tmp",
+            file.Path + ".restore-staged.restore-lock",
+            file.Path + ".restore-staged.restore-rollback",
+            file.Path + ".restore-staged.restore-original-wal",
+            file.Path + ".restore-staged.restore-original-shm",
+            file.Path + ".restore-staged.restore-retired-database",
+            file.Path + ".restore-staged.restore-retired-wal",
+            file.Path + ".restore-staged.restore-retired-shm",
             SqliteBackupRestoreService.RestoreRollbackPath(file.Path),
             file.Path + ".restore-original-wal",
             file.Path + ".restore-original-shm",
@@ -1256,23 +1386,15 @@ public sealed class SqlitePersistenceTests
             ForeignKeys = true
         }.ToString());
         await connection.OpenAsync();
+        using var schemaStream = typeof(SqlitePersistenceTests).Assembly.GetManifestResourceStream(
+            "PersonalAgent.IntegrationTests.Fixtures.001-initial-v1.sql")
+            ?? throw new InvalidOperationException("The frozen version-1 schema fixture is missing.");
+        using var schemaReader = new StreamReader(schemaStream);
+        await using var schema = connection.CreateCommand();
+        schema.CommandText = await schemaReader.ReadToEndAsync();
+        await schema.ExecuteNonQueryAsync();
         await using var createLegacy = connection.CreateCommand();
         createLegacy.CommandText = """
-            CREATE TABLE conversations (
-                id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, title TEXT NOT NULL DEFAULT '',
-                created_at_utc TEXT NOT NULL, updated_at_utc TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 1);
-            CREATE TABLE turns (
-                id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES conversations(id),
-                status TEXT NOT NULL, created_at_utc TEXT NOT NULL, updated_at_utc TEXT NOT NULL,
-                version INTEGER NOT NULL DEFAULT 1);
-            CREATE TABLE messages (
-                message_id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES conversations(id),
-                turn_id TEXT REFERENCES turns(id), sequence INTEGER NOT NULL, role TEXT NOT NULL,
-                content TEXT NOT NULL, created_at_utc TEXT NOT NULL);
-            CREATE TABLE turn_events (
-                event_id TEXT PRIMARY KEY, turn_id TEXT NOT NULL REFERENCES turns(id),
-                sequence INTEGER NOT NULL, event_type TEXT NOT NULL, payload_json TEXT NOT NULL,
-                occurred_at_utc TEXT NOT NULL);
             INSERT INTO conversations VALUES
                 ($conversation, 'owner', '', '2026-01-01T00:00:00.0000000+00:00',
                  '2026-01-02T00:00:00.0000000+00:00', 1);
@@ -1311,5 +1433,10 @@ public sealed class SqlitePersistenceTests
     private sealed class MutableClock(DateTimeOffset utcNow) : IClock
     {
         public DateTimeOffset UtcNow { get; set; } = utcNow;
+    }
+
+    private sealed class CallbackClock(Func<DateTimeOffset> read) : IClock
+    {
+        public DateTimeOffset UtcNow => read();
     }
 }

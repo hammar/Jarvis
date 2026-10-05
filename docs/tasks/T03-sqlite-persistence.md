@@ -83,6 +83,11 @@ default/overridden retention including repeat/restart behavior, preserving
 conversations with unresolved turns. Backup and restore reject live sidecars
 and reserved recovery-artifact paths before cleanup or recovery; startup
 serializes marker recovery across processes.
+Reservations include the staging database's own recovery marker, lock, and
+rollback names. Lease completion reads the expiry clock inside its acquired
+write transaction, never before waiting for a writer. Upgrade tests use an
+independent frozen version-1 schema and verify post-upgrade writes, constraints,
+and cascading retention rather than a reduced approximation.
 Rollback snapshots and marker/rename directory entries are flushed before
 recovery states advance. macOS/Linux data and backup directories must be
 owner-private; database, sidecar, and lock files are restricted to owner-only

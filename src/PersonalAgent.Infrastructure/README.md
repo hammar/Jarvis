@@ -49,8 +49,11 @@ On Windows, durable file renames use `MoveFileExW` with
 the way before replacement, and cleanup remains recoverable from the marker.
 Backup and
 restore reject live database sidecars and reserved recovery filenames,
-including symlink aliases and case variants on Windows and macOS. Restore
-never replays jobs or uncertain physical actions.
+including the staging database's recovery marker, lock, and rollback names,
+symlink aliases, and case variants on Windows and macOS.
+Lease completion checks the current clock only after acquiring its write
+transaction, so waiting for another writer cannot authorize an expired lease.
+Restore never replays jobs or uncertain physical actions.
 Simulator and E2E Web processes require an explicit isolated
 `JARVIS_DATA_DIR`; AppHost supplies it for managed profiles. Schema downgrade
 is not automatic; restore a backup made for the prior binary. Use
