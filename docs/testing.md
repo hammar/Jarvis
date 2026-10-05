@@ -62,6 +62,7 @@ reported as a failure.
 | Strong application IDs are independent | `IdentifierContractTests` |
 | Real SQLite file persists across connections and stays test-owned | `SqliteAndWebSmokeTests.SqlitePersistsDataInAnIsolatedTestDatabase` |
 | Restore recovery artifacts cannot be used as backup paths | `SqlitePersistenceTests.BackupAndRestoreRejectRestoreArtifactsWithoutDeletingSourceBackup` |
+| Staging WAL/SHM aliases cannot consume a backup source | `SqlitePersistenceTests.BackupAndRestoreRejectRestoreArtifactsWithoutDeletingSourceBackup` |
 | Symlink aliases cannot bypass restore path reservations | `SqlitePersistenceTests.BackupAndRestoreRejectArtifactPathsReachedThroughDirectorySymlinks` |
 | Shared data directories are rejected and database files are private | `SqlitePersistenceTests.DatabaseRejectsSharedDataDirectoryAndRestrictsDatabasePermissions` |
 | Windows data directories reject ACL access for other identities | `SqlitePersistenceTests.WindowsDatabaseRejectsDirectoriesGrantingAccessToOtherUsers` |
@@ -69,6 +70,7 @@ reported as a failure.
 | Existing default databases are preserved and ambiguous defaults fail closed | `SqlitePersistenceTests.DataDirectoryPreservesLegacyAppHostStateAndRejectsAmbiguousDefaults` |
 | Direct Web startup rejects unsupported profiles before persistence access | `SqliteAndWebSmokeTests.DirectHostRejectsUnsupportedProfilesBeforeOpeningStorage` |
 | Concurrent startup recovers a prepared restore once | `SqlitePersistenceTests.ConcurrentStartupSerializesPreparedRestoreRecovery` |
+| Independent workers race on optimistic writes and startup migrations | `SqlitePersistenceTests.ConcurrentMemoryWritersAllowOnlyOneExpectedVersionUpdate`, `SqlitePersistenceTests.SimultaneousStartupAppliesEachMigrationOnlyOnce` |
 | Expired conversations with unresolved turns survive retention | `SqlitePersistenceTests.RetentionUsesDefaultAndOverrideWindowsAndKeepsDurableState` |
 | Razor host works without external services | `SqliteAndWebSmokeTests.RazorHostServesTheConfiguredProfileWithoutExternalServices` |
 | Direct test-profile startup requires isolated data | `SqliteAndWebSmokeTests.TestProfileRequiresAnExplicitDataDirectory` |

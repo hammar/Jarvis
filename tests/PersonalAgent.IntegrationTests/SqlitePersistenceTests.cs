@@ -382,9 +382,9 @@ public sealed class SqlitePersistenceTests
             0,
             CancellationToken.None);
 
-        var outcomes = await Task.WhenAll(
-            TryUpdateAsync(store, created with { Value = "dim" }, created.Version),
-            TryUpdateAsync(store, created with { Value = "bright" }, created.Version));
+        var outcomes = await RunConcurrentlyAsync(
+            () => TryUpdateAsync(store, created with { Value = "dim" }, created.Version),
+            () => TryUpdateAsync(store, created with { Value = "bright" }, created.Version));
 
         Assert.Equal(1, outcomes.Count(success => success));
         Assert.Equal(1, outcomes.Count(success => !success));
@@ -758,9 +758,14 @@ public sealed class SqlitePersistenceTests
         var artifactPaths = new[]
         {
             SqliteBackupRestoreService.RestoreStagedPath(file.Path),
+            SqliteBackupRestoreService.RestoreStagedPath(file.Path) + "-wal",
+            SqliteBackupRestoreService.RestoreStagedPath(file.Path) + "-shm",
             SqliteBackupRestoreService.RestoreRollbackPath(file.Path),
             file.Path + ".restore-original-wal",
             file.Path + ".restore-original-shm",
+            file.Path + ".restore-retired-database",
+            file.Path + ".restore-retired-wal",
+            file.Path + ".restore-retired-shm",
             SqliteBackupRestoreService.RestoreMarkerPath(file.Path) + ".tmp",
             SqliteBackupRestoreService.RestoreMarkerPath(file.Path),
             file.Path + "-wal",
@@ -1178,9 +1183,38 @@ public sealed class SqlitePersistenceTests
         using var file = IsolatedDatabaseFile.Create();
         var first = new SqliteDatabase(file.Path);
         var second = new SqliteDatabase(file.Path);
-        await Task.WhenAll(first.InitializeAsync(), second.InitializeAsync());
+        await RunConcurrentlyAsync(
+            async () =>
+            {
+                await first.InitializeAsync();
+                return true;
+            },
+            async () =>
+            {
+                await second.InitializeAsync();
+                return true;
+            });
         await using var connection = await first.OpenConnectionAsync();
         Assert.Equal(2, await UserVersionAsync(connection));
+    }
+
+    private static async Task<T[]> RunConcurrentlyAsync<T>(params Func<Task<T>>[] operations)
+    {
+        var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var remaining = operations.Length;
+        var tasks = operations.Select(operation => Task.Run(async () =>
+        {
+            if (Interlocked.Decrement(ref remaining) == 0)
+            {
+                ready.TrySetResult();
+            }
+
+            await ready.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            return await operation();
+        })).ToArray();
+
+        await ready.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        return await Task.WhenAll(tasks).WaitAsync(TimeSpan.FromSeconds(20));
     }
 
     private static ConversationMessage Message(ConversationId id, string content) =>

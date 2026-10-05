@@ -43,7 +43,11 @@ previous committed database state (including committed WAL data) after a
 failed or interrupted replacement; startup completes that recovery under a
 cross-process file lock before opening SQLite. Rollback database/WAL snapshots
 are flushed before the prepared marker is durably published; directory changes
-are flushed around marker publication and database replacement. Backup and
+are flushed around marker publication and database replacement on macOS/Linux.
+On Windows, durable file renames use `MoveFileExW` with
+`MOVEFILE_WRITE_THROUGH`; old live database sidecars are durably renamed out of
+the way before replacement, and cleanup remains recoverable from the marker.
+Backup and
 restore reject live database sidecars and reserved recovery filenames,
 including symlink aliases and case variants on Windows and macOS. Restore
 never replays jobs or uncertain physical actions.

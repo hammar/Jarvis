@@ -158,10 +158,10 @@ public sealed class SqliteBackupRestoreService
                 database.DatabasePath,
                 originalExists ? PreparedRestore : PreparedRestoreWithoutOriginal);
             prepared = true;
-            DeleteDatabaseSidecars(database.DatabasePath);
+            RetireDatabaseSidecars(database.DatabasePath);
             DurableFileSystem.FlushDirectory(directory);
             beforeReplacement?.Invoke();
-            File.Move(restorePath, database.DatabasePath, overwrite: true);
+            DurableFileSystem.MoveFileDurably(restorePath, database.DatabasePath, overwrite: true);
             DurableFileSystem.FlushDirectory(directory);
             WriteRestoreMarker(database.DatabasePath, CommittedRestore);
             DeleteRestoreArtifacts(database.DatabasePath);
@@ -259,7 +259,7 @@ public sealed class SqliteBackupRestoreService
                 throw new InvalidDataException("Interrupted SQLite restore has no recoverable original database.");
             }
 
-            DeleteDatabaseSidecars(databasePath);
+            RetireDatabaseSidecars(databasePath);
             CopyFileDurably(rollbackPath, databasePath);
             var savedWalPath = RestoreOriginalWalPath(databasePath);
             if (File.Exists(savedWalPath))
@@ -270,7 +270,8 @@ public sealed class SqliteBackupRestoreService
         }
         else if (string.Equals(state, PreparedRestoreWithoutOriginal, StringComparison.Ordinal))
         {
-            DeleteDatabaseFiles(databasePath);
+            RetireDatabaseFile(databasePath);
+            RetireDatabaseSidecars(databasePath);
         }
         else
         {
@@ -377,6 +378,12 @@ public sealed class SqliteBackupRestoreService
 
     private static string RestoreOriginalShmPath(string databasePath) => databasePath + ".restore-original-shm";
 
+    private static string RestoreRetiredDatabasePath(string databasePath) => databasePath + ".restore-retired-database";
+
+    private static string RestoreRetiredWalPath(string databasePath) => databasePath + ".restore-retired-wal";
+
+    private static string RestoreRetiredShmPath(string databasePath) => databasePath + ".restore-retired-shm";
+
     private static void EnsureNotRestoreArtifactPath(string databasePath, string path, string parameterName)
     {
         var restoreArtifacts = new[]
@@ -385,6 +392,11 @@ public sealed class SqliteBackupRestoreService
             RestoreRollbackPath(databasePath),
             RestoreOriginalWalPath(databasePath),
             RestoreOriginalShmPath(databasePath),
+            RestoreRetiredDatabasePath(databasePath),
+            RestoreRetiredWalPath(databasePath),
+            RestoreRetiredShmPath(databasePath),
+            RestoreStagedPath(databasePath) + "-wal",
+            RestoreStagedPath(databasePath) + "-shm",
             RestoreMarkerPath(databasePath) + ".tmp",
             RestoreMarkerPath(databasePath),
             RestoreLockPath(databasePath),
@@ -416,7 +428,7 @@ public sealed class SqliteBackupRestoreService
         }
 
         SqliteDatabase.RestrictFilePermissions(temporaryPath);
-        File.Move(temporaryPath, markerPath, overwrite: true);
+        DurableFileSystem.MoveFileDurably(temporaryPath, markerPath, overwrite: true);
         DurableFileSystem.FlushDirectory(Path.GetDirectoryName(databasePath)!);
     }
 
@@ -430,17 +442,35 @@ public sealed class SqliteBackupRestoreService
 
     private static void CopyFileDurably(string sourcePath, string destinationPath)
     {
-        using var source = new FileStream(sourcePath, FileMode.Open, FileAccess.Read, FileShare.Read);
-        using var destination = new FileStream(
-            destinationPath,
-            FileMode.Create,
-            FileAccess.Write,
-            FileShare.None,
-            bufferSize: 81920,
-            FileOptions.WriteThrough);
-        source.CopyTo(destination);
-        destination.Flush(flushToDisk: true);
-        SqliteDatabase.RestrictFilePermissions(destinationPath);
+        var directory = Path.GetDirectoryName(destinationPath)
+            ?? throw new InvalidOperationException("A durable SQLite file copy requires a parent directory.");
+        var temporaryPath = Path.Combine(directory, $".jarvis-copy-{Guid.NewGuid():N}.tmp");
+        try
+        {
+            using (var source = new FileStream(sourcePath, FileMode.Open, FileAccess.Read, FileShare.Read))
+            using (var destination = new FileStream(
+                       temporaryPath,
+                       FileMode.CreateNew,
+                       FileAccess.Write,
+                       FileShare.None,
+                       bufferSize: 81920,
+                       FileOptions.WriteThrough))
+            {
+                source.CopyTo(destination);
+                destination.Flush(flushToDisk: true);
+            }
+
+            SqliteDatabase.RestrictFilePermissions(temporaryPath);
+            DurableFileSystem.MoveFileDurably(temporaryPath, destinationPath, overwrite: true);
+            DurableFileSystem.FlushDirectory(directory);
+        }
+        finally
+        {
+            if (File.Exists(temporaryPath))
+            {
+                File.Delete(temporaryPath);
+            }
+        }
     }
 
     private static void FlushExistingSidecar(string path)
@@ -466,6 +496,11 @@ public sealed class SqliteBackupRestoreService
                      RestoreRollbackPath(databasePath),
                      RestoreOriginalWalPath(databasePath),
                      RestoreOriginalShmPath(databasePath),
+                     RestoreRetiredDatabasePath(databasePath),
+                     RestoreRetiredWalPath(databasePath),
+                     RestoreRetiredShmPath(databasePath),
+                     RestoreStagedPath(databasePath) + "-wal",
+                     RestoreStagedPath(databasePath) + "-shm",
                      RestoreMarkerPath(databasePath) + ".tmp",
                      RestoreMarkerPath(databasePath)
                  })
@@ -518,6 +553,29 @@ public sealed class SqliteBackupRestoreService
         }
 
         return Path.GetFullPath(current);
+    }
+
+    private static void RetireDatabaseFile(string databasePath)
+    {
+        var retiredPath = RestoreRetiredDatabasePath(databasePath);
+        if (File.Exists(databasePath))
+        {
+            DurableFileSystem.MoveFileDurably(databasePath, retiredPath, overwrite: true);
+        }
+    }
+
+    private static void RetireDatabaseSidecars(string databasePath)
+    {
+        RetireSidecar(databasePath + "-wal", RestoreRetiredWalPath(databasePath));
+        RetireSidecar(databasePath + "-shm", RestoreRetiredShmPath(databasePath));
+    }
+
+    private static void RetireSidecar(string sidecarPath, string retiredPath)
+    {
+        if (File.Exists(sidecarPath))
+        {
+            DurableFileSystem.MoveFileDurably(sidecarPath, retiredPath, overwrite: true);
+        }
     }
 
     private static void DeleteDatabaseFiles(string path)

@@ -1,5 +1,4 @@
 using System.ComponentModel;
-using Microsoft.Win32.SafeHandles;
 using System.Runtime.InteropServices;
 
 namespace PersonalAgent.Infrastructure.Persistence;
@@ -41,12 +40,8 @@ internal static class DurableFileSystem
     {
         if (OperatingSystem.IsWindows())
         {
-            using var handle = CreateDirectoryHandle(path);
-            if (!FlushFileBuffers(handle))
-            {
-                throw new Win32Exception(Marshal.GetLastPInvokeError(), "Could not flush the SQLite data directory.");
-            }
-
+            // Win32 does not support flushing directory handles. Critical name
+            // transitions use MoveFileEx with MOVEFILE_WRITE_THROUGH instead.
             return;
         }
 
@@ -69,46 +64,30 @@ internal static class DurableFileSystem
         }
     }
 
-    private static SafeFileHandle CreateDirectoryHandle(string path)
+    internal static void MoveFileDurably(string sourcePath, string destinationPath, bool overwrite)
     {
-        var handle = CreateFile(
-            path,
-            GenericRead | GenericWrite,
-            ShareRead | ShareWrite | ShareDelete,
-            IntPtr.Zero,
-            OpenExisting,
-            BackupSemantics,
-            IntPtr.Zero);
-        if (handle.IsInvalid)
+        if (OperatingSystem.IsWindows())
         {
-            handle.Dispose();
-            throw new Win32Exception(Marshal.GetLastPInvokeError(), "Could not open the SQLite data directory for flushing.");
+            var flags = MoveFileWriteThrough | (overwrite ? MoveFileReplaceExisting : 0);
+            if (!MoveFileEx(sourcePath, destinationPath, flags))
+            {
+                throw new Win32Exception(
+                    Marshal.GetLastPInvokeError(),
+                    $"Could not durably move SQLite recovery file '{Path.GetFileName(sourcePath)}'.");
+            }
+
+            return;
         }
 
-        return handle;
+        File.Move(sourcePath, destinationPath, overwrite);
     }
 
-    private const uint GenericRead = 0x80000000;
-    private const uint GenericWrite = 0x40000000;
-    private const uint ShareRead = 0x00000001;
-    private const uint ShareWrite = 0x00000002;
-    private const uint ShareDelete = 0x00000004;
-    private const uint OpenExisting = 3;
-    private const uint BackupSemantics = 0x02000000;
+    private const uint MoveFileReplaceExisting = 0x00000001;
+    private const uint MoveFileWriteThrough = 0x00000008;
 
-    [DllImport("kernel32.dll", EntryPoint = "CreateFileW", CharSet = CharSet.Unicode, SetLastError = true)]
-    private static extern SafeFileHandle CreateFile(
-        string path,
-        uint desiredAccess,
-        uint shareMode,
-        IntPtr securityAttributes,
-        uint creationDisposition,
-        uint flagsAndAttributes,
-        IntPtr templateFile);
-
-    [DllImport("kernel32.dll", EntryPoint = "FlushFileBuffers", SetLastError = true)]
+    [DllImport("kernel32.dll", EntryPoint = "MoveFileExW", CharSet = CharSet.Unicode, SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool FlushFileBuffers(SafeFileHandle handle);
+    private static extern bool MoveFileEx(string existingFileName, string newFileName, uint flags);
 
     [DllImport("libc", EntryPoint = "open", CharSet = CharSet.Ansi, SetLastError = true)]
     private static extern int OpenDirectory(string path, int flags);
