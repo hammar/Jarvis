@@ -119,4 +119,38 @@ public sealed class ApplicationContractTests
             Assert.Equal(occurredAtUtc, item.OccurredAtUtc);
         });
     }
+
+    [Fact]
+    [Trait("Category", "Unit")]
+    public void PersistenceContractsKeepJournalApprovalAuditAndEventIdentityExplicit()
+    {
+        var nowUtc = new DateTimeOffset(2026, 10, 4, 12, 0, 0, TimeSpan.Zero);
+        var conversationId = ConversationId.New();
+        var turnId = TurnId.New();
+        var actionId = ActionId.New();
+        var approvalId = ApprovalId.New();
+        var turn = new ConversationTurn(turnId, conversationId, TurnStatus.Running, nowUtc, nowUtc, 2);
+        var turnEvent = new PersistedTurnEvent(Guid.NewGuid(), turnId, 4, "tool.completed", """{"outcome":"Unknown"}""", nowUtc);
+        var action = new ActionJournalEntry(
+            actionId, "home.set_light", """{"entity":"light.test"}""", "hash", "Unknown", nowUtc, nowUtc, 3);
+        var approval = new ApprovalStorageRecord(
+            approvalId, actionId, "owner", "Approved", nowUtc, nowUtc.AddMinutes(5), nowUtc.AddMinutes(1), 2);
+        var audit = new AuditEventRecord(Guid.NewGuid(), "action.unknown", actionId.Value.ToString("D"), "{}", nowUtc);
+        var concurrencyError = new PersistenceConcurrencyException("The record changed.");
+
+        Assert.Equal(turnId, turn.Id);
+        Assert.Equal(conversationId, turn.ConversationId);
+        Assert.Equal(TurnStatus.Running, turn.Status);
+        Assert.Equal(2, turn.Version);
+        Assert.Equal(4, turnEvent.Sequence);
+        Assert.Equal("tool.completed", turnEvent.EventType);
+        Assert.Equal("Unknown", action.Status);
+        Assert.Equal(3, action.Version);
+        Assert.Equal(approvalId, approval.Id);
+        Assert.Equal(actionId, approval.ActionId);
+        Assert.Equal(nowUtc.AddMinutes(5), approval.ExpiresAtUtc);
+        Assert.Equal("action.unknown", audit.EventType);
+        Assert.Equal(nowUtc, audit.OccurredAtUtc);
+        Assert.Equal("The record changed.", concurrencyError.Message);
+    }
 }

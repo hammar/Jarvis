@@ -5,7 +5,11 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="GitHub.Copilot.SDK" />
+    <PackageReference Include="Microsoft.Data.Sqlite" />
     <ProjectReference Include="../PersonalAgent.Application/PersonalAgent.Application.csproj" />
     <ProjectReference Include="../PersonalAgent.Domain/PersonalAgent.Domain.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="Persistence/Migrations/*.sql" />
   </ItemGroup>
 </Project>

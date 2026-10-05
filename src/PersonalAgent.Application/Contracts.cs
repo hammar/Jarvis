@@ -247,6 +247,36 @@ public sealed record ConversationMessage(
     string Content,
     DateTimeOffset CreatedAtUtc);
 
+/// <summary>Describes the durable lifecycle state and version of one application turn.</summary>
+/// <param name="Id">Application-owned turn identifier.</param>
+/// <param name="ConversationId">Owning conversation identifier.</param>
+/// <param name="Status">Current host-owned turn lifecycle status.</param>
+/// <param name="CreatedAtUtc">UTC creation instant.</param>
+/// <param name="UpdatedAtUtc">UTC instant of the latest state or event change.</param>
+/// <param name="Version">Positive optimistic-concurrency version.</param>
+public sealed record ConversationTurn(
+    TurnId Id,
+    ConversationId ConversationId,
+    TurnStatus Status,
+    DateTimeOffset CreatedAtUtc,
+    DateTimeOffset UpdatedAtUtc,
+    long Version);
+
+/// <summary>Describes a turn event with an assigned, durable sequence number.</summary>
+/// <param name="EventId">Stable event identifier.</param>
+/// <param name="TurnId">Owning application turn.</param>
+/// <param name="Sequence">One-based sequence within the turn.</param>
+/// <param name="EventType">Stable application event type.</param>
+/// <param name="PayloadJson">Structured event data, excluding secrets and unapproved private content.</param>
+/// <param name="OccurredAtUtc">UTC instant the host observed the event.</param>
+public sealed record PersistedTurnEvent(
+    Guid EventId,
+    TurnId TurnId,
+    long Sequence,
+    string EventType,
+    string PayloadJson,
+    DateTimeOffset OccurredAtUtc);
+
 /// <summary>Persists durable conversation messages and ordered turn events.</summary>
 public interface IConversationStore
 {
@@ -266,6 +296,60 @@ public interface IConversationStore
     ValueTask<IReadOnlyList<ConversationMessage>> ReadRecentAsync(
         ConversationId conversationId,
         int maximumMessages,
+        CancellationToken cancellationToken);
+
+    /// <summary>Creates a durable turn in a conversation with the supplied host-owned status.</summary>
+    /// <param name="turnId">Stable application turn identifier.</param>
+    /// <param name="conversationId">Owning conversation identifier.</param>
+    /// <param name="status">Initial lifecycle status assigned by the host.</param>
+    /// <param name="createdAtUtc">UTC creation instant.</param>
+    /// <param name="cancellationToken">Token that cancels before commit.</param>
+    /// <returns>The persisted turn at version 1.</returns>
+    ValueTask<ConversationTurn> CreateTurnAsync(
+        TurnId turnId,
+        ConversationId conversationId,
+        TurnStatus status,
+        DateTimeOffset createdAtUtc,
+        CancellationToken cancellationToken);
+
+    /// <summary>Updates turn lifecycle state using expected-version concurrency.</summary>
+    /// <param name="turnId">Turn to update.</param>
+    /// <param name="status">New host-owned lifecycle status.</param>
+    /// <param name="expectedVersion">Version previously read by the caller.</param>
+    /// <param name="updatedAtUtc">UTC state-change instant.</param>
+    /// <param name="cancellationToken">Token that cancels before commit.</param>
+    /// <returns>The updated turn with an incremented version.</returns>
+    ValueTask<ConversationTurn> UpdateTurnStatusAsync(
+        TurnId turnId,
+        TurnStatus status,
+        long expectedVersion,
+        DateTimeOffset updatedAtUtc,
+        CancellationToken cancellationToken);
+
+    /// <summary>Appends an event and atomically assigns its next per-turn sequence number.</summary>
+    /// <param name="turnId">Turn that owns the event.</param>
+    /// <param name="eventType">Stable event type.</param>
+    /// <param name="payloadJson">Structured event data.</param>
+    /// <param name="occurredAtUtc">UTC observation instant.</param>
+    /// <param name="cancellationToken">Token that cancels before commit.</param>
+    /// <returns>The persisted event with its assigned sequence.</returns>
+    ValueTask<PersistedTurnEvent> AppendTurnEventAsync(
+        TurnId turnId,
+        string eventType,
+        string payloadJson,
+        DateTimeOffset occurredAtUtc,
+        CancellationToken cancellationToken);
+
+    /// <summary>Reads a bounded page of turn events strictly after a sequence cursor.</summary>
+    /// <param name="turnId">Turn whose event stream is read.</param>
+    /// <param name="afterSequence">Exclusive cursor; zero starts at the first event.</param>
+    /// <param name="maximumEvents">Maximum events, from 1 through 1000.</param>
+    /// <param name="cancellationToken">Token that cancels the read.</param>
+    /// <returns>Events in ascending sequence order.</returns>
+    ValueTask<IReadOnlyList<PersistedTurnEvent>> ReadTurnEventsAfterAsync(
+        TurnId turnId,
+        long afterSequence,
+        int maximumEvents,
         CancellationToken cancellationToken);
 }
 
@@ -296,6 +380,149 @@ public interface IJobStore
     /// <param name="outcome">Terminal or recoverable outcome code.</param>
     /// <param name="cancellationToken">Token that cancels before commit.</param>
     ValueTask CompleteAsync(JobLease lease, string outcome, CancellationToken cancellationToken);
+}
+
+/// <summary>Describes a durable journal entry for one proposed action.</summary>
+/// <param name="Id">Stable application action identifier.</param>
+/// <param name="ActionType">Registered action type, never an arbitrary provider operation.</param>
+/// <param name="CanonicalArguments">Canonical action arguments retained for audit and idempotency.</param>
+/// <param name="RequestHash">Hash of the canonical action request.</param>
+/// <param name="Status">Known journal status: Prepared, AwaitingApproval, Executing, Succeeded, Failed, Unknown, Rejected, or Expired.</param>
+/// <param name="CreatedAtUtc">UTC instant the action was journaled.</param>
+/// <param name="UpdatedAtUtc">UTC instant of the latest journal change.</param>
+/// <param name="Version">Positive optimistic-concurrency version.</param>
+public sealed record ActionJournalEntry(
+    ActionId Id,
+    string ActionType,
+    string CanonicalArguments,
+    string RequestHash,
+    string Status,
+    DateTimeOffset CreatedAtUtc,
+    DateTimeOffset UpdatedAtUtc,
+    long Version);
+
+/// <summary>Persists action intent and observed outcomes before and after external side effects.</summary>
+public interface IActionJournalStore
+{
+    /// <summary>Persists a prepared action, rejecting reuse of its identifier for different content.</summary>
+    /// <param name="entry">Prepared action with a stable ID and canonical request hash.</param>
+    /// <param name="cancellationToken">Token that cancels the write before commit.</param>
+    /// <returns>The durable entry, including its initial version.</returns>
+    ValueTask<ActionJournalEntry> CreateAsync(ActionJournalEntry entry, CancellationToken cancellationToken);
+
+    /// <summary>Gets one action entry by its stable identifier.</summary>
+    /// <param name="id">Action identifier.</param>
+    /// <param name="cancellationToken">Token that cancels the read.</param>
+    /// <returns>The entry, or <see langword="null"/> when absent.</returns>
+    ValueTask<ActionJournalEntry?> GetAsync(ActionId id, CancellationToken cancellationToken);
+
+    /// <summary>Compare-and-swaps an action outcome without replaying the external operation.</summary>
+    /// <param name="id">Action identifier.</param>
+    /// <param name="status">Next journal status.</param>
+    /// <param name="expectedVersion">Version previously read by the caller.</param>
+    /// <param name="updatedAtUtc">UTC time at which the outcome was observed.</param>
+    /// <param name="cancellationToken">Token that cancels the write before commit.</param>
+    /// <returns>The entry with its incremented version.</returns>
+    ValueTask<ActionJournalEntry> UpdateStatusAsync(
+        ActionId id,
+        string status,
+        long expectedVersion,
+        DateTimeOffset updatedAtUtc,
+        CancellationToken cancellationToken);
+}
+
+/// <summary>Describes the durable, exact-action binding of one approval request.</summary>
+/// <param name="Id">Stable approval identifier.</param>
+/// <param name="ActionId">Action whose canonical arguments are being approved.</param>
+/// <param name="OwnerId">Owner identity to which the request is bound.</param>
+/// <param name="Status">Pending, Approved, Rejected, or Expired.</param>
+/// <param name="CreatedAtUtc">UTC creation instant.</param>
+/// <param name="ExpiresAtUtc">UTC instant after which the request cannot be resolved.</param>
+/// <param name="ResolvedAtUtc">UTC resolution instant, or null while pending.</param>
+/// <param name="Version">Positive optimistic-concurrency version.</param>
+public sealed record ApprovalStorageRecord(
+    ApprovalId Id,
+    ActionId ActionId,
+    string OwnerId,
+    string Status,
+    DateTimeOffset CreatedAtUtc,
+    DateTimeOffset ExpiresAtUtc,
+    DateTimeOffset? ResolvedAtUtc,
+    long Version);
+
+/// <summary>Persists approval requests bound to one owner and one journaled action.</summary>
+public interface IApprovalStore
+{
+    /// <summary>Creates a pending approval request for an existing action.</summary>
+    /// <param name="approval">Pending request with an exact action and expiry.</param>
+    /// <param name="cancellationToken">Token that cancels the write before commit.</param>
+    /// <returns>The persisted request with its initial version.</returns>
+    ValueTask<ApprovalStorageRecord> CreateAsync(ApprovalStorageRecord approval, CancellationToken cancellationToken);
+
+    /// <summary>Gets one approval request by its stable identifier.</summary>
+    /// <param name="id">Approval identifier.</param>
+    /// <param name="cancellationToken">Token that cancels the read.</param>
+    /// <returns>The request, or <see langword="null"/> when absent.</returns>
+    ValueTask<ApprovalStorageRecord?> GetAsync(ApprovalId id, CancellationToken cancellationToken);
+
+    /// <summary>Resolves a still-pending, unexpired request once using owner and version checks.</summary>
+    /// <param name="id">Approval identifier.</param>
+    /// <param name="ownerId">Owner identity bound to the request.</param>
+    /// <param name="status">Approved or Rejected decision.</param>
+    /// <param name="expectedVersion">Version previously read by the caller.</param>
+    /// <param name="resolvedAtUtc">UTC resolution time used for expiry validation.</param>
+    /// <param name="cancellationToken">Token that cancels the write before commit.</param>
+    /// <returns>The resolved request with its incremented version.</returns>
+    ValueTask<ApprovalStorageRecord> ResolveAsync(
+        ApprovalId id,
+        string ownerId,
+        string status,
+        long expectedVersion,
+        DateTimeOffset resolvedAtUtc,
+        CancellationToken cancellationToken);
+}
+
+/// <summary>Describes one append-only operational audit event.</summary>
+/// <param name="Id">Stable event identifier.</param>
+/// <param name="EventType">Stable event type, not free-form prompt or provider content.</param>
+/// <param name="SubjectId">Optional application object identifier.</param>
+/// <param name="PayloadJson">Structured, privacy-filtered event details.</param>
+/// <param name="OccurredAtUtc">UTC time the event occurred.</param>
+public sealed record AuditEventRecord(
+    Guid Id,
+    string EventType,
+    string? SubjectId,
+    string PayloadJson,
+    DateTimeOffset OccurredAtUtc);
+
+/// <summary>Appends and queries privacy-filtered operational audit events.</summary>
+public interface IAuditStore
+{
+    /// <summary>Appends one audit event without overwriting an existing event.</summary>
+    /// <param name="auditEvent">Structured event that contains no prompt, secret, or private memory by default.</param>
+    /// <param name="cancellationToken">Token that cancels before commit.</param>
+    ValueTask AppendAsync(AuditEventRecord auditEvent, CancellationToken cancellationToken);
+
+    /// <summary>Reads a bounded, ordered page of events at or after a UTC instant.</summary>
+    /// <param name="fromUtc">Inclusive UTC lower bound.</param>
+    /// <param name="maximumEvents">Maximum number of events to return, from 1 through 1000.</param>
+    /// <param name="cancellationToken">Token that cancels the read.</param>
+    /// <returns>Audit events in occurrence order.</returns>
+    ValueTask<IReadOnlyList<AuditEventRecord>> ReadSinceAsync(
+        DateTimeOffset fromUtc,
+        int maximumEvents,
+        CancellationToken cancellationToken);
+}
+
+/// <summary>Reports a stale or conflicting optimistic-concurrency update.</summary>
+public sealed class PersistenceConcurrencyException : InvalidOperationException
+{
+    /// <summary>Initializes an exception for a persistence operation that lost a compare-and-swap race.</summary>
+    /// <param name="message">Safe description of the conflicting persistence operation.</param>
+    public PersistenceConcurrencyException(string message)
+        : base(message)
+    {
+    }
 }
 
 /// <summary>Runs due jobs through deterministic, host-owned handlers.</summary>
