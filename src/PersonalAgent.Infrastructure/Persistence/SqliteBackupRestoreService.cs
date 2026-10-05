@@ -29,7 +29,11 @@ public sealed class SqliteBackupRestoreService
     }
 
     /// <summary>Creates a consistent SQLite backup at a new destination file.</summary>
-    /// <remarks>The live database and backup destination directories must be private to this user.</remarks>
+    /// <remarks>
+    /// The live database and backup destination directories must be private to this user.
+    /// The caller must exclusively own the destination filename and its sidecar namespace during backup.
+    /// Existing destination sidecars are rejected without modification.
+    /// </remarks>
     /// <param name="backupPath">Destination path; an existing file is never overwritten.</param>
     /// <param name="cancellationToken">Token checked before and after SQLite's backup operation.</param>
     /// <returns>A task that completes after backup integrity has been verified.</returns>
@@ -47,7 +51,9 @@ public sealed class SqliteBackupRestoreService
             ?? throw new InvalidOperationException("The database path must have a parent directory."));
         SqliteDatabase.EnsurePrivateDataDirectory(Path.GetDirectoryName(destinationPath)
             ?? throw new InvalidOperationException("The backup path must have a parent directory."));
+        EnsureNoDestinationSidecars(destinationPath);
         var reservedDestination = false;
+        var ownsDestinationSidecars = false;
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -58,8 +64,10 @@ public sealed class SqliteBackupRestoreService
             }
 
             await using (var source = await OpenReadOnlyConnectionAsync(database.DatabasePath, cancellationToken))
-            await using (var destination = await OpenWritableConnectionAsync(destinationPath, cancellationToken))
             {
+                EnsureNoDestinationSidecars(destinationPath);
+                ownsDestinationSidecars = true;
+                await using var destination = await OpenWritableConnectionAsync(destinationPath, cancellationToken);
                 source.BackupDatabase(destination);
             }
 
@@ -71,7 +79,14 @@ public sealed class SqliteBackupRestoreService
         {
             if (reservedDestination)
             {
-                DeleteDatabaseFiles(destinationPath);
+                if (ownsDestinationSidecars)
+                {
+                    DeleteDatabaseFiles(destinationPath);
+                }
+                else
+                {
+                    File.Delete(destinationPath);
+                }
             }
 
             throw;
@@ -609,6 +624,19 @@ public sealed class SqliteBackupRestoreService
         if (File.Exists(path))
         {
             File.Delete(path);
+        }
+    }
+
+    private static void EnsureNoDestinationSidecars(string path)
+    {
+        foreach (var suffix in new[] { "-wal", "-shm", "-journal" })
+        {
+            var sidecarPath = path + suffix;
+            if (File.Exists(sidecarPath) || Directory.Exists(sidecarPath)
+                || new FileInfo(sidecarPath).LinkTarget is not null)
+            {
+                throw new IOException("The SQLite backup destination has an existing sidecar; choose an unused destination.");
+            }
         }
     }
 

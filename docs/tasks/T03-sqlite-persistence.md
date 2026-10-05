@@ -88,6 +88,11 @@ rollback names, plus live and staged SQLite rollback journals.
 Restore snapshots and retires an existing rollback journal along with WAL/SHM;
 rollback restores that journal with its original database, while successful
 replacement removes it so SQLite cannot replay old pages into restored data.
+Backup rejects preexisting destination sidecars before reservation and never
+cleans sidecars until it owns the destination SQLite namespace. Callers must
+exclusively own that namespace while backup runs. Unix database paths are
+canonicalized before configuring SQLite and recovery, so database-file symlinks
+use the target's sidecars and restore never replaces the symlink itself.
 Lease claims refresh the caller-observed instant using the injected clock
 inside the write transaction before calculating the deadline.
 Lease completion reads the expiry clock inside its acquired

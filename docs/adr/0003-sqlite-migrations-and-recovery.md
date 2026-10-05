@@ -39,6 +39,10 @@ replacement; marker-driven recovery makes retired-file cleanup repeatable.
 Include rollback-mode journals in the saved and retired sidecars: a hot
 journal must be restored only with its original database during rollback,
 never left beside a successful replacement where SQLite could replay it.
+Canonicalize Unix database paths before SQLite and recovery setup so both
+use the same target and sidecars even through database-file symlinks.
+Backup rejects existing destination sidecars; only newly owned destination
+files may be cleaned on failure, and callers exclusively own that namespace.
 On macOS/Linux, require an owner-private data directory (mode 700 or stricter)
 and restrict the database, sidecars, and recovery lock to mode 600. Windows
 deployments must keep the configured directory owned by the current account

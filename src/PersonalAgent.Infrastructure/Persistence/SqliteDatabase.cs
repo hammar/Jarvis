@@ -24,10 +24,11 @@ public sealed class SqliteDatabase
 
     /// <summary>Initializes a database owner for the specified durable file path.</summary>
     /// <param name="databasePath">Full or relative path to the SQLite file, outside the deployment directory.</param>
+    /// <remarks>Unix symlink aliases are resolved before connection and recovery paths are constructed.</remarks>
     public SqliteDatabase(string databasePath)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
-        DatabasePath = Path.GetFullPath(databasePath);
+        DatabasePath = DurableFileSystem.ResolvePath(databasePath);
         connectionString = new SqliteConnectionStringBuilder
         {
             DataSource = DatabasePath,

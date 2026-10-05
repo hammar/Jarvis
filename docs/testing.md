@@ -68,6 +68,8 @@ reported as a failure.
 | Contended lease claims refresh the deadline inside the write transaction | `SqlitePersistenceTests.ContendedClaimRefreshesItsDeadlineAfterTheWriterReleasesTheLock` |
 | Live and staged rollback journals cannot be backup or restore paths | `SqlitePersistenceTests.BackupAndRestoreRejectRestoreArtifactsWithoutDeletingSourceBackup` |
 | Hot rollback journals cannot overwrite restored data and survive failed-replacement rollback | `SqlitePersistenceTests.RestoreRetiresHotJournalAndFailedReplacementRecoversOriginal` |
+| Backup rejects existing destination sidecars without changing their bytes | `SqlitePersistenceTests.BackupRejectsPreexistingDestinationSidecarsWithoutChangingBytes` |
+| Unix database-file symlinks preserve WAL data and the link during failed restore | `SqlitePersistenceTests.FailedRestorePreservesCommittedWalDataAndStartupRecoversPreparedReplacement` |
 | A frozen version-1 schema upgrades with working constraints and cascading retention | `SqlitePersistenceTests.UpgradedVersionOneSchemaSupportsWritesConstraintsAndRetention` |
 | Symlink aliases cannot bypass restore path reservations | `SqlitePersistenceTests.BackupAndRestoreRejectArtifactPathsReachedThroughDirectorySymlinks` |
 | Shared data directories are rejected and database files are private | `SqlitePersistenceTests.DatabaseRejectsSharedDataDirectoryAndRestrictsDatabasePermissions` |

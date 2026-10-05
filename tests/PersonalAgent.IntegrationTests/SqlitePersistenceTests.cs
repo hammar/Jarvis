@@ -934,6 +934,33 @@ public sealed class SqlitePersistenceTests
         Assert.False(File.Exists(backupPath + "-shm"));
     }
 
+    [Theory]
+    [InlineData("-wal", false)]
+    [InlineData("-shm", false)]
+    [InlineData("-journal", false)]
+    [InlineData("-wal", true)]
+    [InlineData("-shm", true)]
+    [InlineData("-journal", true)]
+    [Trait("Category", "Integration")]
+    public async Task BackupRejectsPreexistingDestinationSidecarsWithoutChangingBytes(string suffix, bool sourceExists)
+    {
+        using var directory = IsolatedDirectory.Create();
+        var source = new SqliteDatabase(Path.Combine(directory.Path, "source.db"));
+        if (sourceExists)
+        {
+            await source.InitializeAsync();
+        }
+
+        var destination = Path.Combine(directory.Path, "backup.db");
+        var original = new byte[] { 1, 5, 9, 2 };
+        await File.WriteAllBytesAsync(destination + suffix, original);
+        await Assert.ThrowsAsync<IOException>(
+            () => new SqliteBackupRestoreService(source).CreateBackupAsync(destination));
+        Assert.Equal(original, await File.ReadAllBytesAsync(destination + suffix));
+        Assert.False(File.Exists(destination));
+        Assert.Equal(sourceExists, File.Exists(source.DatabasePath));
+    }
+
     [Fact]
     [Trait("Category", "Integration")]
     public async Task BackupAndRestoreRejectRestoreArtifactsWithoutDeletingSourceBackup()
@@ -1164,10 +1191,17 @@ public sealed class SqlitePersistenceTests
         Assert.False(File.Exists(SqliteBackupRestoreService.RestoreMarkerPath(file.Path)));
     }
 
-    [Fact]
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     [Trait("Category", "Integration")]
-    public async Task FailedRestorePreservesCommittedWalDataAndStartupRecoversPreparedReplacement()
+    public async Task FailedRestorePreservesCommittedWalDataAndStartupRecoversPreparedReplacement(bool useSymlink)
     {
+        if (useSymlink && OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
         using var file = IsolatedDatabaseFile.Create();
         var sourcePath = Path.Combine(Path.GetDirectoryName(file.Path)!, "wal-source.db");
         var database = new SqliteDatabase(sourcePath);
@@ -1215,9 +1249,21 @@ public sealed class SqlitePersistenceTests
         File.Copy(sourcePath, file.Path, overwrite: true);
         File.Copy(sourcePath + "-wal", file.Path + "-wal", overwrite: true);
 
-        var liveDatabase = new SqliteDatabase(file.Path);
+        var livePath = file.Path;
+        if (useSymlink)
+        {
+            livePath = Path.Combine(Path.GetDirectoryName(file.Path)!, "live-alias.db");
+            File.CreateSymbolicLink(livePath, file.Path);
+        }
+
+        var liveDatabase = new SqliteDatabase(livePath);
+        Assert.Equal(new SqliteDatabase(file.Path).DatabasePath, liveDatabase.DatabasePath);
         var failingRestore = new SqliteBackupRestoreService(liveDatabase, () => throw new IOException("replacement failed"));
         await Assert.ThrowsAsync<IOException>(() => failingRestore.RestoreAsync(backupPath));
+        if (useSymlink)
+        {
+            Assert.NotNull(new FileInfo(livePath).LinkTarget);
+        }
         await snapshot.DisposeAsync();
         await pinnedReader.DisposeAsync();
 
