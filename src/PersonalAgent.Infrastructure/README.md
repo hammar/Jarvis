@@ -22,10 +22,16 @@ or `Unknown` outcomes.
 
 `SqliteBackupRestoreService` exposes SQLite-consistent backup, restore, and
 migration-on-copy validation. Create backups to a new file; an existing backup
-is never overwritten. For restore, stop the Web host and every worker, validate
-the backup and its migrated copy, then replace the live database. Restore
-never replays jobs or uncertain physical actions. Schema downgrade is not
-automatic; restore a backup made for the prior binary. Use
+is never overwritten. Backup opens the live database read-only and fails if it
+is missing rather than creating an empty source. For restore, stop the Web
+host and every worker, validate the backup and its migrated copy, then replace
+the live database. A durable restore marker and rollback snapshot recover the
+previous committed database state (including committed WAL data) after a
+failed or interrupted replacement; startup completes that recovery before
+opening SQLite. Restore never replays jobs or uncertain physical actions.
+Simulator and E2E Web processes require an explicit isolated
+`JARVIS_DATA_DIR`; AppHost supplies it for managed profiles. Schema downgrade
+is not automatic; restore a backup made for the prior binary. Use
 `tools/validate.sh integration` for the real SQLite persistence suite.
 
 Tests: `tools/validate.sh integration`, `tools/validate.sh architecture`, and

@@ -37,6 +37,7 @@ public sealed class SqliteDatabase
     /// <param name="cancellationToken">Token that cancels initialization between database operations.</param>
     public async Task InitializeAsync(CancellationToken cancellationToken = default)
     {
+        await SqliteBackupRestoreService.RecoverInterruptedRestoreAsync(DatabasePath, cancellationToken);
         var directory = Path.GetDirectoryName(DatabasePath)
             ?? throw new InvalidOperationException("The SQLite database path must have a parent directory.");
         Directory.CreateDirectory(directory);

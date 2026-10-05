@@ -53,7 +53,9 @@ made.
 
 The Aspire AppHost is the canonical development orchestrator, not a production
 supervisor. For a direct Web process, set `JARVIS_PROFILE`, `JARVIS_DATA_DIR`,
-and any required external endpoint/secret-reference settings, then run:
+and any required external endpoint/secret-reference settings. Direct Simulator
+and E2E startup requires an explicitly isolated `JARVIS_DATA_DIR`; those
+profiles never fall back to the Local per-user path. Then run:
 
 ```sh
 dotnet run --project src/PersonalAgent.Web

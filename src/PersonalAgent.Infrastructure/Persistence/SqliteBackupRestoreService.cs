@@ -5,11 +5,24 @@ namespace PersonalAgent.Infrastructure.Persistence;
 /// <summary>Creates consistent SQLite backups and restores only integrity-checked, migrated copies.</summary>
 public sealed class SqliteBackupRestoreService
 {
+    private const string PreparedRestore = "prepared";
+    private const string PreparedRestoreWithoutOriginal = "prepared-without-original";
+    private const string CommittedRestore = "committed";
+    private const string RecoveredRestore = "recovered";
     private readonly SqliteDatabase database;
+    private readonly Action? beforeReplacement;
 
     /// <summary>Creates a backup service for the specified live database.</summary>
     /// <param name="database">Database connection and migration owner.</param>
-    public SqliteBackupRestoreService(SqliteDatabase database) => this.database = database;
+    public SqliteBackupRestoreService(SqliteDatabase database) : this(database, null)
+    {
+    }
+
+    internal SqliteBackupRestoreService(SqliteDatabase database, Action? beforeReplacement)
+    {
+        this.database = database;
+        this.beforeReplacement = beforeReplacement;
+    }
 
     /// <summary>Creates a consistent SQLite backup at a new destination file.</summary>
     /// <param name="backupPath">Destination path; an existing file is never overwritten.</param>
@@ -35,7 +48,7 @@ public sealed class SqliteBackupRestoreService
                 reservedDestination = true;
             }
 
-            await using (var source = await database.OpenConnectionAsync(cancellationToken))
+            await using (var source = await OpenReadOnlyConnectionAsync(database.DatabasePath, cancellationToken))
             await using (var destination = await OpenWritableConnectionAsync(destinationPath, cancellationToken))
             {
                 source.BackupDatabase(destination);
@@ -87,6 +100,7 @@ public sealed class SqliteBackupRestoreService
     public async Task RestoreAsync(string backupPath, CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(backupPath);
+        await RecoverInterruptedRestoreAsync(database.DatabasePath, cancellationToken);
         var sourcePath = Path.GetFullPath(backupPath);
         if (!File.Exists(sourcePath))
         {
@@ -102,22 +116,107 @@ public sealed class SqliteBackupRestoreService
         var directory = Path.GetDirectoryName(database.DatabasePath)
             ?? throw new InvalidOperationException("The database path must have a parent directory.");
         Directory.CreateDirectory(directory);
-        var restorePath = Path.Combine(directory, $".restore-{System.Guid.NewGuid():N}.db");
+        var restorePath = RestoreStagedPath(database.DatabasePath);
+        var rollbackPath = RestoreRollbackPath(database.DatabasePath);
+        var prepared = false;
         try
         {
+            DeleteRestoreArtifacts(database.DatabasePath);
             await CopyDatabaseAsync(sourcePath, restorePath, cancellationToken);
             var restored = new SqliteDatabase(restorePath);
             await restored.InitializeAsync(cancellationToken);
             await VerifyDatabaseAsync(restorePath, cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
 
+            var originalExists = File.Exists(database.DatabasePath);
+            if (originalExists)
+            {
+                File.Copy(database.DatabasePath, rollbackPath, overwrite: true);
+                CopySidecarIfPresent(database.DatabasePath + "-wal", RestoreOriginalWalPath(database.DatabasePath));
+                CopySidecarIfPresent(database.DatabasePath + "-shm", RestoreOriginalShmPath(database.DatabasePath));
+            }
+
+            WriteRestoreMarker(
+                database.DatabasePath,
+                originalExists ? PreparedRestore : PreparedRestoreWithoutOriginal);
+            prepared = true;
             DeleteDatabaseSidecars(database.DatabasePath);
+            beforeReplacement?.Invoke();
             File.Move(restorePath, database.DatabasePath, overwrite: true);
+            WriteRestoreMarker(database.DatabasePath, CommittedRestore);
+            DeleteRestoreArtifacts(database.DatabasePath);
         }
-        finally
+        catch (Exception restoreFailure)
         {
-            DeleteDatabaseFiles(restorePath);
+            if (prepared)
+            {
+                try
+                {
+                    await RecoverInterruptedRestoreAsync(database.DatabasePath, CancellationToken.None);
+                }
+                catch (Exception recoveryFailure)
+                {
+                    throw new AggregateException(
+                        "SQLite restore failed and rollback recovery remains pending.",
+                        restoreFailure,
+                        recoveryFailure);
+                }
+            }
+            else
+            {
+                DeleteRestoreArtifacts(database.DatabasePath);
+            }
+
+            throw;
         }
+    }
+
+    internal static async Task RecoverInterruptedRestoreAsync(
+        string databasePath,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var markerPath = RestoreMarkerPath(databasePath);
+        if (!File.Exists(markerPath))
+        {
+            return;
+        }
+
+        var state = await File.ReadAllTextAsync(markerPath, cancellationToken);
+        if (string.Equals(state, CommittedRestore, StringComparison.Ordinal)
+            || string.Equals(state, RecoveredRestore, StringComparison.Ordinal))
+        {
+            DeleteRestoreArtifacts(databasePath);
+            return;
+        }
+
+        if (string.Equals(state, PreparedRestore, StringComparison.Ordinal))
+        {
+            var rollbackPath = RestoreRollbackPath(databasePath);
+            if (!File.Exists(rollbackPath))
+            {
+                throw new InvalidDataException("Interrupted SQLite restore has no recoverable original database.");
+            }
+
+            DeleteDatabaseSidecars(databasePath);
+            File.Copy(rollbackPath, databasePath, overwrite: true);
+            var savedWalPath = RestoreOriginalWalPath(databasePath);
+            if (File.Exists(savedWalPath))
+            {
+                File.Copy(savedWalPath, databasePath + "-wal", overwrite: true);
+            }
+        }
+        else if (string.Equals(state, PreparedRestoreWithoutOriginal, StringComparison.Ordinal))
+        {
+            DeleteDatabaseFiles(databasePath);
+        }
+        else
+        {
+            throw new InvalidDataException("Interrupted SQLite restore has an unknown recovery state.");
+        }
+
+        WriteRestoreMarker(databasePath, RecoveredRestore);
+        DeleteRestoreArtifacts(databasePath);
     }
 
     private static async Task CopyDatabaseAsync(
@@ -201,6 +300,64 @@ public sealed class SqliteBackupRestoreService
         {
             await connection.DisposeAsync();
             throw;
+        }
+    }
+
+    internal static string RestoreMarkerPath(string databasePath) => databasePath + ".restore-state";
+
+    internal static string RestoreStagedPath(string databasePath) => databasePath + ".restore-staged";
+
+    internal static string RestoreRollbackPath(string databasePath) => databasePath + ".restore-rollback";
+
+    private static string RestoreOriginalWalPath(string databasePath) => databasePath + ".restore-original-wal";
+
+    private static string RestoreOriginalShmPath(string databasePath) => databasePath + ".restore-original-shm";
+
+    private static void WriteRestoreMarker(string databasePath, string state)
+    {
+        var markerPath = RestoreMarkerPath(databasePath);
+        var temporaryPath = markerPath + ".tmp";
+        using (var stream = new FileStream(
+                   temporaryPath,
+                   FileMode.Create,
+                   FileAccess.Write,
+                   FileShare.None,
+                   bufferSize: 4096,
+                   FileOptions.WriteThrough))
+        using (var writer = new StreamWriter(stream))
+        {
+            writer.Write(state);
+            writer.Flush();
+            stream.Flush(flushToDisk: true);
+        }
+
+        File.Move(temporaryPath, markerPath, overwrite: true);
+    }
+
+    private static void CopySidecarIfPresent(string sourcePath, string destinationPath)
+    {
+        if (File.Exists(sourcePath))
+        {
+            File.Copy(sourcePath, destinationPath, overwrite: true);
+        }
+    }
+
+    private static void DeleteRestoreArtifacts(string databasePath)
+    {
+        foreach (var path in new[]
+                 {
+                     RestoreStagedPath(databasePath),
+                     RestoreRollbackPath(databasePath),
+                     RestoreOriginalWalPath(databasePath),
+                     RestoreOriginalShmPath(databasePath),
+                     RestoreMarkerPath(databasePath) + ".tmp",
+                     RestoreMarkerPath(databasePath)
+                 })
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
         }
     }
 

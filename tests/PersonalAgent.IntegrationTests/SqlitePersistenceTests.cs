@@ -261,6 +261,10 @@ public sealed class SqlitePersistenceTests
         Assert.Equal(inserted, await actions.CreateAsync(prepared, CancellationToken.None));
         await Assert.ThrowsAsync<InvalidOperationException>(async () => await actions.CreateAsync(
             prepared with { ActionType = "different.action" }, CancellationToken.None));
+        await Assert.ThrowsAsync<InvalidOperationException>(async () => await actions.CreateAsync(
+            prepared with { RequestHash = "different-hash" }, CancellationToken.None));
+        await Assert.ThrowsAsync<InvalidOperationException>(async () => await actions.CreateAsync(
+            prepared with { CanonicalArguments = """{"different":true}""" }, CancellationToken.None));
         await Assert.ThrowsAsync<ArgumentException>(async () => await actions.UpdateStatusAsync(
             prepared.Id, "Invalid", 1, Now, CancellationToken.None));
         await Assert.ThrowsAsync<ArgumentOutOfRangeException>(async () => await actions.UpdateStatusAsync(
@@ -591,6 +595,173 @@ public sealed class SqlitePersistenceTests
         var corruptBackup = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(file.Path)!, "corrupt-backup.db");
         await File.WriteAllTextAsync(corruptBackup, "not a SQLite backup");
         await Assert.ThrowsAsync<SqliteException>(() => backups.RestoreAsync(corruptBackup));
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task BackupRejectsMissingLiveDatabaseWithoutCreatingFiles()
+    {
+        using var directory = IsolatedDirectory.Create();
+        var databasePath = Path.Combine(directory.Path, "missing.db");
+        var backupPath = Path.Combine(directory.Path, "backup.db");
+        var backups = new SqliteBackupRestoreService(new SqliteDatabase(databasePath));
+
+        await Assert.ThrowsAsync<SqliteException>(() => backups.CreateBackupAsync(backupPath));
+
+        Assert.False(File.Exists(databasePath));
+        Assert.False(File.Exists(backupPath));
+        Assert.False(File.Exists(backupPath + "-wal"));
+        Assert.False(File.Exists(backupPath + "-shm"));
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task FailedRestorePreservesCommittedWalDataAndStartupRecoversPreparedReplacement()
+    {
+        using var file = IsolatedDatabaseFile.Create();
+        var sourcePath = Path.Combine(Path.GetDirectoryName(file.Path)!, "wal-source.db");
+        var database = new SqliteDatabase(sourcePath);
+        await database.InitializeAsync();
+        await using (var connection = await database.OpenConnectionAsync())
+        await using (var command = connection.CreateCommand())
+        {
+            command.CommandText = """
+                CREATE TABLE recovery_fixture (value TEXT NOT NULL);
+                INSERT INTO recovery_fixture VALUES ('original');
+                """;
+            await command.ExecuteNonQueryAsync();
+        }
+
+        var backupPath = Path.Combine(Path.GetDirectoryName(file.Path)!, "restore-source.db");
+        await new SqliteBackupRestoreService(database).CreateBackupAsync(backupPath);
+
+        var connectionString = new SqliteConnectionStringBuilder
+        {
+            DataSource = sourcePath,
+            Pooling = false
+        }.ToString();
+        await using var pinnedReader = new SqliteConnection(connectionString);
+        await pinnedReader.OpenAsync();
+        await using var disableCheckpoint = pinnedReader.CreateCommand();
+        disableCheckpoint.CommandText = "PRAGMA wal_autocheckpoint = 0;";
+        await disableCheckpoint.ExecuteNonQueryAsync();
+        await using var snapshot = pinnedReader.BeginTransaction(deferred: true);
+        await using (var read = pinnedReader.CreateCommand())
+        {
+            read.Transaction = snapshot;
+            read.CommandText = "SELECT value FROM recovery_fixture;";
+            Assert.Equal("original", (string?)await read.ExecuteScalarAsync());
+        }
+
+        await using (var writer = await database.OpenConnectionAsync())
+        await using (var insert = writer.CreateCommand())
+        {
+            insert.CommandText = "INSERT INTO recovery_fixture VALUES ('committed in wal');";
+            await insert.ExecuteNonQueryAsync();
+        }
+
+        Assert.True(File.Exists(sourcePath + "-wal"));
+        Assert.True(new FileInfo(sourcePath + "-wal").Length > 32);
+        File.Copy(sourcePath, file.Path, overwrite: true);
+        File.Copy(sourcePath + "-wal", file.Path + "-wal", overwrite: true);
+
+        var liveDatabase = new SqliteDatabase(file.Path);
+        var failingRestore = new SqliteBackupRestoreService(liveDatabase, () => throw new IOException("replacement failed"));
+        await Assert.ThrowsAsync<IOException>(() => failingRestore.RestoreAsync(backupPath));
+        await snapshot.DisposeAsync();
+        await pinnedReader.DisposeAsync();
+
+        var recovered = new SqliteDatabase(file.Path);
+        await recovered.InitializeAsync();
+        await using (var connection = await recovered.OpenConnectionAsync())
+        await using (var rows = connection.CreateCommand())
+        {
+            rows.CommandText = "SELECT value FROM recovery_fixture ORDER BY rowid;";
+            await using var reader = await rows.ExecuteReaderAsync();
+            Assert.True(await reader.ReadAsync());
+            Assert.Equal("original", reader.GetString(0));
+            Assert.True(await reader.ReadAsync());
+            Assert.Equal("committed in wal", reader.GetString(0));
+            Assert.False(await reader.ReadAsync());
+        }
+
+        var rollbackPath = SqliteBackupRestoreService.RestoreRollbackPath(file.Path);
+        await using (var source = await recovered.OpenConnectionAsync())
+        await using (var rollback = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = rollbackPath,
+            Mode = SqliteOpenMode.ReadWriteCreate,
+            Pooling = false
+        }.ToString()))
+        {
+            await rollback.OpenAsync();
+            source.BackupDatabase(rollback);
+        }
+
+        await File.WriteAllTextAsync(file.Path, "interrupted replacement");
+        await File.WriteAllTextAsync(file.Path + "-wal", "stale replacement wal");
+        await File.WriteAllTextAsync(SqliteBackupRestoreService.RestoreMarkerPath(file.Path), "prepared");
+        await new SqliteDatabase(file.Path).InitializeAsync();
+
+        await using var afterRestart = await new SqliteDatabase(file.Path).OpenConnectionAsync();
+        await using var verify = afterRestart.CreateCommand();
+        verify.CommandText = "SELECT COUNT(*) FROM recovery_fixture;";
+        Assert.Equal(2L, (long)(await verify.ExecuteScalarAsync())!);
+        Assert.False(File.Exists(SqliteBackupRestoreService.RestoreMarkerPath(file.Path)));
+        Assert.False(File.Exists(rollbackPath));
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task FailedRestoreWithoutOriginalKeepsDatabaseAbsent()
+    {
+        using var directory = IsolatedDirectory.Create();
+        var sourcePath = Path.Combine(directory.Path, "source.db");
+        var source = new SqliteDatabase(sourcePath);
+        await source.InitializeAsync();
+        var backupPath = Path.Combine(directory.Path, "backup.db");
+        await new SqliteBackupRestoreService(source).CreateBackupAsync(backupPath);
+        var livePath = Path.Combine(directory.Path, "not-yet-created.db");
+        var restore = new SqliteBackupRestoreService(
+            new SqliteDatabase(livePath),
+            () => throw new IOException("replacement failed"));
+
+        await Assert.ThrowsAsync<IOException>(() => restore.RestoreAsync(backupPath));
+
+        Assert.False(File.Exists(livePath));
+        Assert.False(File.Exists(SqliteBackupRestoreService.RestoreMarkerPath(livePath)));
+        Assert.False(File.Exists(SqliteBackupRestoreService.RestoreRollbackPath(livePath)));
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task StartupFinishesCleanupAfterCommittedRestore()
+    {
+        using var file = IsolatedDatabaseFile.Create();
+        var database = new SqliteDatabase(file.Path);
+        await database.InitializeAsync();
+        await using (var connection = await database.OpenConnectionAsync())
+        await using (var command = connection.CreateCommand())
+        {
+            command.CommandText = "CREATE TABLE restore_fixture (value TEXT NOT NULL); INSERT INTO restore_fixture VALUES ('restored');";
+            await command.ExecuteNonQueryAsync();
+        }
+
+        var rollbackPath = SqliteBackupRestoreService.RestoreRollbackPath(file.Path);
+        var stagedPath = SqliteBackupRestoreService.RestoreStagedPath(file.Path);
+        await File.WriteAllTextAsync(rollbackPath, "old database snapshot");
+        await File.WriteAllTextAsync(stagedPath, "stale staged database");
+        await File.WriteAllTextAsync(SqliteBackupRestoreService.RestoreMarkerPath(file.Path), "committed");
+
+        await new SqliteDatabase(file.Path).InitializeAsync();
+
+        await using var verify = await database.OpenConnectionAsync();
+        await using var read = verify.CreateCommand();
+        read.CommandText = "SELECT value FROM restore_fixture;";
+        Assert.Equal("restored", (string?)await read.ExecuteScalarAsync());
+        Assert.False(File.Exists(SqliteBackupRestoreService.RestoreMarkerPath(file.Path)));
+        Assert.False(File.Exists(rollbackPath));
+        Assert.False(File.Exists(stagedPath));
     }
 
     [Fact]

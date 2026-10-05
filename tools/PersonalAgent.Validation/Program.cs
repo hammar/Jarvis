@@ -118,7 +118,8 @@ internal static class CoverageGate
 
     private static readonly (string Name, string RelativePath, double Lines, double Branches)[] CriticalModules =
     [
-        ("Approval persistence invariants", "src/PersonalAgent.Infrastructure/Persistence/SqliteApprovalStore.cs", 95, 90)
+        ("Approval persistence invariants", "src/PersonalAgent.Infrastructure/Persistence/SqliteApprovalStore.cs", 95, 90),
+        ("Action journal idempotency", "src/PersonalAgent.Infrastructure/Persistence/SqliteActionJournalStore.cs", 95, 90)
     ];
 
     internal static void RunSelfTests()
@@ -162,25 +163,22 @@ internal static class CoverageGate
         }
 
         ExpectFailure(() => EnforceThreshold("low branch coverage fixture", lowBranchCoverage, 90, 85));
-        var mergedBranches = new CoverageMetrics();
-        var branchLine = new CoverageLine("merged-branch-fixture.cs", 1);
-        AddBranches(
-            mergedBranches,
-            new CoverageMetrics(),
-            branchLine,
-            XElement.Parse(
-                """<line number="1" hits="0" branch="True" condition-coverage="0% (0/2)"><conditions><condition number="193" type="jump" coverage="0%" /></conditions></line>"""),
-            "first branch report fixture");
-        AddBranches(
-            mergedBranches,
-            new CoverageMetrics(),
-            branchLine,
-            XElement.Parse(
-                """<line number="1" hits="1" branch="True" condition-coverage="100% (2/2)"><conditions><condition number="175" type="jump" coverage="100%" /></conditions></line>"""),
-            "second branch report fixture");
+        var mergedBranchReports = new CoverageReportSet();
+        var repositoryRoot = Directory.GetCurrentDirectory();
+        MergeOpenCoverBranches(
+            repositoryRoot,
+            CreateOpenCoverBranchFixture("1", sourceLine: 10, pathZeroVisits: 1, pathOneVisits: 0),
+            mergedBranchReports,
+            "first OpenCover branch fixture");
+        MergeOpenCoverBranches(
+            repositoryRoot,
+            CreateOpenCoverBranchFixture("7", sourceLine: 11, pathZeroVisits: 0, pathOneVisits: 1),
+            mergedBranchReports,
+            "second OpenCover branch fixture");
+        var mergedBranches = mergedBranchReports.AllAssemblies;
         if (mergedBranches.Branches.Count != 2 || mergedBranches.CoveredBranches.Count != 2)
         {
-            throw new ValidationException("Equivalent branches from separate reports were not merged by source position.");
+            throw new ValidationException("Complementary branch outcomes from separate reports were not merged.");
         }
 
         var lowCriticalModule = new CoverageMetrics();
@@ -215,9 +213,22 @@ internal static class CoverageGate
                 ? Directory.EnumerateFiles(integrationDirectory, "coverage.cobertura.xml", SearchOption.AllDirectories)
                 : [],
             "integration");
+        var unitBranchReports = RequireReports(
+            Directory.Exists(unitDirectory)
+                ? Directory.EnumerateFiles(unitDirectory, "coverage.opencover.xml", SearchOption.AllDirectories)
+                : [],
+            "unit OpenCover");
+        var integrationBranchReports = RequireReports(
+            Directory.Exists(integrationDirectory)
+                ? Directory.EnumerateFiles(integrationDirectory, "coverage.opencover.xml", SearchOption.AllDirectories)
+                : [],
+            "integration OpenCover");
         var root = FindRepositoryRoot();
-        var unit = MergeReports(root, unitReports);
-        var combined = MergeReports(root, unitReports.Concat(integrationReports));
+        var unit = MergeReports(root, unitReports, unitBranchReports);
+        var combined = MergeReports(
+            root,
+            unitReports.Concat(integrationReports),
+            unitBranchReports.Concat(integrationBranchReports));
         var runtimeAssemblies = RuntimeAssemblies
             .Where(name => name != "PersonalAgent.Infrastructure" || HasHandwrittenSources(root, name))
             .ToArray();
@@ -312,13 +323,16 @@ internal static class CoverageGate
             .ToArray();
         if (reports.Length == 0)
         {
-            throw new ValidationException($"The {layer} run produced no expected Cobertura coverage report.");
+            throw new ValidationException($"The {layer} run produced no expected coverage report.");
         }
 
         return reports;
     }
 
-    private static CoverageReportSet MergeReports(string root, IEnumerable<string> reportPaths)
+    private static CoverageReportSet MergeReports(
+        string root,
+        IEnumerable<string> reportPaths,
+        IEnumerable<string> branchReportPaths)
     {
         var result = new CoverageReportSet();
         foreach (var reportPath in reportPaths)
@@ -336,8 +350,7 @@ internal static class CoverageGate
                 var packageName = (string?)classElement.Ancestors("package").FirstOrDefault()?.Attribute("name")
                     ?? string.Empty;
                 var assemblyName = RuntimeAssemblies.FirstOrDefault(
-                    name => packageName.Equals(name, StringComparison.Ordinal)
-                        || packageName.StartsWith($"{name} ", StringComparison.Ordinal));
+                    name => packageName.Equals(name, StringComparison.Ordinal));
                 if (assemblyName is null)
                 {
                     continue;
@@ -368,56 +381,137 @@ internal static class CoverageGate
                     var line = new CoverageLine(fullPath, lineNumber);
                     metrics.AddLine(line, hits > 0);
                     result.AllAssemblies.AddLine(line, hits > 0);
-                    AddBranches(metrics, result.AllAssemblies, line, lineElement, reportPath);
                 }
             }
+        }
+
+        foreach (var reportPath in branchReportPaths)
+        {
+            MergeOpenCoverBranches(root, LoadXml(reportPath), result, reportPath);
         }
 
         return result;
     }
 
-    private static void AddBranches(
-        CoverageMetrics assembly,
-        CoverageMetrics allAssemblies,
-        CoverageLine line,
-        XElement lineElement,
+    private static void MergeOpenCoverBranches(
+        string root,
+        XDocument document,
+        CoverageReportSet reports,
         string reportPath)
     {
-        var coverageText = (string?)lineElement.Attribute("condition-coverage");
-        if (coverageText is not null)
+        var coverageRoot = document.Root
+            ?? throw new ValidationException($"OpenCover report has no root element: {reportPath}.");
+        foreach (var module in coverageRoot.Descendants("Module"))
         {
-            var match = Regex.Match(coverageText, @"\((\d+)/(\d+)\)", RegexOptions.CultureInvariant);
-            if (!match.Success
-                || !int.TryParse(match.Groups[1].Value, CultureInfo.InvariantCulture, out var coveredCount)
-                || !int.TryParse(match.Groups[2].Value, CultureInfo.InvariantCulture, out var totalCount))
+            var moduleName = module.Element("ModuleName")?.Value ?? string.Empty;
+            var assemblyName = RuntimeAssemblies.FirstOrDefault(name =>
+                moduleName.Equals(name, StringComparison.Ordinal));
+            if (assemblyName is null)
             {
-                throw new ValidationException($"Coverage report contains invalid branch counts: {reportPath}.");
+                continue;
             }
 
-            for (var branch = 0; branch < totalCount; branch++)
+            var files = module.Descendants("File")
+                .Where(file => file.Attribute("uid") is not null && file.Attribute("fullPath") is not null)
+                .ToDictionary(
+                    file => (string)file.Attribute("uid")!,
+                    file => ResolveSourcePath(root, (string)file.Attribute("fullPath")!, []),
+                    StringComparer.Ordinal);
+            var metrics = reports.Assemblies.GetValueOrDefault(assemblyName);
+            if (metrics is null)
             {
-                var key = $"{line.File}:{line.Number}:{branch}";
-                var covered = branch < coveredCount;
-                assembly.AddBranch(key, covered);
-                allAssemblies.AddBranch(key, covered);
+                metrics = new CoverageMetrics();
+                reports.Assemblies.Add(assemblyName, metrics);
             }
 
-            return;
-        }
+            foreach (var method in module.Descendants("Method"))
+            {
+                var methodName = method.Element("Name")?.Value ?? string.Empty;
+                foreach (var branch in method.Element("BranchPoints")?.Elements("BranchPoint") ?? [])
+                {
+                    var fileId = (string?)branch.Attribute("fileid")
+                        ?? (string?)method.Element("FileRef")?.Attribute("uid");
+                    if (fileId is null || !files.TryGetValue(fileId, out var filePath) || IsGeneratedSource(filePath))
+                    {
+                        continue;
+                    }
 
-        var conditions = lineElement.Element("conditions")?.Elements("condition").ToArray() ?? [];
-        for (var index = 0; index < conditions.Length; index++)
-        {
-            var coverage = (string?)conditions[index].Attribute("coverage") ?? "0%";
-            var covered = double.TryParse(
-                coverage.TrimEnd('%'),
-                NumberStyles.Number,
-                CultureInfo.InvariantCulture,
-                out var percent) && percent >= 100;
-            var key = $"{line.File}:{line.Number}:{index}";
-            assembly.AddBranch(key, covered);
-            allAssemblies.AddBranch(key, covered);
+                    if (!int.TryParse(
+                            (string?)branch.Attribute("sl"),
+                            NumberStyles.None,
+                            CultureInfo.InvariantCulture,
+                            out var lineNumber)
+                        || lineNumber < 1
+                        || !int.TryParse(
+                            (string?)branch.Attribute("ordinal"),
+                            NumberStyles.None,
+                            CultureInfo.InvariantCulture,
+                            out var ordinal)
+                        || !int.TryParse(
+                            (string?)branch.Attribute("vc"),
+                            NumberStyles.None,
+                            CultureInfo.InvariantCulture,
+                            out var visits))
+                    {
+                        throw new ValidationException($"OpenCover report contains an invalid branch point: {reportPath}.");
+                    }
+
+                    AddBranches(
+                        metrics,
+                        new CoverageLine(filePath, lineNumber),
+                        methodName,
+                        ordinal,
+                        visits > 0);
+                    AddBranches(
+                        reports.AllAssemblies,
+                        new CoverageLine(filePath, lineNumber),
+                        methodName,
+                        ordinal,
+                        visits > 0);
+                }
+            }
         }
+    }
+
+    private static XDocument CreateOpenCoverBranchFixture(
+        string fileId,
+        int sourceLine,
+        int pathZeroVisits,
+        int pathOneVisits) =>
+        XDocument.Parse(
+            $"""
+             <CoverageSession>
+               <Modules>
+                 <Module>
+                   <ModuleName>PersonalAgent.Infrastructure</ModuleName>
+                   <Files><File uid="{fileId}" fullPath="src/fixture.cs" /></Files>
+                   <Classes>
+                     <Class>
+                       <Methods>
+                         <Method name="Fixture.Method">
+                           <Name>Fixture.Method</Name>
+                           <BranchPoints>
+                             <BranchPoint vc="{pathZeroVisits}" path="0" ordinal="0" offset="{sourceLine}" sl="{sourceLine}" fileid="{fileId}" />
+                             <BranchPoint vc="{pathOneVisits}" path="1" ordinal="1" offset="{sourceLine}" sl="{sourceLine}" fileid="{fileId}" />
+                           </BranchPoints>
+                         </Method>
+                       </Methods>
+                     </Class>
+                   </Classes>
+                 </Module>
+               </Modules>
+             </CoverageSession>
+             """);
+
+    private static void AddBranches(
+        CoverageMetrics metrics,
+        CoverageLine line,
+        string method,
+        int ordinal,
+        bool covered)
+    {
+        var key = $"{line.File}:{method}:{ordinal}";
+        metrics.AddBranch(key, covered);
     }
 
     private static void EnforceChangedLineThreshold(string root, CoverageMetrics coverage)

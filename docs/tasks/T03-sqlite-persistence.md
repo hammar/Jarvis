@@ -79,8 +79,10 @@ pending migration-on-copy and conflicting-schema preservation, and
 default/overridden retention including repeat/restart behavior. Infrastructure
 must meet the 80% line / 70% branch combined unit+integration coverage minimum.
 `SqliteApprovalStore.cs` is explicitly owned as a critical module at 95% line /
-90% branch coverage, enforced by the coverage validator and its negative
-fixture.
+90% branch coverage; `SqliteActionJournalStore.cs` is also explicitly owned
+at 95% / 90% for action-id idempotency. These thresholds are enforced by the
+coverage validator and negative fixtures. Branch outcomes merge by stable OpenCover method-name/branch-point
+ordinal identity across unit and integration reports.
 
 Update `docs/architecture.md` with storage ownership and restore boundaries,
 and `src/PersonalAgent.Infrastructure/README.md` with local migration and
