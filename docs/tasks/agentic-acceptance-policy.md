@@ -8,7 +8,7 @@ to lower-level implementation artifacts. The owner accepts specifications,
 automated validation evidence, independent agentic review dispositions and
 disclosed residual risks, and does not manually inspect generated code.
 
-**Specification:** §21, Agentic development, PR review and CI enforcement.
+**Specification:** §20, testing and coverage; §21, Agentic development, PR review and CI enforcement.
 This is a documentation-only policy task, not a product backlog feature ID.
 
 ## Scope
@@ -25,6 +25,11 @@ This is a documentation-only policy task, not a product backlog feature ID.
 - Preserve owner control of requirements, material scope/tradeoffs, residual
   risk acceptance and merge authority; agents never merge, enable auto-merge
   or enqueue merges on their own initiative.
+- Add the owner's clarification on unavoidable interactive E2E evidence:
+  automate first; disclose criterion-specific gaps and acceptance impact;
+  guide only necessary owner actions/observations with safe steps and consent;
+  agents interpret redacted logs/results and report executed/unrun evidence.
+  Keep optional live evaluations opt-in and preserve mandatory acceptance gates.
 
 ## Exclusions
 
@@ -48,6 +53,10 @@ generated-code inspection requirement.
   capabilities.
 - Existing CI, coverage, architecture, security/privacy and conversation
   resolution requirements remain unchanged.
+- Before this clarification, guidance required disclosure of unexercised
+  behavior but did not explicitly require agents to minimize and guide owner
+  participation or interpret evidence themselves. PR #27 was confirmed open
+  before extending it; no merged PR is modified.
 
 ## Tests and documentation
 
@@ -56,6 +65,9 @@ generated-code inspection requirement.
   conflicting owner manual code/diff inspection mandates.
 - Perform an independent, read-only agentic review of the final policy diff;
   disposition all findings and retain review evidence with the PR.
+- Check that interactive testing guidance ties requirements to accepted
+  criteria, minimizes owner participation, requires safe consent/cleanup,
+  and does not turn optional live tests into mandatory gates.
 
 ## Completion criteria
 
@@ -65,5 +77,8 @@ generated-code inspection requirement.
   disposition, including summary-only and previously missed findings.
 - Owner requirement/scope/risk/merge authority and all existing technical
   gates are explicit and unchanged.
+- Coding/review agents disclose unavoidable interactive evidence gaps, guide
+  safe owner participation and interpret measurable results themselves;
+  required unrun tests are not claimed complete.
 - Documentation validation passes, independent review is dispositioned, and
   a new PR is opened without modifying or reusing PR #26.

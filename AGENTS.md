@@ -60,6 +60,10 @@ Use pinned compatible .NET/test tooling: xUnit-compatible tests, Playwright for 
 
 Required test layers are unit, real SQLite/HTTP integration, actual Copilot runtime contract, Aspire API E2E and Playwright browser E2E. In-process adapter/API tests may use WebApplicationFactory. Aspire tests launch real processes; do not assume they support replacing application DI after startup. Fake engine tests cannot establish actual SDK compatibility. Live local/cloud/device tests are opt-in and separate from credential-free required checks.
 
+Coding and independent review agents must automate agent-observable acceptance checks first and minimize human interaction. If an acceptance criterion genuinely requires interactive or live E2E evidence unavailable to the agent, disclose the specific gap, why automation cannot cover it, and its acceptance impact. Tie any required interaction to the accepted criterion; do not invent manual testing requirements or silently turn optional opt-in live tests into mandatory gates. An unavailable required test remains unverified and blocks completion under its existing gate; residual-risk acceptance does not waive mandatory checks.
+
+Guide the owner through only the unavoidable actions/observations: supply safe prerequisites, concrete steps, expected measurable outcomes, stop conditions and cleanup; prepare and run everything the agent can safely execute. Obtain explicit consent before credentials, cloud disclosure or physical writes, and never solicit secret values in chat or logs. Interpret privacy-redacted logs and measurable findings yourself; use `ask_user` only for actions, observations or consent unavailable to the agent, not to delegate log interpretation or code certification. Record executed/unrun steps, results, acceptance impact and residual risks in the PR/handoff. Follow [interactive E2E guidance](docs/testing.md#unavoidable-interactive-or-live-e2e-evidence); never claim an unrun test passed.
+
 | Gate | Minimum |
 |---|---|
 | Unit-only Domain and Application, each | 90% lines; 85% branches |

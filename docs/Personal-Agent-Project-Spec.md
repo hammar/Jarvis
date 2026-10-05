@@ -462,6 +462,12 @@ Test layers:
 5. Browser E2E: Playwright drives real Razor UI through Aspire, including login, chat streaming, exact cloud packet review, approval/rejection, memory editing, reminder inbox and reconnect/cancel.
 6. Live evaluations: opt-in local/cloud/device smoke and model dataset; separate from mandatory credential-free CI.
 
+### Unavoidable interactive or live E2E evidence
+
+Coding and independent review agents automate all agent-observable acceptance checks first and minimize owner interaction. When an accepted criterion requires evidence that automation or available agent access cannot obtain, identify the exact criterion, missing evidence, reason automation cannot cover it, and acceptance impact. Do not invent arbitrary manual tests or silently promote optional opt-in live evaluations to mandatory checks. Required acceptance evidence remains required; unavailable execution is unverified and blocks completion under the applicable gate. Owner acceptance of disclosed residual risk does not waive mandatory checks.
+
+Prepare and run everything safely available to the agent. For unavoidable owner participation, provide safe concrete prerequisites, steps, expected measurable outcomes, stop conditions and cleanup. Obtain explicit consent before credential use, cloud disclosure or physical writes; never request secret values in chat or logs. Agents interpret privacy-redacted logs and measurable findings themselves, using `ask_user` only for consent, actions or observations they cannot obtain themselves. Record the exact revision, steps executed/unrun, measured results, owner-only observations, acceptance impact and residual risks in the task/PR handoff. This supports evidence-based owner acceptance, not manual code certification or a claim that unrun tests passed. See [testing guidance](testing.md#unavoidable-interactive-or-live-e2e-evidence) for the reporting procedure.
+
 Coverage defaults below are requirements chosen for this project, not industry standards. Calculate covered/coverable counts, not the mean of project percentages. Missing reports or expected assemblies with no report fail the gate.
 
 | Gate | Required coverage |
