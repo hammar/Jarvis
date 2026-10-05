@@ -161,9 +161,11 @@ authority.
 | SDK child-process crash becomes interruption; next turn starts a fresh runtime | `CopilotAgentEngineContractTests.RuntimeProcessCrashBecomesInterruptedAndNextTurnStartsFreshRuntime` |
 | Provider failure is explicit and does not include provider error content | `CopilotAgentEngineContractTests.ProviderFailureEmitsSafeFailureCodeWithoutLeakingProviderMessage` |
 | Terminal status and event commit atomically; stale compare-and-swap writes do not append an event | `CopilotTurnStateMachineTests.TurnStateMachineAppliesRunningAndTerminalTransitionsWithCompareAndSwap` |
+| Terminal persistence observes its bounded cancellation token | `CopilotTurnStateMachineTests.TurnStateMachineAppliesRunningAndTerminalTransitionsWithCompareAndSwap` |
 | Every terminal signal maps to one typed status/event pair | `CopilotTurnStateMachineTests.TurnStateMachineMapsEveryEngineSignalToOneTypedTerminalOutcome` |
 | Active-turn cancellation, tool-budget transitions, and terminal-signal precedence | `CopilotTurnStateMachineTests.ActiveTurnCancellationAndBudgetTransitionsAreHostControlled`, `CopilotTurnStateMachineTests.ActiveTurnSelectsTerminalOutcomeByBudgetCancellationDeadlinePrecedence` |
 | Interrupted turns are terminal and excluded from post-restart recovery work | `SqlitePersistenceTests.NonterminalTurnStateAndVersionCanBeRecoveredAfterRestart` |
+| Runtime cleanup deletes the turn directory after shutdown and classifies cleanup failures | `CopilotTurnStateMachineTests.RuntimeCleanupDeletesTurnDirectoryAfterStoppingRuntime`, `CopilotTurnStateMachineTests.RuntimeCleanupAttemptsEveryResourceAndReportsCleanupFailure` |
 | Prohibited dependency edges are rejected | `ArchitectureBoundaryTests` negative fixtures |
 | Missing discovery/report/low coverage fails | `PersonalAgent.Validation gate-self-test` |
 | Browser test failure is visible | `BrowserSmokeTests.DeliberatelyIncorrectBrowserAssertionFails` probe |

@@ -21,6 +21,7 @@ namespace PersonalAgent.Infrastructure.AgentEngine.Copilot;
 public sealed class CopilotAgentEngine : IAgentEngine
 {
     internal static readonly TimeSpan CleanupTimeout = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan TerminalPersistenceTimeout = TimeSpan.FromSeconds(5);
     private readonly IConversationStore conversations;
     private readonly IToolDispatcher dispatcher;
     private readonly IClock clock;
@@ -83,8 +84,6 @@ public sealed class CopilotAgentEngine : IAgentEngine
             {
                 yield return item;
             }
-
-            await execution;
         }
         finally
         {
@@ -142,7 +141,6 @@ public sealed class CopilotAgentEngine : IAgentEngine
         TurnStatus terminalStatus;
         AgentEvent terminalEvent;
 
-        Exception? failure = null;
         try
         {
             await stateMachine.EnsureRunningAsync(request.TurnId, turnCancellation.Token);
@@ -161,19 +159,19 @@ public sealed class CopilotAgentEngine : IAgentEngine
                 clock,
                 CopilotTurnSignal.Completed);
         }
-        catch (OperationCanceledException) when (callerToken.IsCancellationRequested || active.CancelledByHost)
-        {
-            (terminalStatus, terminalEvent) = CopilotTurnStateMachine.CreateTerminalOutcome(
-                request.TurnId,
-                clock,
-                CopilotTurnSignal.Cancelled);
-        }
         catch (OperationCanceledException) when (active.FailureCode is not null)
         {
             (terminalStatus, terminalEvent) = CopilotTurnStateMachine.CreateTerminalOutcome(
                 request.TurnId,
                 clock,
                 CopilotTurnSignal.ToolBudgetExceeded);
+        }
+        catch (OperationCanceledException) when (callerToken.IsCancellationRequested || active.CancelledByHost)
+        {
+            (terminalStatus, terminalEvent) = CopilotTurnStateMachine.CreateTerminalOutcome(
+                request.TurnId,
+                clock,
+                CopilotTurnSignal.Cancelled);
         }
         catch (OperationCanceledException) when (deadline.IsCancellationRequested)
         {
@@ -207,6 +205,7 @@ public sealed class CopilotAgentEngine : IAgentEngine
                 GetFailureSignal(exception));
         }
 
+        using var terminalPersistence = new CancellationTokenSource(TerminalPersistenceTimeout);
         try
         {
             observed.Writer.TryComplete();
@@ -224,17 +223,16 @@ public sealed class CopilotAgentEngine : IAgentEngine
                     signal);
             }
 
-            await stateMachine.SetTerminalOutcomeAsync(request.TurnId, terminalStatus, terminalEvent);
+            await stateMachine.SetTerminalOutcomeAsync(
+                request.TurnId,
+                terminalStatus,
+                terminalEvent,
+                terminalPersistence.Token);
             await output.WriteAsync(terminalEvent, CancellationToken.None);
-        }
-        catch (Exception exception)
-        {
-            failure = exception;
-            throw;
         }
         finally
         {
-            output.TryComplete(failure);
+            output.TryComplete();
         }
     }
 
@@ -249,24 +247,25 @@ public sealed class CopilotAgentEngine : IAgentEngine
         var turnDirectory = Path.Combine(options.RuntimeDirectory, $"turn-{request.TurnId.Value:N}");
         var runtimeDirectory = Path.Combine(turnDirectory, "runtime");
         var workingDirectory = Path.Combine(turnDirectory, "workspace");
-        EnsurePrivateDirectory(turnDirectory);
-        EnsurePrivateDirectory(runtimeDirectory);
-        EnsurePrivateDirectory(workingDirectory);
-
-        var client = new CopilotClient(new CopilotClientOptions
-        {
-            Mode = CopilotClientMode.Empty,
-            BaseDirectory = runtimeDirectory,
-            WorkingDirectory = workingDirectory,
-            UseLoggedInUser = false,
-            LogLevel = CopilotLogLevel.None,
-            Environment = CreateRuntimeEnvironment(runtimeDirectory)
-        });
-        active.SetClient(client);
+        CopilotClient? client = null;
         CopilotSession? session = null;
         IDisposable? subscription = null;
         try
         {
+            EnsurePrivateDirectory(turnDirectory);
+            EnsurePrivateDirectory(runtimeDirectory);
+            EnsurePrivateDirectory(workingDirectory);
+
+            client = new CopilotClient(new CopilotClientOptions
+            {
+                Mode = CopilotClientMode.Empty,
+                BaseDirectory = runtimeDirectory,
+                WorkingDirectory = workingDirectory,
+                UseLoggedInUser = false,
+                LogLevel = CopilotLogLevel.None,
+                Environment = CreateRuntimeEnvironment(runtimeDirectory)
+            });
+            active.SetClient(client);
             await client.StartAsync().WaitAsync(cancellationToken);
             var tools = request.Tools.Select(tool =>
                 new CopilotToolFunction(tool, dispatcher, request.TurnId, events, active, clock)).ToArray();
@@ -331,14 +330,24 @@ public sealed class CopilotAgentEngine : IAgentEngine
             await CleanupRuntimeAsync(
                 subscription is null ? null : subscription.Dispose,
                 session is null ? null : () => active.DisposeSessionAsync(session),
-                () => active.StopClientAsync());
+                () => active.StopClientAsync(),
+                () => DeleteTurnDirectory(turnDirectory));
+        }
+    }
+
+    private static void DeleteTurnDirectory(string turnDirectory)
+    {
+        if (Directory.Exists(turnDirectory))
+        {
+            Directory.Delete(turnDirectory, recursive: true);
         }
     }
 
     internal static async Task CleanupRuntimeAsync(
         Action? disposeSubscription,
         Func<Task>? disposeSession,
-        Func<Task> stopClient)
+        Func<Task> stopClient,
+        Action? cleanupRuntimeDirectory = null)
     {
         Exception? cleanupFailure = null;
         try
@@ -367,6 +376,17 @@ public sealed class CopilotAgentEngine : IAgentEngine
         try
         {
             await stopClient();
+        }
+        catch (Exception exception)
+        {
+            cleanupFailure = cleanupFailure is null
+                ? exception
+                : new AggregateException(cleanupFailure, exception);
+        }
+
+        try
+        {
+            cleanupRuntimeDirectory?.Invoke();
         }
         catch (Exception exception)
         {

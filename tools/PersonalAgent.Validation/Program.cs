@@ -602,7 +602,7 @@ internal static class CoverageGate
         var baseRef = Environment.GetEnvironmentVariable("GITHUB_BASE_REF");
         var eventName = Environment.GetEnvironmentVariable("GITHUB_EVENT_NAME");
         var comparison = !string.IsNullOrWhiteSpace(baseRef)
-            ? $"origin/{baseRef}"
+            ? $"origin/{baseRef}...HEAD"
             : eventName == "push" ? "HEAD^...HEAD" : "HEAD";
         var diff = RunGit(root, ["diff", "--no-ext-diff", "--unified=0", comparison, "--", "src"]);
         ParseAddedLines(root, diff, changed);

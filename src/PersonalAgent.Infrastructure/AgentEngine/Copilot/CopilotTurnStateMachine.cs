@@ -40,7 +40,11 @@ internal sealed class CopilotTurnStateMachine(
         }
     }
 
-    public async Task SetTerminalOutcomeAsync(TurnId turnId, TurnStatus status, AgentEvent terminalEvent)
+    public async Task SetTerminalOutcomeAsync(
+        TurnId turnId,
+        TurnStatus status,
+        AgentEvent terminalEvent,
+        CancellationToken cancellationToken)
     {
         if (!IsTerminal(status))
         {
@@ -53,7 +57,7 @@ internal sealed class CopilotTurnStateMachine(
             throw new ArgumentException("The terminal event must belong to the updated turn.", nameof(terminalEvent));
         }
 
-        var turn = await conversations.GetTurnAsync(turnId, CancellationToken.None)
+        var turn = await conversations.GetTurnAsync(turnId, cancellationToken)
             ?? throw new InvalidOperationException("The application turn does not exist.");
         if (IsTerminal(turn.Status))
         {
@@ -68,7 +72,7 @@ internal sealed class CopilotTurnStateMachine(
             terminalEvent.GetType().Name,
             JsonSerializer.Serialize(terminalEvent, terminalEvent.GetType()),
             terminalEvent.OccurredAtUtc,
-            CancellationToken.None);
+            cancellationToken);
     }
 
     public static (TurnStatus Status, AgentEvent Event) CreateTerminalOutcome(

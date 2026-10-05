@@ -23,9 +23,23 @@ public sealed class CopilotTurnStateMachineTests
         var turnId = TurnId.New();
         await store.CreateTurnAsync(turnId, ConversationId.New(), TurnStatus.Received, Now, CancellationToken.None);
 
+        using var cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            machine.SetTerminalOutcomeAsync(
+                turnId,
+                TurnStatus.Failed,
+                new TurnFailed(turnId, Now, "engine_failure"),
+                cancelled.Token));
+        Assert.Equal(TurnStatus.Received, (await store.GetTurnAsync(turnId, CancellationToken.None))?.Status);
+
         await machine.EnsureRunningAsync(turnId, CancellationToken.None);
         await machine.EnsureRunningAsync(turnId, CancellationToken.None);
-        await machine.SetTerminalOutcomeAsync(turnId, TurnStatus.Completed, new TurnCompleted(turnId, Now));
+        await machine.SetTerminalOutcomeAsync(
+            turnId,
+            TurnStatus.Completed,
+            new TurnCompleted(turnId, Now),
+            CancellationToken.None);
 
         Assert.Equal(TurnStatus.Completed, (await store.GetTurnAsync(turnId, CancellationToken.None))?.Status);
         var terminalEvents = await store.ReadTurnEventsAfterAsync(turnId, 0, 10, CancellationToken.None);
@@ -33,9 +47,17 @@ public sealed class CopilotTurnStateMachineTests
         await Assert.ThrowsAsync<PersistenceConcurrencyException>(
             () => machine.EnsureRunningAsync(turnId, CancellationToken.None));
         await Assert.ThrowsAsync<PersistenceConcurrencyException>(
-            () => machine.SetTerminalOutcomeAsync(turnId, TurnStatus.Failed, new TurnFailed(turnId, Now, "engine_failure")));
+            () => machine.SetTerminalOutcomeAsync(
+                turnId,
+                TurnStatus.Failed,
+                new TurnFailed(turnId, Now, "engine_failure"),
+                CancellationToken.None));
         await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
-            () => machine.SetTerminalOutcomeAsync(turnId, TurnStatus.Running, new TurnCompleted(turnId, Now)));
+            () => machine.SetTerminalOutcomeAsync(
+                turnId,
+                TurnStatus.Running,
+                new TurnCompleted(turnId, Now),
+                CancellationToken.None));
         await Assert.ThrowsAsync<InvalidOperationException>(
             () => machine.EnsureRunningAsync(TurnId.New(), CancellationToken.None));
         var missingTurnId = TurnId.New();
@@ -43,9 +65,14 @@ public sealed class CopilotTurnStateMachineTests
             () => machine.SetTerminalOutcomeAsync(
                 missingTurnId,
                 TurnStatus.Failed,
-                new TurnFailed(missingTurnId, Now, "engine_failure")));
+                new TurnFailed(missingTurnId, Now, "engine_failure"),
+                CancellationToken.None));
         await Assert.ThrowsAsync<ArgumentException>(
-            () => machine.SetTerminalOutcomeAsync(turnId, TurnStatus.Failed, new TurnFailed(TurnId.New(), Now, "engine_failure")));
+            () => machine.SetTerminalOutcomeAsync(
+                turnId,
+                TurnStatus.Failed,
+                new TurnFailed(TurnId.New(), Now, "engine_failure"),
+                CancellationToken.None));
 
         var savedTurn = await store.GetTurnAsync(turnId, CancellationToken.None);
         await Assert.ThrowsAsync<PersistenceConcurrencyException>(async () =>
@@ -140,15 +167,51 @@ public sealed class CopilotTurnStateMachineTests
                 {
                     attempts.Add("client");
                     return Task.FromException(new InvalidOperationException("client cleanup"));
+                },
+                () =>
+                {
+                    attempts.Add("runtime-directory");
+                    throw new IOException("directory cleanup");
                 }));
 
-        Assert.Equal(["subscription", "session", "client"], attempts);
+        Assert.Equal(["subscription", "session", "client", "runtime-directory"], attempts);
         var failures = Assert.IsType<AggregateException>(exception.InnerException);
-        Assert.Equal(3, failures.Flatten().InnerExceptions.Count);
+        Assert.Equal(4, failures.Flatten().InnerExceptions.Count);
         Assert.Equal(CopilotTurnSignal.RuntimeCleanupFailed, CopilotAgentEngine.GetFailureSignal(exception));
         Assert.Equal(
             CopilotTurnSignal.Failed,
             CopilotAgentEngine.GetFailureSignal(new InvalidOperationException("provider failure")));
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task RuntimeCleanupDeletesTurnDirectoryAfterStoppingRuntime()
+    {
+        using var directory = IsolatedDatabaseFile.Create();
+        var turnDirectory = Path.Combine(Path.GetDirectoryName(directory.Path)!, "turn-runtime");
+        Directory.CreateDirectory(Path.Combine(turnDirectory, "runtime"));
+        var attempts = new List<string>();
+
+        await CopilotAgentEngine.CleanupRuntimeAsync(
+            () => attempts.Add("subscription"),
+            () =>
+            {
+                attempts.Add("session");
+                return Task.CompletedTask;
+            },
+            () =>
+            {
+                attempts.Add("client");
+                return Task.CompletedTask;
+            },
+            () =>
+            {
+                attempts.Add("directory");
+                Directory.Delete(turnDirectory, recursive: true);
+            });
+
+        Assert.Equal(["subscription", "session", "client", "directory"], attempts);
+        Assert.False(Directory.Exists(turnDirectory));
     }
 
     [Fact]

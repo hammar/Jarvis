@@ -105,6 +105,10 @@ cleanup failure is `Interrupted`, provider failure is `Failed`, and explicit
 cancellation is `Cancelled`; an ambiguous physical result remains the
 dispatcher’s responsibility. This design uses the accepted native trusted
 runtime from ADR 0001 and does not claim OS-enforced egress containment.
+The per-turn runtime/workspace directory is removed after bounded runtime
+shutdown; a removal failure is surfaced as cleanup uncertainty. Terminal
+outcome persistence has its own bounded timeout so turn cancellation does not
+prevent recording the terminal result.
 The adapter is not yet an end-user conversation flow: routing, consent,
 dispatcher policy, UI/SSE, and coordinator integration are later task scope.
 

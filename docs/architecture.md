@@ -65,8 +65,11 @@ they are yielded, so persistent per-turn sequence numbers are the replay
 cursor. Terminal status and its terminal event are committed atomically using
 the stored expected version. Deadlines
 bound SDK waits and abort/stop are bounded; timeout and process cleanup
-uncertainty are reported as interruption. The native runtime remains a trusted
-dependency under ADR 0001, not an OS-isolated process.
+uncertainty are reported as interruption. The per-turn SDK runtime/workspace
+directory is removed after shutdown, with cleanup failures surfaced as
+interruption. Terminal persistence has a separate bounded timeout so
+cancellation cannot skip the durable outcome. The native runtime remains a
+trusted dependency under ADR 0001, not an OS-isolated process.
 
 ## Aspire resource ownership
 
