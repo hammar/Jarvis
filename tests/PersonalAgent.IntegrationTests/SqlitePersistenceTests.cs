@@ -616,6 +616,40 @@ public sealed class SqlitePersistenceTests
 
     [Fact]
     [Trait("Category", "Integration")]
+    public async Task BackupAndRestoreRejectRestoreArtifactsWithoutDeletingSourceBackup()
+    {
+        using var file = IsolatedDatabaseFile.Create();
+        var database = new SqliteDatabase(file.Path);
+        await database.InitializeAsync();
+        var backups = new SqliteBackupRestoreService(database);
+        var backupPath = Path.Combine(Path.GetDirectoryName(file.Path)!, "artifact-source.db");
+        await backups.CreateBackupAsync(backupPath);
+
+        var artifactPaths = new[]
+        {
+            SqliteBackupRestoreService.RestoreStagedPath(file.Path),
+            SqliteBackupRestoreService.RestoreRollbackPath(file.Path),
+            file.Path + ".restore-original-wal",
+            file.Path + ".restore-original-shm",
+            SqliteBackupRestoreService.RestoreMarkerPath(file.Path) + ".tmp",
+            SqliteBackupRestoreService.RestoreMarkerPath(file.Path)
+        };
+        foreach (var artifactPath in artifactPaths)
+        {
+            File.Copy(backupPath, artifactPath);
+            var originalBackup = await File.ReadAllBytesAsync(artifactPath);
+
+            await Assert.ThrowsAsync<ArgumentException>(() => backups.RestoreAsync(artifactPath));
+
+            Assert.Equal(originalBackup, await File.ReadAllBytesAsync(artifactPath));
+            File.Delete(artifactPath);
+            await Assert.ThrowsAsync<ArgumentException>(() => backups.CreateBackupAsync(artifactPath));
+            Assert.False(File.Exists(artifactPath));
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
     public async Task FailedRestorePreservesCommittedWalDataAndStartupRecoversPreparedReplacement()
     {
         using var file = IsolatedDatabaseFile.Create();

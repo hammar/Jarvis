@@ -32,6 +32,7 @@ public sealed class SqliteBackupRestoreService
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(backupPath);
         var destinationPath = Path.GetFullPath(backupPath);
+        EnsureNotRestoreArtifactPath(database.DatabasePath, destinationPath, nameof(backupPath));
         if (PathsEqual(destinationPath, database.DatabasePath))
         {
             throw new ArgumentException("The backup destination must differ from the live database path.", nameof(backupPath));
@@ -100,8 +101,9 @@ public sealed class SqliteBackupRestoreService
     public async Task RestoreAsync(string backupPath, CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(backupPath);
-        await RecoverInterruptedRestoreAsync(database.DatabasePath, cancellationToken);
         var sourcePath = Path.GetFullPath(backupPath);
+        EnsureNotRestoreArtifactPath(database.DatabasePath, sourcePath, nameof(backupPath));
+        await RecoverInterruptedRestoreAsync(database.DatabasePath, cancellationToken);
         if (!File.Exists(sourcePath))
         {
             throw new FileNotFoundException("The SQLite backup file was not found.", sourcePath);
@@ -312,6 +314,23 @@ public sealed class SqliteBackupRestoreService
     private static string RestoreOriginalWalPath(string databasePath) => databasePath + ".restore-original-wal";
 
     private static string RestoreOriginalShmPath(string databasePath) => databasePath + ".restore-original-shm";
+
+    private static void EnsureNotRestoreArtifactPath(string databasePath, string path, string parameterName)
+    {
+        var restoreArtifacts = new[]
+        {
+            RestoreStagedPath(databasePath),
+            RestoreRollbackPath(databasePath),
+            RestoreOriginalWalPath(databasePath),
+            RestoreOriginalShmPath(databasePath),
+            RestoreMarkerPath(databasePath) + ".tmp",
+            RestoreMarkerPath(databasePath)
+        };
+        if (restoreArtifacts.Any(artifact => PathsEqual(path, artifact)))
+        {
+            throw new ArgumentException("The path is reserved for SQLite restore recovery.", parameterName);
+        }
+    }
 
     private static void WriteRestoreMarker(string databasePath, string state)
     {

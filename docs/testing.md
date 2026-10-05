@@ -27,7 +27,10 @@ integration reports are merged by normalized source path and line identity
 rather than averaging project percentages. Branch outcomes use the stable
 method name and branch-point ordinal from OpenCover, so complementary test
 runs can combine coverage without mistaking aggregate branch counts for the
-same outcome.
+same outcome. Runtime modules reported by Cobertura must also be present in
+OpenCover, including Domain/Application for the unit-only gate, so absent
+branch reports cannot be mistaken for branchless assemblies. Critical-module
+gates additionally fail when their source has no OpenCover branch data.
 
 Enforced targets follow AGENTS.md: Domain and Application unit-only at 90%
 lines / 85% branches; combined unit+integration first-party runtime at 85% /
@@ -46,8 +49,8 @@ currently empty Infrastructure assembly activates its per-assembly 80%/70%
 requirement as soon as it contains handwritten C#.
 
 The `gate-self-test` operation runs low-line, low-branch, low-critical-module,
-complementary branch-outcome, empty-coverage, missing-report, and
-zero-discovery fixtures through the same validator used by CI. Architecture tests include forbidden project-reference,
+complementary branch-outcome, empty/missing OpenCover-module, empty-coverage,
+missing-report, and zero-discovery fixtures through the same validator used by CI. Architecture tests include forbidden project-reference,
 reflected type-dependency, and Web non-composition source fixtures. The browser check runs the expected
 Playwright smoke and confirms a deliberately incorrect browser assertion is
 reported as a failure.
@@ -58,6 +61,7 @@ reported as a failure.
 | --- | --- |
 | Strong application IDs are independent | `IdentifierContractTests` |
 | Real SQLite file persists across connections and stays test-owned | `SqliteAndWebSmokeTests.SqlitePersistsDataInAnIsolatedTestDatabase` |
+| Restore recovery artifacts cannot be used as backup paths | `SqlitePersistenceTests.BackupAndRestoreRejectRestoreArtifactsWithoutDeletingSourceBackup` |
 | Razor host works without external services | `SqliteAndWebSmokeTests.RazorHostServesTheConfiguredProfileWithoutExternalServices` |
 | Direct test-profile startup requires isolated data | `SqliteAndWebSmokeTests.TestProfileRequiresAnExplicitDataDirectory` |
 | Aspire launches Web and discovers deterministic fakes | `AspireSimulatorTests.SimulatorStartsWebAndDiscoversDeterministicManagedEndpoints` |

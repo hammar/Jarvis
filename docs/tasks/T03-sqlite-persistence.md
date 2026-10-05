@@ -76,13 +76,17 @@ an older schema with data preservation, FTS insert/update/delete, optimistic
 concurrency, approval expiry/single-use ownership checks, expired job-lease
 recovery and no-reclaim for completed outcomes, backup/corruption/restore,
 pending migration-on-copy and conflicting-schema preservation, and
-default/overridden retention including repeat/restart behavior. Infrastructure
-must meet the 80% line / 70% branch combined unit+integration coverage minimum.
+default/overridden retention including repeat/restart behavior. Backup and
+restore reject reserved recovery-artifact paths before cleanup or recovery.
+Infrastructure must meet the 80% line / 70% branch combined unit+integration
+coverage minimum.
 `SqliteApprovalStore.cs` is explicitly owned as a critical module at 95% line /
 90% branch coverage; `SqliteActionJournalStore.cs` is also explicitly owned
 at 95% / 90% for action-id idempotency. These thresholds are enforced by the
 coverage validator and negative fixtures. Branch outcomes merge by stable OpenCover method-name/branch-point
-ordinal identity across unit and integration reports.
+ordinal identity across unit and integration reports. Expected runtime
+assemblies must appear in OpenCover independently of line coverage, and
+critical modules cannot pass with missing branch data.
 
 Update `docs/architecture.md` with storage ownership and restore boundaries,
 and `src/PersonalAgent.Infrastructure/README.md` with local migration and

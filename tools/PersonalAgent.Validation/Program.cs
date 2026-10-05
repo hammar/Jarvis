@@ -181,6 +181,23 @@ internal static class CoverageGate
             throw new ValidationException("Complementary branch outcomes from separate reports were not merged.");
         }
 
+        var emptyOpenCover = new CoverageReportSet();
+        MergeOpenCoverBranches(
+            repositoryRoot,
+            XDocument.Parse("<CoverageSession><Modules /></CoverageSession>"),
+            emptyOpenCover,
+            "empty OpenCover fixture");
+        ExpectFailure(() => RequireOpenCoverModules(
+            ["PersonalAgent.Infrastructure"],
+            emptyOpenCover,
+            "empty OpenCover fixture"));
+        var incompleteOpenCover = new CoverageReportSet();
+        incompleteOpenCover.OpenCoverAssemblies.Add("PersonalAgent.Infrastructure");
+        ExpectFailure(() => RequireOpenCoverModules(
+            ["PersonalAgent.Infrastructure", "PersonalAgent.Application"],
+            incompleteOpenCover,
+            "missing-module OpenCover fixture"));
+
         var lowCriticalModule = new CoverageMetrics();
         for (var line = 1; line <= 100; line++)
         {
@@ -193,6 +210,19 @@ internal static class CoverageGate
         }
 
         ExpectFailure(() => EnforceThreshold("critical module fixture", lowCriticalModule, 95, 90));
+        var criticalModuleWithoutBranches = new CoverageMetrics();
+        for (var line = 1; line <= 100; line++)
+        {
+            criticalModuleWithoutBranches.AddLine(new CoverageLine("critical-fixture.cs", line), covered: true);
+        }
+
+        ExpectFailure(() => EnforceThreshold(
+            "critical module without branch data",
+            criticalModuleWithoutBranches,
+            95,
+            90,
+            allowNoLines: false,
+            allowNoBranches: false));
         ExpectFailure(() => RequireReports([], "missing report fixture"));
         ExpectFailure(() => TestResults.VerifyDiscoveryXml(
             XDocument.Parse("<TestRun><ResultSummary><Counters total=\"0\" executed=\"0\" passed=\"0\" failed=\"0\" /></ResultSummary></TestRun>"),
@@ -239,6 +269,11 @@ internal static class CoverageGate
             throw new ValidationException("Unit coverage is missing an expected Domain or Application assembly report.");
         }
 
+        RequireOpenCoverModules(
+            ["PersonalAgent.Domain", "PersonalAgent.Application"],
+            unit,
+            "unit");
+
         var missingAssemblies = runtimeAssemblies
             .Where(name => !combined.Assemblies.ContainsKey(name))
             .ToArray();
@@ -247,6 +282,8 @@ internal static class CoverageGate
             throw new ValidationException(
                 $"Coverage reports are missing expected runtime assemblies: {string.Join(", ", missingAssemblies)}.");
         }
+
+        RequireOpenCoverModules(runtimeAssemblies, combined, "combined unit + integration");
 
         EnforceThreshold("Domain unit", unit.Assemblies["PersonalAgent.Domain"], 90, 85, allowNoLines: false);
         EnforceThreshold(
@@ -276,7 +313,13 @@ internal static class CoverageGate
             }
 
             var metrics = SelectSourceFile(combined.AllAssemblies, sourcePath);
-            EnforceThreshold(module.Name, metrics, module.Lines, module.Branches, allowNoLines: false);
+            EnforceThreshold(
+                module.Name,
+                metrics,
+                module.Lines,
+                module.Branches,
+                allowNoLines: false,
+                allowNoBranches: false);
         }
 
         Console.WriteLine("Coverage thresholds passed. Totals use unique source lines and branch conditions.");
@@ -327,6 +370,21 @@ internal static class CoverageGate
         }
 
         return reports;
+    }
+
+    private static void RequireOpenCoverModules(
+        IEnumerable<string> expectedAssemblies,
+        CoverageReportSet reports,
+        string layer)
+    {
+        var missingModules = expectedAssemblies
+            .Where(name => !reports.OpenCoverAssemblies.Contains(name))
+            .ToArray();
+        if (missingModules.Length > 0)
+        {
+            throw new ValidationException(
+                $"The {layer} OpenCover reports are missing expected runtime modules: {string.Join(", ", missingModules)}.");
+        }
     }
 
     private static CoverageReportSet MergeReports(
@@ -411,6 +469,7 @@ internal static class CoverageGate
                 continue;
             }
 
+            reports.OpenCoverAssemblies.Add(assemblyName);
             var files = module.Descendants("File")
                 .Where(file => file.Attribute("uid") is not null && file.Attribute("fullPath") is not null)
                 .ToDictionary(
@@ -673,7 +732,8 @@ internal static class CoverageGate
         CoverageMetrics metrics,
         double lineThreshold,
         double branchThreshold,
-        bool allowNoLines = true)
+        bool allowNoLines = true,
+        bool allowNoBranches = true)
     {
         if (metrics.Lines.Count == 0)
         {
@@ -695,6 +755,12 @@ internal static class CoverageGate
 
         if (metrics.Branches.Count == 0)
         {
+            if (!allowNoBranches)
+            {
+                throw new ValidationException(
+                    $"{name} has no branch data; the OpenCover report cannot establish its branch coverage.");
+            }
+
             Console.WriteLine($"{name}: branches N/A (no coverable branches); lines {Percent(metrics.CoveredLines.Count, metrics.Lines.Count)}.");
             return;
         }
@@ -758,6 +824,7 @@ internal static class CoverageGate
     {
         internal Dictionary<string, CoverageMetrics> Assemblies { get; } = new(StringComparer.Ordinal);
         internal CoverageMetrics AllAssemblies { get; } = new();
+        internal HashSet<string> OpenCoverAssemblies { get; } = new(StringComparer.Ordinal);
     }
 }
 
