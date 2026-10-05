@@ -5,8 +5,8 @@
 The C# host owns user identity, route policy, privacy/context selection,
 approval, tool authorization, durable conversations/jobs/audit, cancellation,
 and outcome reporting. The Copilot runtime is a replaceable inference engine,
-not the authority for application state. SQLite is the intended durable store;
-schema and repository work belongs to T03.
+not the authority for application state. SQLite is the durable store;
+schema and repository implementation is delivered by T03.
 
 ```mermaid
 flowchart TD
@@ -27,7 +27,7 @@ flowchart TD
 | --- | --- | --- |
 | Domain | Strong IDs and core state types | None |
 | Application | Frozen use-case and adapter contracts, typed events | Domain |
-| Infrastructure | Persistence/provider/device adapter implementations (future) | Application, Domain |
+| Infrastructure | SQLite persistence and provider/device adapters | Application, Domain |
 | Web | Razor host and composition root | Application, Domain, ServiceDefaults; Infrastructure only in composition |
 | ServiceDefaults | Health, service discovery and filtered local telemetry | No application projects |
 | AppHost | Aspire resource graph and trusted profiles | Web and simulator resource references only |
@@ -65,3 +65,39 @@ Simulator data is persistent beneath the user's application data directory;
 E2E requires a unique, test-owned temporary directory. AppHost never stops or
 deletes external Ollama, Home Assistant, or real developer data. SQLite is a
 file, not a database container.
+
+## SQLite storage ownership
+
+`PersonalAgent.Infrastructure.Persistence` owns the SQLite file, forward-only
+schema migrations, FTS5 synchronization, and implementations of the
+Application storage contracts. Conversation storage includes messages, turns,
+and ordered event cursors; memory, jobs, approvals, action journals, and audit
+use separate storage operations. Web composition selects `JARVIS_DATA_DIR` (or
+the per-user LocalApplicationData `Jarvis` directory when unset). It reuses
+the previous AppHost `PersonalAgent` location only when that is the sole
+default database; if both default locations contain data, startup requires an
+explicit path. AppHost leaves the Local/Hybrid fallback to Web so both launch
+modes resolve the same store. The database file is `jarvis.db`, outside the
+deployment folder. `Microsoft.Data.Sqlite` is confined to Infrastructure and
+integration tests. Domain and Application remain independent of SQLite.
+
+Migrations use SQLite `user_version` and apply each embedded SQL migration
+inside its own immediate transaction. Foreign keys are enabled per connection;
+WAL is enabled during startup. Apply pending upgrades to a SQLite backup copy
+before swapping application binaries. Schema downgrade is not automatic: a
+rollback restores a matched backup and prior binary.
+
+`SqliteBackupRestoreService` uses SQLite's online backup facility and verifies
+integrity plus foreign keys. Restore first copies the backup, migrates and
+validates that copy, then replaces the database file. Stop the Web host and
+all workers before restoring; no database connection or active worker may
+remain open. Restore does not run jobs or replay an action, and preserves
+recorded `Unknown` action outcomes. Backups can retain logically deleted data;
+SQLite file-page secure erasure is not claimed.
+
+The Web host applies validated retention settings at startup:
+`JARVIS_CONVERSATION_RETENTION_DAYS` defaults to 90 days and
+`JARVIS_AUDIT_RETENTION_DAYS` defaults to 30 days (each accepts 1–3650 days).
+Cleanup deletes old conversation roots and their dependent messages/turn
+events, and expired audit events. It does not purge durable memory facts,
+jobs, actions, approvals, or uncertain outcomes.

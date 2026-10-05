@@ -43,8 +43,12 @@ public sealed class SqliteAndWebSmokeTests
     [Trait("Category", "Integration")]
     public async Task RazorHostServesTheConfiguredProfileWithoutExternalServices()
     {
+        using var data = IsolatedDirectory.Create();
         await using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(web =>
-            web.UseSetting("JARVIS_PROFILE", "Simulator"));
+        {
+            web.UseSetting("JARVIS_PROFILE", "Simulator");
+            web.UseSetting("JARVIS_DATA_DIR", data.Path);
+        });
         using var client = factory.CreateClient();
 
         using var response = await client.GetAsync("/");
@@ -58,7 +62,9 @@ public sealed class SqliteAndWebSmokeTests
     [Trait("Category", "Integration")]
     public async Task RazorHostUsesLocalProfileWhenNoProfileIsConfigured()
     {
-        await using var factory = new WebApplicationFactory<Program>();
+        using var data = IsolatedDirectory.Create();
+        await using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(web =>
+            web.UseSetting("JARVIS_DATA_DIR", data.Path));
         using var client = factory.CreateClient();
 
         using var response = await client.GetAsync("/");
@@ -68,12 +74,45 @@ public sealed class SqliteAndWebSmokeTests
         Assert.Contains("Running the Local profile.", html, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("Simulator")]
+    [InlineData("E2E")]
+    [Trait("Category", "Integration")]
+    public void TestProfileRequiresAnExplicitDataDirectory(string profile)
+    {
+        using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(web =>
+        {
+            web.UseSetting("JARVIS_PROFILE", profile);
+            web.UseSetting("JARVIS_DATA_DIR", string.Empty);
+        });
+
+        var exception = Assert.Throws<InvalidOperationException>(() => factory.CreateClient());
+        Assert.Contains("requires an explicit isolated JARVIS_DATA_DIR", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("simulator")]
+    [InlineData("Unknown")]
+    [Trait("Category", "Integration")]
+    public void DirectHostRejectsUnsupportedProfilesBeforeOpeningStorage(string profile)
+    {
+        using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(web =>
+            web.UseSetting("JARVIS_PROFILE", profile));
+
+        var exception = Assert.Throws<InvalidOperationException>(() => factory.CreateClient());
+        Assert.Contains("JARVIS_PROFILE must be Simulator, Local, Hybrid, or E2E", exception.Message, StringComparison.Ordinal);
+    }
+
     [Fact]
     [Trait("Category", "Integration")]
     public async Task DevelopmentHealthEndpointsAreNotMappedInProduction()
     {
+        using var data = IsolatedDirectory.Create();
         await using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(web =>
-            web.UseEnvironment("Production"));
+        {
+            web.UseEnvironment("Production");
+            web.UseSetting("JARVIS_DATA_DIR", data.Path);
+        });
         using var client = factory.CreateClient();
 
         using var response = await client.GetAsync("/health");
@@ -85,8 +124,12 @@ public sealed class SqliteAndWebSmokeTests
     [Trait("Category", "Integration")]
     public async Task DevelopmentHealthEndpointsReportReadinessAndLiveness()
     {
+        using var data = IsolatedDirectory.Create();
         await using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(web =>
-            web.UseEnvironment("Development"));
+        {
+            web.UseEnvironment("Development");
+            web.UseSetting("JARVIS_DATA_DIR", data.Path);
+        });
         using var client = factory.CreateClient();
 
         using var readiness = await client.GetAsync("/health");

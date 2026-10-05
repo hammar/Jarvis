@@ -20,15 +20,25 @@ committed NuGet lock files.
 ## Coverage semantics
 
 `tools/PersonalAgent.Validation` consumes VSTest TRX discovery results and
-Coverlet Cobertura output. Missing reports, missing expected assemblies,
+Coverlet Cobertura output for line coverage and OpenCover output for individual
+branch outcomes. Missing reports, missing expected assemblies,
 zero discovered tests, or malformed reports fail validation. Unit and
-integration reports are merged by normalized source path and line/condition
-identity rather than averaging project percentages.
+integration reports are merged by normalized source path and line identity
+rather than averaging project percentages. Branch outcomes use the stable
+method name and branch-point ordinal from OpenCover, so complementary test
+runs can combine coverage without mistaking aggregate branch counts for the
+same outcome. Runtime modules reported by Cobertura must also be present in
+OpenCover, including Domain/Application for the unit-only gate, so absent
+branch reports cannot be mistaken for branchless assemblies. Critical-module
+gates additionally fail when their source has no OpenCover branch data.
 
 Enforced targets follow AGENTS.md: Domain and Application unit-only at 90%
 lines / 85% branches; combined unit+integration first-party runtime at 85% /
-75%; each runtime assembly at 80% / 70%; critical modules at 95% / 90% when
-implemented; changed executable lines at 90%. A module with no coverable lines
+75%; each runtime assembly at 80% / 70%; approval persistence invariants in
+`SqliteApprovalStore.cs` and action-journal idempotency in
+`SqliteActionJournalStore.cs` at 95% / 90%; changed executable lines at 90%.
+The coverage validator requires each critical source file to exist at its
+exact owned path, so renaming it cannot silently remove the gate. A module with no coverable lines
 does not count as evidence of passing its threshold; runtime assemblies with
 no coverable lines fail, and branch coverage is N/A only when a module has no
 coverable branches. Thresholds apply as executable production code is
@@ -38,10 +48,10 @@ in-process coverage. No broad Infrastructure exclusion is allowed: the
 currently empty Infrastructure assembly activates its per-assembly 80%/70%
 requirement as soon as it contains handwritten C#.
 
-The `gate-self-test` operation runs low-line, low-branch, empty-coverage,
-missing-report, and zero-discovery fixtures through the same validator used by CI. Architecture
-tests include forbidden project-reference, reflected type-dependency, and
-Web non-composition source fixtures. The browser check runs the expected
+The `gate-self-test` operation runs low-line, low-branch, low-critical-module,
+complementary branch-outcome, empty/missing OpenCover-module, empty-coverage,
+missing-report, and zero-discovery fixtures through the same validator used by CI. Architecture tests include forbidden project-reference,
+reflected type-dependency, and Web non-composition source fixtures. The browser check runs the expected
 Playwright smoke and confirms a deliberately incorrect browser assertion is
 reported as a failure.
 
@@ -51,7 +61,27 @@ reported as a failure.
 | --- | --- |
 | Strong application IDs are independent | `IdentifierContractTests` |
 | Real SQLite file persists across connections and stays test-owned | `SqliteAndWebSmokeTests.SqlitePersistsDataInAnIsolatedTestDatabase` |
+| Restore recovery artifacts cannot be used as backup paths | `SqlitePersistenceTests.BackupAndRestoreRejectRestoreArtifactsWithoutDeletingSourceBackup` |
+| Staging WAL/SHM aliases cannot consume a backup source | `SqlitePersistenceTests.BackupAndRestoreRejectRestoreArtifactsWithoutDeletingSourceBackup` |
+| Staging recovery markers, locks, and rollback names cannot be backup paths | `SqlitePersistenceTests.BackupAndRestoreRejectRestoreArtifactsWithoutDeletingSourceBackup` |
+| Lease completion checks expiry inside the acquired write transaction | `SqlitePersistenceTests.CompletionReadsExpiryClockOnlyAfterAcquiringTheWriteTransaction` |
+| Contended lease claims refresh the deadline inside the write transaction | `SqlitePersistenceTests.ContendedClaimRefreshesItsDeadlineAfterTheWriterReleasesTheLock` |
+| Live and staged rollback journals cannot be backup or restore paths | `SqlitePersistenceTests.BackupAndRestoreRejectRestoreArtifactsWithoutDeletingSourceBackup` |
+| Hot rollback journals cannot overwrite restored data and survive failed-replacement rollback | `SqlitePersistenceTests.RestoreRetiresHotJournalAndFailedReplacementRecoversOriginal` |
+| Backup rejects existing destination sidecars without changing their bytes | `SqlitePersistenceTests.BackupRejectsPreexistingDestinationSidecarsWithoutChangingBytes` |
+| Unix database-file symlinks preserve WAL data and the link during failed restore | `SqlitePersistenceTests.FailedRestorePreservesCommittedWalDataAndStartupRecoversPreparedReplacement` |
+| A frozen version-1 schema upgrades with working constraints and cascading retention | `SqlitePersistenceTests.UpgradedVersionOneSchemaSupportsWritesConstraintsAndRetention` |
+| Symlink aliases cannot bypass restore path reservations | `SqlitePersistenceTests.BackupAndRestoreRejectArtifactPathsReachedThroughDirectorySymlinks` |
+| Shared data directories are rejected and database files are private | `SqlitePersistenceTests.DatabaseRejectsSharedDataDirectoryAndRestrictsDatabasePermissions` |
+| Windows data directories reject ACL access for other identities | `SqlitePersistenceTests.WindowsDatabaseRejectsDirectoriesGrantingAccessToOtherUsers` |
+| Turn state/version survive restart and nonterminal recovery reads are bounded | `SqlitePersistenceTests.NonterminalTurnStateAndVersionCanBeRecoveredAfterRestart` |
+| Existing default databases are preserved and ambiguous defaults fail closed | `SqlitePersistenceTests.DataDirectoryPreservesLegacyAppHostStateAndRejectsAmbiguousDefaults` |
+| Direct Web startup rejects unsupported profiles before persistence access | `SqliteAndWebSmokeTests.DirectHostRejectsUnsupportedProfilesBeforeOpeningStorage` |
+| Concurrent startup recovers a prepared restore once | `SqlitePersistenceTests.ConcurrentStartupSerializesPreparedRestoreRecovery` |
+| Independent workers race on optimistic writes and startup migrations | `SqlitePersistenceTests.ConcurrentMemoryWritersAllowOnlyOneExpectedVersionUpdate`, `SqlitePersistenceTests.SimultaneousStartupAppliesEachMigrationOnlyOnce` |
+| Expired conversations with unresolved turns survive retention | `SqlitePersistenceTests.RetentionUsesDefaultAndOverrideWindowsAndKeepsDurableState` |
 | Razor host works without external services | `SqliteAndWebSmokeTests.RazorHostServesTheConfiguredProfileWithoutExternalServices` |
+| Direct test-profile startup requires isolated data | `SqliteAndWebSmokeTests.TestProfileRequiresAnExplicitDataDirectory` |
 | Aspire launches Web and discovers deterministic fakes | `AspireSimulatorTests.SimulatorStartsWebAndDiscoversDeterministicManagedEndpoints` |
 | Local and Hybrid use explicit external endpoint configuration | `ExternalEndpointProfileTests.LocalAndHybridProfilesLaunchWithExplicitExternalEndpointReferences` |
 | Browser reaches actual AppHost Web resource | `BrowserSmokeTests.PlaywrightLoadsTheAspireSimulatorPage` |

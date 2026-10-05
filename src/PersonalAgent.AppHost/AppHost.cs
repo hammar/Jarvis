@@ -100,9 +100,7 @@ static string ResolveDataDirectory(string profile, IConfiguration configuration)
     var configuredDirectory = configuration["JARVIS_DATA_DIR"];
     if (string.IsNullOrWhiteSpace(configuredDirectory))
     {
-        return Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "PersonalAgent");
+        return string.Empty;
     }
 
     return Path.GetFullPath(configuredDirectory);

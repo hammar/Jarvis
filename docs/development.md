@@ -53,11 +53,22 @@ made.
 
 The Aspire AppHost is the canonical development orchestrator, not a production
 supervisor. For a direct Web process, set `JARVIS_PROFILE`, `JARVIS_DATA_DIR`,
-and any required external endpoint/secret-reference settings, then run:
+and any required external endpoint/secret-reference settings. Direct Simulator
+and E2E startup requires an explicitly isolated `JARVIS_DATA_DIR`; those
+profiles never fall back to the Local per-user path. Then run:
 
 ```sh
 dotnet run --project src/PersonalAgent.Web
 ```
+
+When Local or Hybrid has no `JARVIS_DATA_DIR`, Web uses
+`<LocalApplicationData>/Jarvis`, regardless of whether AppHost or the Web
+project is launched directly. If the prior AppHost
+`<LocalApplicationData>/PersonalAgent/jarvis.db` is the only default database,
+it remains selected for compatibility. If both locations contain a database,
+set `JARVIS_DATA_DIR` explicitly; startup refuses to choose and hide either
+store. Direct Web startup also rejects profile names other than `Simulator`,
+`Local`, `Hybrid`, and `E2E`.
 
 AppHost does not own external Ollama/Home Assistant lifecycles or personal
 data. Keep the dashboard local and authenticated; local telemetry exports
