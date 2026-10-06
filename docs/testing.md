@@ -181,5 +181,9 @@ authority.
 | Missing discovery/report/low coverage fails | `PersonalAgent.Validation gate-self-test` |
 | Browser test failure is visible | `BrowserSmokeTests.DeliberatelyIncorrectBrowserAssertionFails` probe |
 
-The full MVP acceptance matrix is added as T03–T12 features land; a passing
-scaffold is not a claim that those unimplemented scenarios are covered.
+Acceptance mappings grow with each milestone-local task in
+[the backlog](Personal-Agent-Project-Spec.md#15-agent-ready-implementation-backlog).
+Each milestone's cumulative runnable demo and implemented scenarios must pass
+before it closes. M4-01 consolidates the complete MVP matrix; it does not defer
+earlier feature checks. A passing scaffold is not evidence for unimplemented
+scenarios, and simulator results are not live model/device results.
