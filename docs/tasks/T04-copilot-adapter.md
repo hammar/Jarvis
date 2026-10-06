@@ -156,12 +156,14 @@ Initial pre-PR worktree review findings and dispositions:
 | T04-R25 | Terminal status/event persistence could ignore cancellation while synchronously waiting for SQLite's write lock. | Terminal outcome writes use the same one-second lock timeout and cancellation-aware immediate transaction acquisition. `TerminalOutcomeHonorsCancellationWhileWaitingForImmediateWriteLock` verifies cancellation within two seconds leaves both status and event unchanged. |
 | T04-R26 | A failed execution claim was caught as an engine failure and could terminalize another engine's active turn. | Durable claiming now occurs before the event pump and terminal-outcome handling; a rejected claim completes the output channel and propagates without writing events or terminal state. `RejectedDuplicateClaimDoesNotTerminalizeTheActiveTurn` verifies a pre-existing Running turn remains unchanged and does not reach the provider. |
 | T04-R27 | Cleanup `TimeoutException` could be classified as request-deadline expiration even when the deadline token had not fired. | The timeout handler now applies only when the request deadline is canceled; otherwise cancellation/cleanup exception classification remains in effect. |
-| T04-R28 | Repeated short SQLite busy waits could retry forever without caller cancellation. | Cancellable immediate-transaction retries now have a 10-second overall bound and rethrow the final SQLite busy error if the lock remains held. `ImmediateWriteLockWaitHasOverallBoundWithoutCallerCancellation` verifies a no-token write fails within 12 seconds and persists no event. |
+| T04-R28 | Repeated short SQLite busy waits could retry forever without caller cancellation. | Cancellable immediate-transaction retries now have a 10-second overall bound and surface a SQLite busy error if the lock remains held. `ImmediateWriteLockWaitHasOverallBoundWithoutCallerCancellation` verifies bounded failure within 20 seconds and no partial event. |
 | T04-R29 | The PR description validation evidence and finding range were stale. | After pushing and validating the latest code revision, the PR description is refreshed with that exact revision, current local evidence, the coverage limitation, and the finding range through T04-R29. |
 | T04-R30 | A failing execution claim could still enter the terminal-outcome handler and overwrite a turn owned by another engine. | The claim is now performed before event-pump initialization and terminal handling. `RejectedDuplicateClaimDoesNotTerminalizeTheActiveTurn` runs the actual adapter with a pre-existing Running turn and verifies it stays Running, emits no events, and starts no provider request. |
 | T04-R31 | A cleanup `TimeoutException` without request-deadline cancellation could be mislabeled as a deadline outcome. | The deadline catch filter now requires `deadline.IsCancellationRequested`; without that signal, the timeout follows the existing cleanup/failure classification path. |
 | T04-R32 | Persistent SQLite lock contention could retry forever for non-cancellable callers. | Immediate transaction acquisition now has a fixed 10-second maximum and surfaces a SQLite busy exception when exceeded. `ImmediateWriteLockWaitHasOverallBoundWithoutCallerCancellation` verifies bounded failure and no partial event. |
 | T04-R33 | SQLite's configured busy timeout and the retry deadline could be interpreted in mismatched units. | The explicit busy `SqliteException` now preserves both SQLite error codes, ensuring callers still receive the correct busy classification after the overall retry bound. The bounded-lock integration test and Release build pass. |
+| T04-R34 | Provider-controlled text deltas could accumulate without limit in the unbounded SDK-event and caller-output channels. | Both channels now have bounded capacity with backpressure; each turn also caps persisted events at 10,000 and streamed text at 1,000,000 UTF-16 code units. Exceeding capacity/budget cancels the runtime and persists a stable `event_budget_exceeded` failure. `ExcessiveStreamingTextFailsTurnWithinHostEventBudget` verifies the actual SDK fixture path. |
+| T04-R35 | Cancellation while acquiring the durable Running claim bypassed terminal persistence and left the turn nonterminal. | Claim cancellation now maps caller/host cancellation or deadline to a terminal outcome with bounded persistence, while duplicate-claim concurrency still propagates without changing the other engine's status. `CancellationDuringDurableClaimPersistsCancelledOutcome` holds a real SQLite write lock, cancels the claimant, then verifies a durable `TurnCancelled` outcome. |
 
 The T04-R1 through T04-R21 findings were raised against earlier PR revisions
 and fixed in follow-up commits. Their review threads were resolved after those
@@ -199,6 +201,18 @@ Follow-up validation for the T04-R26–R28 fixes:
   for this revision and must be established by the PR's CI coverage check.
   An additional focused collector attempt also hung before test discovery;
   the same test passes without collection.
+
+Follow-up validation for T04-R34–R35:
+
+- `tools/validate.sh build`: passed Release build and formatting with zero
+  warnings or errors.
+- Unit: 8/8 passed.
+- Integration: 75/75 passed.
+- `tools/validate.sh sdk-contracts`: pinned runtime harness passed; 15/15
+  actual SDK contract tests passed, including bounded-streaming and
+  claim-cancellation regressions.
+- `tools/validate.sh architecture`: 6/6 passed.
+- `tools/validate.sh docs`: internal Markdown links passed.
 
 ## Completion criteria
 

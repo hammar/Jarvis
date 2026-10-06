@@ -94,6 +94,60 @@ public sealed class CopilotAgentEngineContractTests
 
     [Fact]
     [Trait("Category", "SdkContract")]
+    public async Task CancellationDuringDurableClaimPersistsCancelledOutcome()
+    {
+        using var data = IsolatedDirectory.Create();
+        using var databaseFile = IsolatedDatabaseFile.Create();
+        var database = await CreateDatabaseAsync(databaseFile.Path);
+        var innerStore = new SqliteConversationStore(database, new TestClock());
+        var store = new ControlledTurnEventStore(innerStore)
+        {
+            TurnStatusUpdateStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously)
+        };
+        await using var provider = await FakeOpenAiProvider.StartAsync();
+        var engine = CreateEngine(store, provider.BaseUrl, provider.BaseUrl, Path.Combine(data.Path, "runtime"));
+        var turnId = await CreateTurnAsync(innerStore);
+        await using var blocker = await database.OpenConnectionAsync();
+        await using var heldTransaction = blocker.BeginTransaction(deferred: false);
+        using var cancellation = new CancellationTokenSource();
+        var run = CollectAsync(engine.RunTurnAsync(
+            CreateRequest(turnId, ProviderKind.Local, "cancel during claim"),
+            cancellation.Token));
+
+        await store.TurnStatusUpdateStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        cancellation.Cancel();
+        await heldTransaction.DisposeAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
+
+        Assert.Equal(TurnStatus.Cancelled, (await innerStore.GetTurnAsync(turnId, CancellationToken.None))?.Status);
+        var savedEvents = await innerStore.ReadTurnEventsAfterAsync(turnId, 0, 100, CancellationToken.None);
+        Assert.Equal(nameof(TurnCancelled), Assert.Single(savedEvents).EventType);
+        Assert.Equal(0, provider.RequestCount);
+    }
+
+    [Fact]
+    [Trait("Category", "SdkContract")]
+    public async Task ExcessiveStreamingTextFailsTurnWithinHostEventBudget()
+    {
+        using var data = IsolatedDirectory.Create();
+        using var databaseFile = IsolatedDatabaseFile.Create();
+        var store = new SqliteConversationStore(await CreateDatabaseAsync(databaseFile.Path), new TestClock());
+        await using var provider = await FakeOpenAiProvider.StartAsync();
+        provider.StreamingContent = new string('x', 1_000_001);
+        var engine = CreateEngine(store, provider.BaseUrl, provider.BaseUrl, Path.Combine(data.Path, "runtime"));
+        var turnId = await CreateTurnAsync(store);
+
+        var events = await CollectAsync(engine.RunTurnAsync(
+            CreateRequest(turnId, ProviderKind.Local, "event budget"),
+            CancellationToken.None));
+
+        Assert.Single(events.OfType<TurnFailed>(), item => item.ReasonCode == "event_budget_exceeded");
+        Assert.Equal(TurnStatus.Failed, (await store.GetTurnAsync(turnId, CancellationToken.None))?.Status);
+        Assert.DoesNotContain(events, item => item is TurnCompleted);
+    }
+
+    [Fact]
+    [Trait("Category", "SdkContract")]
     public async Task ActualRuntimeInvokesOnlyRegisteredToolAndForwardsHostOutcome()
     {
         using var data = IsolatedDirectory.Create();
@@ -586,8 +640,13 @@ public sealed class CopilotAgentEngineContractTests
             TurnStatus status,
             long expectedVersion,
             DateTimeOffset updatedAtUtc,
-            CancellationToken cancellationToken) =>
-            inner.UpdateTurnStatusAsync(turnId, status, expectedVersion, updatedAtUtc, cancellationToken);
+            CancellationToken cancellationToken)
+        {
+            TurnStatusUpdateStarted?.TrySetResult();
+            return inner.UpdateTurnStatusAsync(turnId, status, expectedVersion, updatedAtUtc, cancellationToken);
+        }
+
+        public TaskCompletionSource? TurnStatusUpdateStarted { get; set; }
 
         public ValueTask<PersistedTurnEvent> AppendTurnEventAsync(
             TurnId turnId,

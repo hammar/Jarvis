@@ -1,9 +1,12 @@
 using GitHub.Copilot;
+using PersonalAgent.Application;
 
 namespace PersonalAgent.Infrastructure.AgentEngine.Copilot;
 
 internal sealed class CopilotActiveTurn
 {
+    private const int MaximumPersistedEvents = 10_000;
+    private const int MaximumTextCharacters = 1_000_000;
     private readonly CancellationTokenSource stop = new();
     private readonly CancellationTokenSource eventStop = new();
     private readonly SemaphoreSlim abortGate = new(1, 1);
@@ -12,6 +15,8 @@ internal sealed class CopilotActiveTurn
     private CopilotSession? session;
     private CopilotClientShutdown? clientShutdown;
     private int toolCalls;
+    private int emittedEvents;
+    private int emittedTextCharacters;
     private bool cancelledByHost;
     private bool terminal;
     private string? failureCode;
@@ -80,6 +85,40 @@ internal sealed class CopilotActiveTurn
         Interlocked.CompareExchange(ref failureCode, "tool_budget_exceeded", null);
         stop.Cancel();
     }
+
+    public bool TryAcceptEvent(AgentEvent item)
+    {
+        var eventCount = Interlocked.Increment(ref emittedEvents);
+        if (eventCount > MaximumPersistedEvents)
+        {
+            FailForEventBudget();
+            return false;
+        }
+
+        if (item is TextDelta delta)
+        {
+            var textCharacters = Interlocked.Add(ref emittedTextCharacters, delta.Text.Length);
+            if (textCharacters > MaximumTextCharacters)
+            {
+                FailForEventBudget();
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    public void FailForEventBudget()
+    {
+        Interlocked.CompareExchange(ref failureCode, "event_budget_exceeded", null);
+        stop.Cancel();
+        eventStop.Cancel();
+    }
+
+    public CopilotTurnSignal GetFailureSignal() =>
+        FailureCode == "event_budget_exceeded"
+            ? CopilotTurnSignal.EventBudgetExceeded
+            : CopilotTurnSignal.ToolBudgetExceeded;
 
     public int IncrementToolCalls() => Interlocked.Increment(ref toolCalls);
 

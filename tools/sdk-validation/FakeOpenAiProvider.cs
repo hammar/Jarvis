@@ -27,6 +27,7 @@ internal sealed class FakeOpenAiProvider : IAsyncDisposable
     public bool RepeatTool { get; set; }
     public bool FailInference { get; set; }
     public bool StallInference { get; set; }
+    public string? StreamingContent { get; set; }
     public string? RedirectUrl { get; set; }
     public string? ExpectedToolResult { get; set; } = "fixture-result:fixture-key";
     public TaskCompletionSource InferenceStalled { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -154,7 +155,7 @@ internal sealed class FakeOpenAiProvider : IAsyncDisposable
         using var requestJson = JsonDocument.Parse(body);
         if (requestJson.RootElement.TryGetProperty("stream", out var stream) && stream.GetBoolean())
         {
-            await WriteStreamingResponseAsync(context.Response);
+            await WriteStreamingResponseAsync(context.Response, StreamingContent);
             return;
         }
 
@@ -183,19 +184,33 @@ internal sealed class FakeOpenAiProvider : IAsyncDisposable
         }));
     }
 
-    private static async Task WriteStreamingResponseAsync(HttpListenerResponse response)
+    private static async Task WriteStreamingResponseAsync(HttpListenerResponse response, string? contentOverride)
     {
         response.StatusCode = (int)HttpStatusCode.OK;
         response.ContentType = "text/event-stream";
         response.SendChunked = true;
         response.KeepAlive = false;
-        var chunks = new[]
+        var chunks = contentOverride is null
+            ? new[]
         {
             """data: {"id":"chatcmpl-stream","object":"chat.completion.chunk","created":0,"model":"fixture-model","choices":[{"index":0,"delta":{"role":"assistant","content":"streamed "},"finish_reason":null}]}""",
             """data: {"id":"chatcmpl-stream","object":"chat.completion.chunk","created":0,"model":"fixture-model","choices":[{"index":0,"delta":{"content":"fixture answer"},"finish_reason":null}]}""",
             """data: {"id":"chatcmpl-stream","object":"chat.completion.chunk","created":0,"model":"fixture-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}""",
             "data: [DONE]",
-        };
+        }
+            : new[]
+            {
+                $"data: {JsonSerializer.Serialize(new
+                {
+                    id = "chatcmpl-stream",
+                    @object = "chat.completion.chunk",
+                    created = 0,
+                    model = "fixture-model",
+                    choices = new[] { new { index = 0, delta = new { role = "assistant", content = contentOverride }, finish_reason = (string?)null } }
+                })}",
+                """data: {"id":"chatcmpl-stream","object":"chat.completion.chunk","created":0,"model":"fixture-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}""",
+                "data: [DONE]"
+            };
         foreach (var chunk in chunks)
         {
             var bytes = Encoding.UTF8.GetBytes(chunk + "\n\n");

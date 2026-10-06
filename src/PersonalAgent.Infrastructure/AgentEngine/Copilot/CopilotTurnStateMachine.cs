@@ -10,6 +10,7 @@ internal enum CopilotTurnSignal
     Completed,
     Cancelled,
     ToolBudgetExceeded,
+    EventBudgetExceeded,
     DeadlineExceeded,
     RuntimeCleanupFailed,
     Failed
@@ -84,6 +85,8 @@ internal sealed class CopilotTurnStateMachine(
                 (TurnStatus.Cancelled, new TurnCancelled(turnId, clock.UtcNow)),
             CopilotTurnSignal.ToolBudgetExceeded =>
                 (TurnStatus.Failed, new TurnFailed(turnId, clock.UtcNow, "tool_budget_exceeded")),
+            CopilotTurnSignal.EventBudgetExceeded =>
+                (TurnStatus.Failed, new TurnFailed(turnId, clock.UtcNow, "event_budget_exceeded")),
             CopilotTurnSignal.DeadlineExceeded =>
                 (TurnStatus.Interrupted, new TurnInterrupted(turnId, clock.UtcNow, "engine_deadline_exceeded")),
             CopilotTurnSignal.RuntimeCleanupFailed =>
