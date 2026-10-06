@@ -28,9 +28,11 @@ internal sealed class FakeOpenAiProvider : IAsyncDisposable
     public bool FailInference { get; set; }
     public bool StallInference { get; set; }
     public string? StreamingContent { get; set; }
+    public int StreamingDeltaCount { get; set; }
     public string? RedirectUrl { get; set; }
     public string? ExpectedToolResult { get; set; } = "fixture-result:fixture-key";
     public TaskCompletionSource InferenceStalled { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public TaskCompletionSource StreamingResponseWritten { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     public static Task<FakeOpenAiProvider> StartAsync()
     {
@@ -155,7 +157,7 @@ internal sealed class FakeOpenAiProvider : IAsyncDisposable
         using var requestJson = JsonDocument.Parse(body);
         if (requestJson.RootElement.TryGetProperty("stream", out var stream) && stream.GetBoolean())
         {
-            await WriteStreamingResponseAsync(context.Response, StreamingContent);
+            await WriteStreamingResponseAsync(context.Response, StreamingContent, StreamingDeltaCount);
             return;
         }
 
@@ -184,20 +186,36 @@ internal sealed class FakeOpenAiProvider : IAsyncDisposable
         }));
     }
 
-    private static async Task WriteStreamingResponseAsync(HttpListenerResponse response, string? contentOverride)
+    private async Task WriteStreamingResponseAsync(
+        HttpListenerResponse response,
+        string? contentOverride,
+        int deltaCount)
     {
         response.StatusCode = (int)HttpStatusCode.OK;
         response.ContentType = "text/event-stream";
         response.SendChunked = true;
         response.KeepAlive = false;
-        var chunks = contentOverride is null
+        var chunks = deltaCount > 0
+            ? Enumerable.Range(0, deltaCount)
+                .Select(_ => $"data: {JsonSerializer.Serialize(new
+                {
+                    id = "chatcmpl-stream",
+                    @object = "chat.completion.chunk",
+                    created = 0,
+                    model = "fixture-model",
+                    choices = new[] { new { index = 0, delta = new { content = "x" }, finish_reason = (string?)null } }
+                })}")
+                .Append("""data: {"id":"chatcmpl-stream","object":"chat.completion.chunk","created":0,"model":"fixture-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}""")
+                .Append("data: [DONE]")
+                .ToArray()
+            : contentOverride is null
             ? new[]
-        {
-            """data: {"id":"chatcmpl-stream","object":"chat.completion.chunk","created":0,"model":"fixture-model","choices":[{"index":0,"delta":{"role":"assistant","content":"streamed "},"finish_reason":null}]}""",
-            """data: {"id":"chatcmpl-stream","object":"chat.completion.chunk","created":0,"model":"fixture-model","choices":[{"index":0,"delta":{"content":"fixture answer"},"finish_reason":null}]}""",
-            """data: {"id":"chatcmpl-stream","object":"chat.completion.chunk","created":0,"model":"fixture-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}""",
-            "data: [DONE]",
-        }
+                {
+                    """data: {"id":"chatcmpl-stream","object":"chat.completion.chunk","created":0,"model":"fixture-model","choices":[{"index":0,"delta":{"role":"assistant","content":"streamed "},"finish_reason":null}]}""",
+                    """data: {"id":"chatcmpl-stream","object":"chat.completion.chunk","created":0,"model":"fixture-model","choices":[{"index":0,"delta":{"content":"fixture answer"},"finish_reason":null}]}""",
+                    """data: {"id":"chatcmpl-stream","object":"chat.completion.chunk","created":0,"model":"fixture-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}""",
+                    "data: [DONE]",
+                }
             : new[]
             {
                 $"data: {JsonSerializer.Serialize(new
@@ -218,6 +236,7 @@ internal sealed class FakeOpenAiProvider : IAsyncDisposable
             await response.OutputStream.FlushAsync();
         }
         response.Close();
+        StreamingResponseWritten.TrySetResult();
     }
 
     private static async Task WriteJsonAsync(HttpListenerResponse response, string json)

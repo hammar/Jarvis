@@ -127,6 +127,84 @@ public sealed class CopilotAgentEngineContractTests
 
     [Fact]
     [Trait("Category", "SdkContract")]
+    public async Task CancellationClaimCannotTerminalizeAConcurrentOwnersTurn()
+    {
+        using var data = IsolatedDirectory.Create();
+        using var databaseFile = IsolatedDatabaseFile.Create();
+        var database = await CreateDatabaseAsync(databaseFile.Path);
+        var innerStore = new SqliteConversationStore(database, new TestClock());
+        var store = new ControlledTurnEventStore(innerStore)
+        {
+            TurnStatusUpdateStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously),
+            ClaimCancellationOutcomeStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously),
+            AllowClaimCancellationOutcome = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously)
+        };
+        await using var provider = await FakeOpenAiProvider.StartAsync();
+        var engine = CreateEngine(store, provider.BaseUrl, provider.BaseUrl, Path.Combine(data.Path, "runtime"));
+        var turnId = await CreateTurnAsync(innerStore);
+        await using var blocker = await database.OpenConnectionAsync();
+        await using var heldTransaction = blocker.BeginTransaction(deferred: false);
+        using var cancellation = new CancellationTokenSource();
+        var run = CollectAsync(engine.RunTurnAsync(
+            CreateRequest(turnId, ProviderKind.Local, "competing claim"),
+            cancellation.Token));
+
+        await store.TurnStatusUpdateStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        cancellation.Cancel();
+        await heldTransaction.DisposeAsync();
+        await store.ClaimCancellationOutcomeStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        var competingClaim = await innerStore.GetTurnAsync(turnId, CancellationToken.None);
+        await innerStore.UpdateTurnStatusAsync(
+            turnId,
+            TurnStatus.Running,
+            competingClaim!.Version,
+            Now,
+            CancellationToken.None);
+        store.AllowClaimCancellationOutcome.TrySetResult();
+
+        await Assert.ThrowsAsync<PersistenceConcurrencyException>(() =>
+            run.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.Equal(TurnStatus.Running, (await innerStore.GetTurnAsync(turnId, CancellationToken.None))?.Status);
+        Assert.Empty(await innerStore.ReadTurnEventsAfterAsync(turnId, 0, 100, CancellationToken.None));
+        Assert.Equal(0, provider.RequestCount);
+    }
+
+    [Fact]
+    [Trait("Category", "SdkContract")]
+    public async Task DisposingConsumerDoesNotHangOnFullBoundedEventOutput()
+    {
+        using var data = IsolatedDirectory.Create();
+        using var databaseFile = IsolatedDatabaseFile.Create();
+        var store = new SqliteConversationStore(await CreateDatabaseAsync(databaseFile.Path), new TestClock());
+        await using var provider = await FakeOpenAiProvider.StartAsync();
+        provider.StreamingDeltaCount = 512;
+        var engine = CreateEngine(store, provider.BaseUrl, provider.BaseUrl, Path.Combine(data.Path, "runtime"));
+        var turnId = await CreateTurnAsync(store);
+        var iterator = engine.RunTurnAsync(
+            CreateRequest(turnId, ProviderKind.Local, "bounded output shutdown"),
+            CancellationToken.None).GetAsyncEnumerator();
+
+        try
+        {
+            Assert.True(await iterator.MoveNextAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(30)));
+            await provider.StreamingResponseWritten.Task.WaitAsync(TimeSpan.FromSeconds(30));
+            await iterator.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(15));
+        }
+        finally
+        {
+            await iterator.DisposeAsync();
+        }
+
+        var finalStatus = (await store.GetTurnAsync(turnId, CancellationToken.None))?.Status;
+        Assert.True(finalStatus is TurnStatus.Cancelled or TurnStatus.Failed or TurnStatus.Interrupted);
+        var persistedEvents = await store.ReadTurnEventsAfterAsync(turnId, 0, 1000, CancellationToken.None);
+        Assert.Single(persistedEvents, item =>
+            item.EventType is nameof(TurnCancelled) or nameof(TurnFailed) or nameof(TurnInterrupted));
+    }
+
+    [Fact]
+    [Trait("Category", "SdkContract")]
     public async Task ExcessiveStreamingTextFailsTurnWithinHostEventBudget()
     {
         using var data = IsolatedDirectory.Create();
@@ -647,6 +725,8 @@ public sealed class CopilotAgentEngineContractTests
         }
 
         public TaskCompletionSource? TurnStatusUpdateStarted { get; set; }
+        public TaskCompletionSource? ClaimCancellationOutcomeStarted { get; set; }
+        public TaskCompletionSource? AllowClaimCancellationOutcome { get; set; }
 
         public ValueTask<PersistedTurnEvent> AppendTurnEventAsync(
             TurnId turnId,
@@ -682,7 +762,7 @@ public sealed class CopilotAgentEngineContractTests
             CancellationToken cancellationToken) =>
             inner.ReadTurnEventsAfterAsync(turnId, afterSequence, maximumEvents, cancellationToken);
 
-        public ValueTask<PersistedTurnEvent> UpdateTurnStatusAndAppendEventAsync(
+        public async ValueTask<PersistedTurnEvent> UpdateTurnStatusAndAppendEventAsync(
             TurnId turnId,
             TurnStatus status,
             long expectedVersion,
@@ -690,8 +770,17 @@ public sealed class CopilotAgentEngineContractTests
             string eventType,
             string payloadJson,
             DateTimeOffset occurredAtUtc,
-            CancellationToken cancellationToken) =>
-            ((IAtomicTurnOutcomeStore)inner).UpdateTurnStatusAndAppendEventAsync(
+            CancellationToken cancellationToken)
+        {
+            if (eventType == nameof(TurnCancelled) &&
+                ClaimCancellationOutcomeStarted is { } started &&
+                AllowClaimCancellationOutcome is { } allow)
+            {
+                started.TrySetResult();
+                await allow.Task.WaitAsync(cancellationToken);
+            }
+
+            return await ((IAtomicTurnOutcomeStore)inner).UpdateTurnStatusAndAppendEventAsync(
                 turnId,
                 status,
                 expectedVersion,
@@ -700,6 +789,7 @@ public sealed class CopilotAgentEngineContractTests
                 payloadJson,
                 occurredAtUtc,
                 cancellationToken);
+        }
     }
 
     private sealed class RecordingDispatcher(ToolDispatchResult result) : IToolDispatcher

@@ -21,17 +21,26 @@ internal sealed class CopilotTurnStateMachine(
     IAtomicTurnOutcomeStore terminalOutcomes,
     IClock clock)
 {
+    public async Task<ConversationTurn> GetClaimCandidateAsync(TurnId turnId) =>
+        await conversations.GetTurnAsync(turnId, CancellationToken.None)
+            ?? throw new InvalidOperationException("The application turn does not exist.");
+
     public async Task EnsureRunningAsync(TurnId turnId, CancellationToken cancellationToken)
     {
         var turn = await conversations.GetTurnAsync(turnId, cancellationToken)
             ?? throw new InvalidOperationException("The application turn does not exist.");
+        await EnsureRunningAsync(turn, cancellationToken);
+    }
+
+    public async Task EnsureRunningAsync(ConversationTurn turn, CancellationToken cancellationToken)
+    {
         if (IsTerminal(turn.Status) || turn.Status == TurnStatus.Running)
         {
             throw new PersistenceConcurrencyException("The application turn is already claimed or terminal.");
         }
 
         await conversations.UpdateTurnStatusAsync(
-            turnId,
+            turn.Id,
             TurnStatus.Running,
             turn.Version,
             clock.UtcNow,
@@ -42,7 +51,8 @@ internal sealed class CopilotTurnStateMachine(
         TurnId turnId,
         TurnStatus status,
         AgentEvent terminalEvent,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        long? expectedVersion = null)
     {
         if (!IsTerminal(status))
         {
@@ -55,17 +65,23 @@ internal sealed class CopilotTurnStateMachine(
             throw new ArgumentException("The terminal event must belong to the updated turn.", nameof(terminalEvent));
         }
 
-        var turn = await conversations.GetTurnAsync(turnId, cancellationToken)
-            ?? throw new InvalidOperationException("The application turn does not exist.");
-        if (IsTerminal(turn.Status))
+        var version = expectedVersion;
+        if (version is null)
         {
-            throw new PersistenceConcurrencyException("The application turn is already terminal.");
+            var turn = await conversations.GetTurnAsync(turnId, cancellationToken)
+                ?? throw new InvalidOperationException("The application turn does not exist.");
+            if (IsTerminal(turn.Status))
+            {
+                throw new PersistenceConcurrencyException("The application turn is already terminal.");
+            }
+
+            version = turn.Version;
         }
 
         await terminalOutcomes.UpdateTurnStatusAndAppendEventAsync(
             turnId,
             status,
-            turn.Version,
+            version.Value,
             clock.UtcNow,
             terminalEvent.GetType().Name,
             JsonSerializer.Serialize(terminalEvent, terminalEvent.GetType()),

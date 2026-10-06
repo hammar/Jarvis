@@ -79,7 +79,13 @@ public sealed class CopilotAgentEngine : IAgentEngine
             AllowSynchronousContinuations = false,
             FullMode = BoundedChannelFullMode.Wait
         });
-        var execution = ExecuteTurnAsync(request, active, events.Writer, cancellationToken);
+        using var consumerStopped = new CancellationTokenSource();
+        var execution = ExecuteTurnAsync(
+            request,
+            active,
+            events.Writer,
+            cancellationToken,
+            consumerStopped.Token);
         try
         {
             await foreach (var item in events.Reader.ReadAllAsync(cancellationToken))
@@ -91,6 +97,7 @@ public sealed class CopilotAgentEngine : IAgentEngine
         {
             if (!execution.IsCompleted)
             {
+                consumerStopped.Cancel();
                 active.CancelByCaller();
             }
 
@@ -126,7 +133,8 @@ public sealed class CopilotAgentEngine : IAgentEngine
         AgentTurnRequest request,
         CopilotActiveTurn active,
         ChannelWriter<AgentEvent> output,
-        CancellationToken callerToken)
+        CancellationToken callerToken,
+        CancellationToken consumerStoppedToken)
     {
         using var deadline = new CancellationTokenSource(request.Deadline);
         using var turnCancellation = CancellationTokenSource.CreateLinkedTokenSource(
@@ -138,30 +146,39 @@ public sealed class CopilotAgentEngine : IAgentEngine
             deadline.Token,
             active.EventCancellationToken);
 
+        var claimCandidate = await stateMachine.GetClaimCandidateAsync(request.TurnId);
         try
         {
-            await stateMachine.EnsureRunningAsync(request.TurnId, turnCancellation.Token);
+            await stateMachine.EnsureRunningAsync(claimCandidate, turnCancellation.Token);
         }
         catch (OperationCanceledException) when (
             callerToken.IsCancellationRequested || active.CancelledByHost || deadline.IsCancellationRequested)
         {
-            active.MarkTerminal();
-            var signal = CopilotActiveTurn.SelectCompletedSignal(
-                false,
-                callerToken.IsCancellationRequested || active.CancelledByHost,
-                deadline.IsCancellationRequested);
-            var (status, claimCancellationEvent) = CopilotTurnStateMachine.CreateTerminalOutcome(
-                request.TurnId,
-                clock,
-                signal);
-            using var terminalPersistence = new CancellationTokenSource(TerminalPersistenceTimeout);
-            await stateMachine.SetTerminalOutcomeAsync(
-                request.TurnId,
-                status,
-                claimCancellationEvent,
-                terminalPersistence.Token);
-            output.TryWrite(claimCancellationEvent);
-            output.TryComplete();
+            try
+            {
+                active.MarkTerminal();
+                var signal = CopilotActiveTurn.SelectCompletedSignal(
+                    false,
+                    callerToken.IsCancellationRequested || active.CancelledByHost,
+                    deadline.IsCancellationRequested);
+                var (status, claimCancellationEvent) = CopilotTurnStateMachine.CreateTerminalOutcome(
+                    request.TurnId,
+                    clock,
+                    signal);
+                using var terminalPersistence = new CancellationTokenSource(TerminalPersistenceTimeout);
+                await stateMachine.SetTerminalOutcomeAsync(
+                    request.TurnId,
+                    status,
+                    claimCancellationEvent,
+                    terminalPersistence.Token,
+                    claimCandidate.Version);
+                output.TryWrite(claimCancellationEvent);
+            }
+            finally
+            {
+                output.TryComplete();
+            }
+
             return;
         }
         catch (OperationCanceledException)
@@ -299,7 +316,23 @@ public sealed class CopilotAgentEngine : IAgentEngine
                 terminalStatus,
                 terminalEvent,
                 terminalPersistence.Token);
-            await output.WriteAsync(terminalEvent, CancellationToken.None);
+            using var deliveryTimeout = new CancellationTokenSource(TerminalPersistenceTimeout);
+            using var deliveryCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+                callerToken,
+                consumerStoppedToken,
+                deliveryTimeout.Token);
+            try
+            {
+                await output.WriteAsync(terminalEvent, deliveryCancellation.Token);
+            }
+            catch (OperationCanceledException) when (consumerStoppedToken.IsCancellationRequested)
+            {
+            }
+            catch (OperationCanceledException) when (deliveryTimeout.IsCancellationRequested)
+            {
+                throw new TimeoutException(
+                    "The terminal outcome was persisted, but bounded event-stream delivery timed out.");
+            }
         }
         finally
         {

@@ -109,9 +109,12 @@ Observed-event and caller-output channels are bounded to 128 events each, and
 each turn accepts at most 10,000 events and 1,000,000 streamed UTF-16 code
 units. Reaching either the channel capacity or turn event budget cancels the
 runtime and persists an `event_budget_exceeded` failure rather than dropping
-text silently. Cancellation or deadline expiry while acquiring the durable
-turn claim also persists a terminal outcome; a duplicate claim does not alter
-the active owner's turn.
+text silently. Terminal outcomes are persisted before publishing to the caller;
+if the caller stops reading, delivery is cancelled without blocking turn
+shutdown, and the durable event remains available for replay. A slow reader
+cannot block terminal delivery indefinitely. Cancellation or deadline expiry
+while acquiring the durable turn claim also persists a terminal outcome using
+the pre-claim version, so a competing engine's claim cannot be overwritten.
 The per-turn runtime/workspace directory is removed after bounded runtime
 shutdown; a removal failure is surfaced as cleanup uncertainty. Terminal
 outcome persistence has its own bounded timeout so turn cancellation does not

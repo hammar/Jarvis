@@ -164,6 +164,9 @@ Initial pre-PR worktree review findings and dispositions:
 | T04-R33 | SQLite's configured busy timeout and the retry deadline could be interpreted in mismatched units. | The explicit busy `SqliteException` now preserves both SQLite error codes, ensuring callers still receive the correct busy classification after the overall retry bound. The bounded-lock integration test and Release build pass. |
 | T04-R34 | Provider-controlled text deltas could accumulate without limit in the unbounded SDK-event and caller-output channels. | Both channels now have bounded capacity with backpressure; each turn also caps persisted events at 10,000 and streamed text at 1,000,000 UTF-16 code units. Exceeding capacity/budget cancels the runtime and persists a stable `event_budget_exceeded` failure. `ExcessiveStreamingTextFailsTurnWithinHostEventBudget` verifies the actual SDK fixture path. |
 | T04-R35 | Cancellation while acquiring the durable Running claim bypassed terminal persistence and left the turn nonterminal. | Claim cancellation now maps caller/host cancellation or deadline to a terminal outcome with bounded persistence, while duplicate-claim concurrency still propagates without changing the other engine's status. `CancellationDuringDurableClaimPersistsCancelledOutcome` holds a real SQLite write lock, cancels the claimant, then verifies a durable `TurnCancelled` outcome. |
+| T04-R36 | Claim cancellation could re-read and terminalize a turn after a competing engine had claimed it. | Cancellation terminal persistence now compares against the version observed before this claim attempt; a stale version propagates as `PersistenceConcurrencyException`. `CancellationClaimCannotTerminalizeAConcurrentOwnersTurn` interleaves a competing claim between cancellation and terminal persistence and verifies the active `Running` state is preserved with no terminal event or provider request. |
+| T04-R37 | Previously missed summary-only finding: terminal output could wait indefinitely when a bounded caller channel was full and its reader stopped. | Terminal publication now has bounded delivery and a distinct consumer-stopped cancellation signal. The durable terminal event is committed first; stopping the reader cancels delivery without blocking turn shutdown. `DisposingConsumerDoesNotHangOnFullBoundedEventOutput` drives more deltas than the bounded channels can hold, then disposes the reader and verifies bounded completion and one persisted terminal event. |
+| T04-R38 | The latest validation section reported 75 integration tests despite the successful CI run discovering 77. | The handoff now distinguishes the local 75-test standalone integration run from the coverage-enabled CI integration job on `093e5df` (`37401496134`), which passed 77/77 including the two linked runtime contracts. The current worktree's standalone integration run discovers 79/79 after the two new regression cases. |
 
 The T04-R1 through T04-R21 findings were raised against earlier PR revisions
 and fixed in follow-up commits. Their review threads were resolved after those
@@ -213,6 +216,24 @@ Follow-up validation for T04-R34–R35:
   claim-cancellation regressions.
 - `tools/validate.sh architecture`: 6/6 passed.
 - `tools/validate.sh docs`: internal Markdown links passed.
+
+Follow-up validation for T04-R36–R38:
+
+- `tools/validate.sh sdk-contracts`: actual pinned runtime validation passed;
+  17/17 SDK contract tests passed, including the competing-claim race and
+  bounded-output shutdown regressions.
+- `tools/validate.sh build`: Release build and formatting passed with zero
+  warnings or errors; `tools/validate.sh architecture`: 6/6 passed;
+  `tools/validate.sh docs`: internal Markdown links passed; standalone unit
+  tests passed 8/8.
+- `dotnet test tests/PersonalAgent.IntegrationTests/PersonalAgent.IntegrationTests.csproj
+  -c Release --no-restore --filter Category=Integration --logger
+  'console;verbosity=minimal'`: 79/79 passed without coverage collection.
+- Coverage-enabled `tools/validate.sh unit` and `tools/validate.sh integration`
+  hung before test-host discovery in local VSTest/collector startup and were
+  stopped. Local coverage for these latest changes remains unverified and
+  requires current PR CI. The successful prior CI evidence is pinned to
+  `093e5df`, not this worktree revision.
 
 ## Completion criteria
 
