@@ -35,8 +35,8 @@ public sealed class SqliteConversationStore : IConversationStore, IAtomicTurnOut
         var createdAtUtc = message.CreatedAtUtc.ToUniversalTime();
         var createdAt = SqliteValue.Utc(createdAtUtc);
         var updatedAt = SqliteValue.Utc(clock.UtcNow < createdAtUtc ? createdAtUtc : clock.UtcNow);
-        await using var connection = await database.OpenConnectionAsync(cancellationToken);
-        await using var transaction = connection.BeginTransaction(deferred: false);
+        await using var connection = await database.OpenConnectionWithDefaultTimeoutAsync(1, cancellationToken);
+        await using var transaction = await SqliteDatabase.BeginImmediateTransactionAsync(connection, cancellationToken);
 
         await using (var conversation = connection.CreateCommand())
         {
@@ -139,8 +139,8 @@ public sealed class SqliteConversationStore : IConversationStore, IAtomicTurnOut
         }
 
         var created = SqliteValue.Utc(createdAtUtc);
-        await using var connection = await database.OpenConnectionAsync(cancellationToken);
-        await using var transaction = connection.BeginTransaction(deferred: false);
+        await using var connection = await database.OpenConnectionWithDefaultTimeoutAsync(1, cancellationToken);
+        await using var transaction = await SqliteDatabase.BeginImmediateTransactionAsync(connection, cancellationToken);
         await using (var conversation = connection.CreateCommand())
         {
             conversation.Transaction = transaction;
@@ -240,8 +240,8 @@ public sealed class SqliteConversationStore : IConversationStore, IAtomicTurnOut
             throw new ArgumentOutOfRangeException(nameof(expectedVersion));
         }
 
-        await using var connection = await database.OpenConnectionAsync(cancellationToken);
-        await using var transaction = connection.BeginTransaction(deferred: false);
+        await using var connection = await database.OpenConnectionWithDefaultTimeoutAsync(1, cancellationToken);
+        await using var transaction = await SqliteDatabase.BeginImmediateTransactionAsync(connection, cancellationToken);
         await using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = """
@@ -311,8 +311,8 @@ public sealed class SqliteConversationStore : IConversationStore, IAtomicTurnOut
         CancellationToken cancellationToken)
     {
         ValidateTurnEvent(eventType, payloadJson);
-        await using var connection = await database.OpenConnectionAsync(cancellationToken);
-        await using var transaction = connection.BeginTransaction(deferred: false);
+        await using var connection = await database.OpenConnectionWithDefaultTimeoutAsync(1, cancellationToken);
+        await using var transaction = await SqliteDatabase.BeginImmediateTransactionAsync(connection, cancellationToken);
         var persisted = await AppendTurnEventAsync(
             connection,
             transaction,
@@ -347,8 +347,8 @@ public sealed class SqliteConversationStore : IConversationStore, IAtomicTurnOut
         }
 
         ValidateTurnEvent(eventType, payloadJson);
-        await using var connection = await database.OpenConnectionAsync(cancellationToken);
-        await using var transaction = connection.BeginTransaction(deferred: false);
+        await using var connection = await database.OpenConnectionWithDefaultTimeoutAsync(1, cancellationToken);
+        await using var transaction = await SqliteDatabase.BeginImmediateTransactionAsync(connection, cancellationToken);
         await using (var update = connection.CreateCommand())
         {
             update.Transaction = transaction;

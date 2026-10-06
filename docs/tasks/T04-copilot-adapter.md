@@ -150,10 +150,29 @@ Initial pre-PR worktree review findings and dispositions:
 | T04-R19 | Combining base, index, and worktree diffs could use inconsistent line-number coordinates after insertions. | Changed-line discovery now finds the merge base and runs one diff from that base directly to the current worktree, then adds untracked sources. The self-test inserts lines before tracked PR edits and asserts their final worktree line coordinates; the coverage gate passed at 600/630 changed executable lines. |
 | T04-R20 | A timed-out SDK force-stop could race with disposal and a later duplicate cleanup attempt. | Client force-stop and disposal now share one in-flight shutdown task. Disposal starts only after force-stop finishes, retries join the existing task, and runtime directory removal is withheld unless shutdown completed. Bounded regressions verify one stop, no premature disposal, eventual disposal, session-abort timeout fallback, and cleanup-failure disposal; critical coverage passes. |
 | T04-R21 | Deadline enforcement lacked a runtime-level regression against an actually stalled provider. | The controlled fake provider can stall inference; the SDK contract verifies the deadline cancels the call, returns one `engine_deadline_exceeded` interruption, persists it, and removes the per-turn runtime directory within the bounded test deadline. |
+| T04-R22 | Separate engine instances could both execute a turn already persisted as `Running`. | `EnsureRunningAsync` now rejects an already-running status and always performs the version-checked transition; concurrent claims from separate state-machine instances are covered by `ConcurrentEngineClaimRejectsTurnAlreadyMarkedRunning`. |
+| T04-R23 | The terminal persistence timeout included time spent draining the event pump. | The dedicated timeout now starts immediately before the atomic terminal persistence call, after event draining and outcome classification. |
+| T04-R24 | Event persistence could ignore cancellation while synchronously waiting for SQLite's write lock. | The event store opens a connection with a one-second SQLite lock timeout and retries immediate-transaction acquisition with cancellation checks between attempts. `EventAppendHonorsCancellationWhileWaitingForImmediateWriteLock` holds a writer lock and verifies cancellation is observed within two seconds without persisting an event. |
+| T04-R25 | Terminal status/event persistence could ignore cancellation while synchronously waiting for SQLite's write lock. | Terminal outcome writes use the same one-second lock timeout and cancellation-aware immediate transaction acquisition. `TerminalOutcomeHonorsCancellationWhileWaitingForImmediateWriteLock` verifies cancellation within two seconds leaves both status and event unchanged. |
 
-These findings were raised against the PR commit and fixed in the follow-up
-revision. Final validation results are recorded above; the review threads are
-resolved with replies after the fixes were committed and pushed.
+The T04-R1 through T04-R21 findings were raised against earlier PR revisions
+and fixed in follow-up commits. Their review threads were resolved after those
+commits were pushed.
+
+Follow-up validation after T04-R22–R25:
+
+- `tools/validate.sh build`: passed Release build and format verification with
+  zero warnings or errors.
+- `tools/validate.sh unit`: 8/8 passed.
+- `tools/validate.sh integration`: 73/73 passed, including both held-writer
+  cancellation regressions and the simultaneous engine-claim regression.
+- `tools/validate.sh sdk-contracts`: pinned runtime harness passed; 12/12
+  actual SDK contract tests passed.
+- `tools/validate.sh architecture`: 6/6 passed.
+- `tools/validate.sh coverage`: passed; changed executable lines 618/650
+  (95.1%); Infrastructure 1798/1945 lines (92.4%) and 448/579 branches
+  (77.4%).
+- `tools/validate.sh docs`: internal Markdown link validation passed.
 
 ## Completion criteria
 

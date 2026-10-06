@@ -34,7 +34,8 @@ public sealed class CopilotTurnStateMachineTests
         Assert.Equal(TurnStatus.Received, (await store.GetTurnAsync(turnId, CancellationToken.None))?.Status);
 
         await machine.EnsureRunningAsync(turnId, CancellationToken.None);
-        await machine.EnsureRunningAsync(turnId, CancellationToken.None);
+        await Assert.ThrowsAsync<PersistenceConcurrencyException>(
+            () => machine.EnsureRunningAsync(turnId, CancellationToken.None));
         await machine.SetTerminalOutcomeAsync(
             turnId,
             TurnStatus.Completed,
@@ -97,6 +98,28 @@ public sealed class CopilotTurnStateMachineTests
                 CancellationToken.None));
         Assert.Equal(TurnStatus.Completed, (await store.GetTurnAsync(turnId, CancellationToken.None))?.Status);
         Assert.Single(await store.ReadTurnEventsAfterAsync(turnId, 0, 10, CancellationToken.None));
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task ConcurrentEngineClaimRejectsTurnAlreadyMarkedRunning()
+    {
+        using var databaseFile = IsolatedDatabaseFile.Create();
+        var database = new SqliteDatabase(databaseFile.Path);
+        await database.InitializeAsync();
+        var store = new SqliteConversationStore(database, new TestClock());
+        var turnId = TurnId.New();
+        await store.CreateTurnAsync(turnId, ConversationId.New(), TurnStatus.Received, Now, CancellationToken.None);
+        var firstEngineState = new CopilotTurnStateMachine(store, store, new TestClock());
+        var secondEngineState = new CopilotTurnStateMachine(store, store, new TestClock());
+
+        var claims = await Task.WhenAll(
+            TryClaimAsync(firstEngineState, turnId),
+            TryClaimAsync(secondEngineState, turnId));
+
+        Assert.Single(claims, claimed => claimed);
+        Assert.Single(claims, claimed => !claimed);
+        Assert.Equal(TurnStatus.Running, (await store.GetTurnAsync(turnId, CancellationToken.None))?.Status);
     }
 
     [Fact]
@@ -302,6 +325,59 @@ public sealed class CopilotTurnStateMachineTests
 
     [Fact]
     [Trait("Category", "Integration")]
+    public async Task EventAppendHonorsCancellationWhileWaitingForImmediateWriteLock()
+    {
+        using var databaseFile = IsolatedDatabaseFile.Create();
+        var database = new SqliteDatabase(databaseFile.Path);
+        await database.InitializeAsync();
+        var store = new SqliteConversationStore(database, new TestClock());
+        var turnId = TurnId.New();
+        await store.CreateTurnAsync(turnId, ConversationId.New(), TurnStatus.Received, Now, CancellationToken.None);
+        await using var blocker = await database.OpenConnectionAsync();
+        await using var heldTransaction = blocker.BeginTransaction(deferred: false);
+        using var deadline = new CancellationTokenSource(TimeSpan.FromMilliseconds(200));
+        var elapsed = System.Diagnostics.Stopwatch.StartNew();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            store.AppendTurnEventAsync(turnId, "test.event", "{}", Now, deadline.Token).AsTask());
+
+        Assert.True(elapsed.Elapsed < TimeSpan.FromSeconds(2), $"Lock wait ignored cancellation for {elapsed.Elapsed}.");
+        Assert.Empty(await store.ReadTurnEventsAfterAsync(turnId, 0, 10, CancellationToken.None));
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task TerminalOutcomeHonorsCancellationWhileWaitingForImmediateWriteLock()
+    {
+        using var databaseFile = IsolatedDatabaseFile.Create();
+        var database = new SqliteDatabase(databaseFile.Path);
+        await database.InitializeAsync();
+        var store = new SqliteConversationStore(database, new TestClock());
+        var turnId = TurnId.New();
+        await store.CreateTurnAsync(turnId, ConversationId.New(), TurnStatus.Running, Now, CancellationToken.None);
+        await using var blocker = await database.OpenConnectionAsync();
+        await using var heldTransaction = blocker.BeginTransaction(deferred: false);
+        using var deadline = new CancellationTokenSource(TimeSpan.FromMilliseconds(200));
+        var elapsed = System.Diagnostics.Stopwatch.StartNew();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            store.UpdateTurnStatusAndAppendEventAsync(
+                turnId,
+                TurnStatus.Interrupted,
+                1,
+                Now,
+                nameof(TurnInterrupted),
+                """{"reasonCode":"engine_deadline_exceeded"}""",
+                Now,
+                deadline.Token).AsTask());
+
+        Assert.True(elapsed.Elapsed < TimeSpan.FromSeconds(2), $"Lock wait ignored cancellation for {elapsed.Elapsed}.");
+        Assert.Equal(TurnStatus.Running, (await store.GetTurnAsync(turnId, CancellationToken.None))?.Status);
+        Assert.Empty(await store.ReadTurnEventsAfterAsync(turnId, 0, 10, CancellationToken.None));
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
     public async Task ActiveTurnCancellationAndBudgetTransitionsAreHostControlled()
     {
         var active = new CopilotActiveTurn(2);
@@ -358,5 +434,18 @@ public sealed class CopilotTurnStateMachineTests
     private sealed class TestClock : IClock
     {
         public DateTimeOffset UtcNow => Now;
+    }
+
+    private static async Task<bool> TryClaimAsync(CopilotTurnStateMachine machine, TurnId turnId)
+    {
+        try
+        {
+            await machine.EnsureRunningAsync(turnId, CancellationToken.None);
+            return true;
+        }
+        catch (PersistenceConcurrencyException)
+        {
+            return false;
+        }
     }
 }

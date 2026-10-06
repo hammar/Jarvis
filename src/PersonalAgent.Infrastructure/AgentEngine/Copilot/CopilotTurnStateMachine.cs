@@ -24,20 +24,17 @@ internal sealed class CopilotTurnStateMachine(
     {
         var turn = await conversations.GetTurnAsync(turnId, cancellationToken)
             ?? throw new InvalidOperationException("The application turn does not exist.");
-        if (IsTerminal(turn.Status))
+        if (IsTerminal(turn.Status) || turn.Status == TurnStatus.Running)
         {
-            throw new PersistenceConcurrencyException("The application turn is already terminal.");
+            throw new PersistenceConcurrencyException("The application turn is already claimed or terminal.");
         }
 
-        if (turn.Status != TurnStatus.Running)
-        {
-            await conversations.UpdateTurnStatusAsync(
-                turnId,
-                TurnStatus.Running,
-                turn.Version,
-                clock.UtcNow,
-                cancellationToken);
-        }
+        await conversations.UpdateTurnStatusAsync(
+            turnId,
+            TurnStatus.Running,
+            turn.Version,
+            clock.UtcNow,
+            cancellationToken);
     }
 
     public async Task SetTerminalOutcomeAsync(

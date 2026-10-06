@@ -209,7 +209,6 @@ public sealed class CopilotAgentEngine : IAgentEngine
                 GetFailureSignal(exception));
         }
 
-        using var terminalPersistence = new CancellationTokenSource(TerminalPersistenceTimeout);
         try
         {
             observed.Writer.TryComplete();
@@ -246,6 +245,7 @@ public sealed class CopilotAgentEngine : IAgentEngine
                     signal);
             }
 
+            using var terminalPersistence = new CancellationTokenSource(TerminalPersistenceTimeout);
             await stateMachine.SetTerminalOutcomeAsync(
                 request.TurnId,
                 terminalStatus,
