@@ -103,12 +103,12 @@ Application contract is unchanged.
   build with nullable enabled and zero warnings/errors.
 - `tools/validate.sh architecture`: 6/6 tests passed.
 - `tools/validate.sh unit`: 8/8 discovered tests passed.
-- `tools/validate.sh integration`: 65/65 discovered tests passed.
+- `tools/validate.sh integration`: 70/70 discovered tests passed.
 - `tools/validate.sh sdk-contracts`: pinned SDK/runtime validation harness
-  passed; 10/10 adapter SDK contract tests passed.
+  passed; 12/12 adapter SDK contract tests passed.
 - `tools/validate.sh coverage`: passed using the `origin/main...HEAD`
   merge-base comparison plus tracked worktree changes. Changed executable
-  lines 510/549 (92.9%); Infrastructure 1714/1868 lines (91.8%) and 438/563
+  lines 600/630 (95.2%); Infrastructure 1788/1933 lines (92.5%) and 455/585
   branches (77.8%).
   The gate enforces 95% line / 90% branch
   thresholds for both the terminal state machine and active-turn cancellation
@@ -146,6 +146,10 @@ Initial pre-PR worktree review findings and dispositions:
 | T04-R15 | Per-turn SDK runtime/workspace directories accumulated because production never removed them. | Runtime cleanup now deletes the turn directory after disposing session/client resources, attempts deletion after earlier cleanup failures, and classifies deletion failures as cleanup interruption. Integration tests verify cleanup ordering, removal, and failure aggregation. |
 | T04-R16 | A nonterminal event-persistence failure faulted the event pump before terminal persistence, potentially leaving a turn `Running`. | The pump now cancels/aborts the active runtime and returns the persistence failure to terminal handling, which records `Interrupted` with a safe reason code through the bounded atomic outcome path. The actual-runtime SDK contract injects the first event append failure and verifies the durable interrupted status/event; all 10 SDK contracts passed. |
 | T04-R17 | Local changed-line coverage omitted tracked staged and unstaged edits when a base ref was configured. | The validator now merges the PR merge-base diff with staged and unstaged tracked source diffs, plus untracked sources. Its gate self-test creates a temporary git repo with both a committed PR edit and a tracked worktree edit and requires both changed lines; the full coverage gate passed at 510/549 changed executable lines. |
+| T04-R18 | Event persistence ignored the turn deadline and could wait beyond the turn budget. | The event pump now reads and persists with a token linked to caller, host cancellation, and deadline, but separate from tool-budget SDK stop. Expected cancellation is classified from its actual signal rather than as a persistence failure. Real-runtime regressions cover both a stalled provider and a blocked event append, each producing one durable deadline interruption; both pass in the 12/12 SDK contract suite. |
+| T04-R19 | Combining base, index, and worktree diffs could use inconsistent line-number coordinates after insertions. | Changed-line discovery now finds the merge base and runs one diff from that base directly to the current worktree, then adds untracked sources. The self-test inserts lines before tracked PR edits and asserts their final worktree line coordinates; the coverage gate passed at 600/630 changed executable lines. |
+| T04-R20 | A timed-out SDK force-stop could race with disposal and a later duplicate cleanup attempt. | Client force-stop and disposal now share one in-flight shutdown task. Disposal starts only after force-stop finishes, retries join the existing task, and runtime directory removal is withheld unless shutdown completed. Bounded regressions verify one stop, no premature disposal, eventual disposal, session-abort timeout fallback, and cleanup-failure disposal; critical coverage passes. |
+| T04-R21 | Deadline enforcement lacked a runtime-level regression against an actually stalled provider. | The controlled fake provider can stall inference; the SDK contract verifies the deadline cancels the call, returns one `engine_deadline_exceeded` interruption, persists it, and removes the per-turn runtime directory within the bounded test deadline. |
 
 These findings were raised against the PR commit and fixed in the follow-up
 revision. Final validation results are recorded above; the review threads are

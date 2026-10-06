@@ -26,8 +26,10 @@ internal sealed class FakeOpenAiProvider : IAsyncDisposable
     public string RequestedTool { get; set; } = "read_only_lookup";
     public bool RepeatTool { get; set; }
     public bool FailInference { get; set; }
+    public bool StallInference { get; set; }
     public string? RedirectUrl { get; set; }
     public string? ExpectedToolResult { get; set; } = "fixture-result:fixture-key";
+    public TaskCompletionSource InferenceStalled { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     public static Task<FakeOpenAiProvider> StartAsync()
     {
@@ -113,6 +115,21 @@ internal sealed class FakeOpenAiProvider : IAsyncDisposable
             var error = Encoding.UTF8.GetBytes("""{"error":{"message":"Controlled provider refusal","type":"invalid_request_error"}}""");
             context.Response.ContentLength64 = error.Length;
             await context.Response.OutputStream.WriteAsync(error);
+            context.Response.Close();
+            return;
+        }
+
+        if (StallInference)
+        {
+            InferenceStalled.TrySetResult();
+            try
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, _shutdown.Token);
+            }
+            catch (OperationCanceledException) when (_shutdown.IsCancellationRequested)
+            {
+            }
+
             context.Response.Close();
             return;
         }

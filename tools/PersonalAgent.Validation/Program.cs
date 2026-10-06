@@ -603,14 +603,10 @@ internal static class CoverageGate
         var baseRef = Environment.GetEnvironmentVariable("GITHUB_BASE_REF");
         var eventName = Environment.GetEnvironmentVariable("GITHUB_EVENT_NAME");
         var comparison = !string.IsNullOrWhiteSpace(baseRef)
-            ? $"origin/{baseRef}...HEAD"
-            : eventName == "push" ? "HEAD^...HEAD" : "HEAD";
+            ? RunGit(root, ["merge-base", $"origin/{baseRef}", "HEAD"]).Trim()
+            : eventName == "push" ? "HEAD^" : "HEAD";
         var diff = RunGit(root, ["diff", "--no-ext-diff", "--unified=0", comparison, "--", "src"]);
         ParseAddedLines(root, diff, changed);
-        var stagedDiff = RunGit(root, ["diff", "--cached", "--no-ext-diff", "--unified=0", "HEAD", "--", "src"]);
-        ParseAddedLines(root, stagedDiff, changed);
-        var worktreeDiff = RunGit(root, ["diff", "--no-ext-diff", "--unified=0", "HEAD", "--", "src"]);
-        ParseAddedLines(root, worktreeDiff, changed);
         var untracked = RunGit(root, ["ls-files", "--others", "--exclude-standard", "--", "src"]);
         foreach (var relativePath in untracked.Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries))
         {
@@ -645,7 +641,7 @@ internal static class CoverageGate
                 namespace Fixture;
                 public sealed class CoverageFixture
                 {
-                    public void CommittedChange() { }
+                    public void Existing() { }
                     public void TrackedWorktreeChange() { }
                 }
                 """);
@@ -661,7 +657,8 @@ internal static class CoverageGate
                 namespace Fixture;
                 public sealed class CoverageFixture
                 {
-                    public void CommittedChange(int value) { }
+                    public void CommittedChange() { }
+                    public void Existing() { }
                     public void TrackedWorktreeChange() { }
                 }
                 """);
@@ -673,8 +670,10 @@ internal static class CoverageGate
                 namespace Fixture;
                 public sealed class CoverageFixture
                 {
-                    public void CommittedChange(int value) { }
-                    public void TrackedWorktreeChange(int value) { }
+                    public void WorktreeInserted() { }
+                    public void CommittedChange() { }
+                    public void Existing() { }
+                    public void TrackedWorktreeChange() { }
                 }
                 """);
 
@@ -688,7 +687,7 @@ internal static class CoverageGate
                     || !changes.Contains(new CoverageLine(absolutePath, 5)))
                 {
                     throw new ValidationException(
-                        "Changed-line discovery omitted committed or tracked worktree source edits.");
+                        "Changed-line discovery omitted a committed or tracked worktree source edit after line insertion.");
                 }
             }
             finally

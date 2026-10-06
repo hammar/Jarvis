@@ -168,7 +168,7 @@ public sealed class CopilotAgentEngineContractTests
         using var data = IsolatedDirectory.Create();
         using var databaseFile = IsolatedDatabaseFile.Create();
         var store = new SqliteConversationStore(await CreateDatabaseAsync(databaseFile.Path), new TestClock());
-        var failingStore = new FailFirstTurnEventStore(store);
+        var failingStore = new ControlledTurnEventStore(store);
         await using var provider = await FakeOpenAiProvider.StartAsync();
         var engine = CreateEngine(
             failingStore,
@@ -186,6 +186,65 @@ public sealed class CopilotAgentEngineContractTests
         Assert.Equal(TurnStatus.Interrupted, (await store.GetTurnAsync(turnId, CancellationToken.None))?.Status);
         var persisted = await store.ReadTurnEventsAfterAsync(turnId, 0, 1000, CancellationToken.None);
         Assert.Equal(nameof(TurnInterrupted), Assert.Single(persisted).EventType);
+    }
+
+    [Fact]
+    [Trait("Category", "SdkContract")]
+    public async Task DeadlineBoundsBlockedEventPersistenceWithoutMisclassifyingCancellation()
+    {
+        using var data = IsolatedDirectory.Create();
+        using var databaseFile = IsolatedDatabaseFile.Create();
+        var store = new SqliteConversationStore(await CreateDatabaseAsync(databaseFile.Path), new TestClock());
+        var blockingStore = new ControlledTurnEventStore(store, blockFirstAppendUntilCancelled: true);
+        await using var provider = await FakeOpenAiProvider.StartAsync();
+        var engine = CreateEngine(
+            blockingStore,
+            provider.BaseUrl,
+            provider.BaseUrl,
+            Path.Combine(data.Path, "runtime"));
+        var turnId = await CreateTurnAsync(store);
+
+        var events = await CollectAsync(engine.RunTurnAsync(
+            CreateRequest(turnId, ProviderKind.Local, "event persistence deadline", deadline: TimeSpan.FromSeconds(2)),
+            CancellationToken.None)).WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Equal("engine_deadline_exceeded", Assert.Single(events.OfType<TurnInterrupted>()).ReasonCode);
+        Assert.Equal(TurnStatus.Interrupted, (await store.GetTurnAsync(turnId, CancellationToken.None))?.Status);
+        var persisted = await store.ReadTurnEventsAfterAsync(turnId, 0, 1000, CancellationToken.None);
+        Assert.Equal(
+            nameof(TurnInterrupted),
+            Assert.Single(persisted, item => item.EventType == nameof(TurnInterrupted)).EventType);
+    }
+
+    [Fact]
+    [Trait("Category", "SdkContract")]
+    public async Task DeadlineCancelsStalledProviderAndPersistsOneInterruptedOutcome()
+    {
+        using var data = IsolatedDirectory.Create();
+        using var databaseFile = IsolatedDatabaseFile.Create();
+        var store = new SqliteConversationStore(await CreateDatabaseAsync(databaseFile.Path), new TestClock());
+        await using var provider = await FakeOpenAiProvider.StartAsync();
+        provider.StallInference = true;
+        var runtimeDirectory = Path.Combine(data.Path, "runtime");
+        var engine = CreateEngine(store, provider.BaseUrl, provider.BaseUrl, runtimeDirectory);
+        var turnId = await CreateTurnAsync(store);
+        var elapsed = Stopwatch.StartNew();
+
+        var events = await CollectAsync(engine.RunTurnAsync(
+            CreateRequest(turnId, ProviderKind.Local, "deadline contract", deadline: TimeSpan.FromSeconds(2)),
+            CancellationToken.None)).WaitAsync(TimeSpan.FromSeconds(15));
+
+        await provider.InferenceStalled.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal("engine_deadline_exceeded", Assert.Single(events.OfType<TurnInterrupted>()).ReasonCode);
+        Assert.Equal(TurnStatus.Interrupted, (await store.GetTurnAsync(turnId, CancellationToken.None))?.Status);
+        var persisted = await store.ReadTurnEventsAfterAsync(turnId, 0, 1000, CancellationToken.None);
+        Assert.Equal(
+            nameof(TurnInterrupted),
+            Assert.Single(persisted, item => item.EventType == nameof(TurnInterrupted)).EventType);
+        Assert.True(elapsed.Elapsed < TimeSpan.FromSeconds(10), $"Deadline cleanup took {elapsed.Elapsed}.");
+        Assert.Empty(Directory.Exists(runtimeDirectory)
+            ? Directory.EnumerateFileSystemEntries(runtimeDirectory)
+            : []);
     }
 
     [Fact]
@@ -460,7 +519,9 @@ public sealed class CopilotAgentEngineContractTests
         }
     }
 
-    private sealed class FailFirstTurnEventStore(IConversationStore inner)
+    private sealed class ControlledTurnEventStore(
+        IConversationStore inner,
+        bool blockFirstAppendUntilCancelled = false)
         : IConversationStore, IAtomicTurnOutcomeStore
     {
         private int shouldFail = 1;
@@ -509,10 +570,22 @@ public sealed class CopilotAgentEngineContractTests
         {
             if (Interlocked.Exchange(ref shouldFail, 0) == 1)
             {
+                if (blockFirstAppendUntilCancelled)
+                {
+                    return WaitForCancellationAsync(cancellationToken);
+                }
+
                 throw new IOException("Injected nonterminal event persistence failure.");
             }
 
             return inner.AppendTurnEventAsync(turnId, eventType, payloadJson, occurredAtUtc, cancellationToken);
+        }
+
+        private static async ValueTask<PersistedTurnEvent> WaitForCancellationAsync(
+            CancellationToken cancellationToken)
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            throw new InvalidOperationException("The controlled event append was expected to be cancelled.");
         }
 
         public ValueTask<IReadOnlyList<PersistedTurnEvent>> ReadTurnEventsAfterAsync(

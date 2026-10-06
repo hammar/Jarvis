@@ -131,13 +131,17 @@ public sealed class CopilotAgentEngine : IAgentEngine
             callerToken,
             deadline.Token,
             active.CancellationToken);
+        using var eventCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+            callerToken,
+            deadline.Token,
+            active.EventCancellationToken);
         var observed = Channel.CreateUnbounded<AgentEvent>(new UnboundedChannelOptions
         {
             SingleReader = true,
             SingleWriter = false,
             AllowSynchronousContinuations = false
         });
-        var eventPump = PumpEventsAsync(request.TurnId, observed.Reader, output, active);
+        var eventPump = PumpEventsAsync(request.TurnId, observed.Reader, output, active, eventCancellation.Token);
         TurnStatus terminalStatus;
         AgentEvent terminalEvent;
 
@@ -209,7 +213,18 @@ public sealed class CopilotAgentEngine : IAgentEngine
         try
         {
             observed.Writer.TryComplete();
-            if (await eventPump is not null)
+            var eventPumpFailure = await eventPump;
+            if (eventPumpFailure is OperationCanceledException && turnCancellation.IsCancellationRequested)
+            {
+                (terminalStatus, terminalEvent) = CopilotTurnStateMachine.CreateTerminalOutcome(
+                    request.TurnId,
+                    clock,
+                    CopilotActiveTurn.SelectCompletedSignal(
+                        active.FailureCode is not null,
+                        callerToken.IsCancellationRequested || active.CancelledByHost,
+                        deadline.IsCancellationRequested));
+            }
+            else if (eventPumpFailure is not null)
             {
                 terminalStatus = TurnStatus.Interrupted;
                 terminalEvent = new TurnInterrupted(
@@ -339,7 +354,15 @@ public sealed class CopilotAgentEngine : IAgentEngine
                 subscription is null ? null : subscription.Dispose,
                 session is null ? null : () => active.DisposeSessionAsync(session),
                 () => active.StopClientAsync(),
-                () => DeleteTurnDirectory(turnDirectory));
+                () =>
+                {
+                    if (!active.CanDeleteRuntimeDirectory)
+                    {
+                        throw new InvalidOperationException("The Copilot runtime may still be using its turn directory.");
+                    }
+
+                    DeleteTurnDirectory(turnDirectory);
+                });
         }
     }
 
@@ -418,14 +441,19 @@ public sealed class CopilotAgentEngine : IAgentEngine
         TurnId turnId,
         ChannelReader<AgentEvent> events,
         ChannelWriter<AgentEvent> output,
-        CopilotActiveTurn active)
+        CopilotActiveTurn active,
+        CancellationToken cancellationToken)
     {
         try
         {
-            await foreach (var item in events.ReadAllAsync())
+            await foreach (var item in events.ReadAllAsync(cancellationToken))
             {
-                await PersistAndPublishAsync(item, output, CancellationToken.None);
+                await PersistAndPublishAsync(item, output, cancellationToken);
             }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return new OperationCanceledException(cancellationToken);
         }
         catch (Exception exception)
         {

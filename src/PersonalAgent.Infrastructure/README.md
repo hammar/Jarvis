@@ -109,6 +109,10 @@ The per-turn runtime/workspace directory is removed after bounded runtime
 shutdown; a removal failure is surfaced as cleanup uncertainty. Terminal
 outcome persistence has its own bounded timeout so turn cancellation does not
 prevent recording the terminal result.
+Event persistence observes the turn cancellation/deadline token. Runtime
+force-stop and disposal share one in-flight shutdown operation; disposal and
+runtime-directory removal do not race a force-stop that exceeded its wait
+bound.
 The adapter is not yet an end-user conversation flow: routing, consent,
 dispatcher policy, UI/SSE, and coordinator integration are later task scope.
 

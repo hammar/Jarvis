@@ -5,13 +5,13 @@ namespace PersonalAgent.Infrastructure.AgentEngine.Copilot;
 internal sealed class CopilotActiveTurn
 {
     private readonly CancellationTokenSource stop = new();
+    private readonly CancellationTokenSource eventStop = new();
     private readonly SemaphoreSlim abortGate = new(1, 1);
-    private readonly SemaphoreSlim clientStopGate = new(1, 1);
     private readonly object sync = new();
     private CopilotClient? client;
     private CopilotSession? session;
+    private CopilotClientShutdown? clientShutdown;
     private int toolCalls;
-    private bool clientStopped;
     private bool cancelledByHost;
     private bool terminal;
     private string? failureCode;
@@ -20,6 +20,7 @@ internal sealed class CopilotActiveTurn
 
     public int MaximumToolCalls { get; }
     public CancellationToken CancellationToken => stop.Token;
+    public CancellationToken EventCancellationToken => eventStop.Token;
     public bool CancelledByHost
     {
         get
@@ -33,7 +34,16 @@ internal sealed class CopilotActiveTurn
 
     public string? FailureCode => Volatile.Read(ref failureCode);
 
-    public void SetClient(CopilotClient value) => Volatile.Write(ref client, value);
+    public void SetClient(CopilotClient value)
+    {
+        lock (sync)
+        {
+            client = value;
+            clientShutdown = new CopilotClientShutdown(
+                value.ForceStopAsync,
+                () => CopilotAgentEngine.DisposeBoundedAsync(value.DisposeAsync().AsTask()));
+        }
+    }
 
     public void SetSession(CopilotSession value) => Volatile.Write(ref session, value);
 
@@ -50,6 +60,7 @@ internal sealed class CopilotActiveTurn
         }
 
         stop.Cancel();
+        eventStop.Cancel();
         return true;
     }
 
@@ -90,27 +101,39 @@ internal sealed class CopilotActiveTurn
         try
         {
             var currentSession = Volatile.Read(ref session);
-            if (currentSession is not null)
-            {
-                try
-                {
-                    await currentSession.AbortAsync().WaitAsync(
-                        CopilotAgentEngine.CleanupTimeout,
-                        cancellationToken);
-                }
-                catch (TimeoutException)
-                {
-                    await StopClientAsync(cancellationToken);
-                }
-            }
-            else
-            {
-                await StopClientAsync(cancellationToken);
-            }
+            await AbortRuntimeAsync(
+                currentSession is null
+                    ? null
+                    : async () => await currentSession.AbortAsync(),
+                StopClientAsync,
+                CopilotAgentEngine.CleanupTimeout,
+                cancellationToken);
         }
         finally
         {
             abortGate.Release();
+        }
+    }
+
+    internal static async Task AbortRuntimeAsync(
+        Func<Task>? abortSession,
+        Func<CancellationToken, Task> stopClient,
+        TimeSpan timeout,
+        CancellationToken cancellationToken)
+    {
+        if (abortSession is null)
+        {
+            await stopClient(cancellationToken);
+            return;
+        }
+
+        try
+        {
+            await abortSession().WaitAsync(timeout, cancellationToken);
+        }
+        catch (TimeoutException)
+        {
+            await stopClient(cancellationToken);
         }
     }
 
@@ -134,30 +157,91 @@ internal sealed class CopilotActiveTurn
 
     public async Task StopClientAsync(CancellationToken cancellationToken = default)
     {
-        await clientStopGate.WaitAsync(cancellationToken);
-        try
+        CopilotClientShutdown? shutdown;
+        lock (sync)
         {
-            var currentClient = Volatile.Read(ref client);
-            if (currentClient is null || clientStopped)
-            {
-                return;
-            }
+            shutdown = clientShutdown;
+        }
 
-            try
+        if (shutdown is not null)
+        {
+            await shutdown.StopAsync(cancellationToken);
+        }
+    }
+
+    public bool CanDeleteRuntimeDirectory
+    {
+        get
+        {
+            lock (sync)
             {
-                await currentClient.ForceStopAsync().WaitAsync(
-                    CopilotAgentEngine.CleanupTimeout,
-                    cancellationToken);
-            }
-            finally
-            {
-                await CopilotAgentEngine.DisposeBoundedAsync(currentClient.DisposeAsync().AsTask());
-                clientStopped = true;
+                return clientShutdown is null || clientShutdown.IsCompleted;
             }
         }
-        finally
+    }
+}
+
+internal sealed class CopilotClientShutdown(
+    Func<Task> forceStop,
+    Func<Task> dispose,
+    TimeSpan? waitTimeout = null)
+{
+    private readonly object sync = new();
+    private readonly TimeSpan timeout = waitTimeout ?? CopilotAgentEngine.CleanupTimeout;
+    private Task? shutdown;
+    private bool isCompleted;
+
+    public bool IsCompleted
+    {
+        get
         {
-            clientStopGate.Release();
+            lock (sync)
+            {
+                return isCompleted;
+            }
+        }
+    }
+
+    public async Task StopAsync(CancellationToken cancellationToken = default)
+    {
+        Task current;
+        lock (sync)
+        {
+            current = shutdown ??= StopCoreAsync();
+        }
+
+        await current.WaitAsync(timeout, cancellationToken);
+    }
+
+    private async Task StopCoreAsync()
+    {
+        Exception? failure = null;
+        try
+        {
+            await forceStop();
+        }
+        catch (Exception exception)
+        {
+            failure = exception;
+        }
+
+        try
+        {
+            await dispose();
+        }
+        catch (Exception exception)
+        {
+            failure = failure is null ? exception : new AggregateException(failure, exception);
+        }
+
+        if (failure is not null)
+        {
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
+        }
+
+        lock (sync)
+        {
+            isCompleted = true;
         }
     }
 }

@@ -216,6 +216,92 @@ public sealed class CopilotTurnStateMachineTests
 
     [Fact]
     [Trait("Category", "Integration")]
+    public async Task RuntimeStopTimeoutSharesInFlightStopAndWaitsBeforeDisposal()
+    {
+        var forceStopEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var finishForceStop = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var forceStopCalls = 0;
+        var disposeCalls = 0;
+        var shutdown = new CopilotClientShutdown(
+            async () =>
+            {
+                Interlocked.Increment(ref forceStopCalls);
+                forceStopEntered.TrySetResult();
+                await finishForceStop.Task;
+            },
+            () =>
+            {
+                Interlocked.Increment(ref disposeCalls);
+                return Task.CompletedTask;
+            },
+            TimeSpan.FromMilliseconds(50));
+
+        var first = shutdown.StopAsync();
+        await forceStopEntered.Task.WaitAsync(TimeSpan.FromSeconds(1));
+        await Assert.ThrowsAsync<TimeoutException>(() => first);
+        await Assert.ThrowsAsync<TimeoutException>(() => shutdown.StopAsync());
+        Assert.Equal(1, forceStopCalls);
+        Assert.Equal(0, disposeCalls);
+        Assert.False(shutdown.IsCompleted);
+
+        finishForceStop.TrySetResult();
+        await shutdown.StopAsync();
+        Assert.Equal(1, forceStopCalls);
+        Assert.Equal(1, disposeCalls);
+        Assert.True(shutdown.IsCompleted);
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task RuntimeAbortFallsBackToClientStopAfterTimeout()
+    {
+        var stopCalls = 0;
+        await CopilotActiveTurn.AbortRuntimeAsync(
+            () => Task.Delay(Timeout.InfiniteTimeSpan),
+            _ =>
+            {
+                Interlocked.Increment(ref stopCalls);
+                return Task.CompletedTask;
+            },
+            TimeSpan.FromMilliseconds(50),
+            CancellationToken.None);
+
+        Assert.Equal(1, stopCalls);
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task RuntimeClientShutdownAttemptsDisposalAfterForceStopFailure()
+    {
+        var attempts = new List<string>();
+        var shutdown = new CopilotClientShutdown(
+            () =>
+            {
+                attempts.Add("force-stop");
+                return Task.FromException(new IOException("stop failed"));
+            },
+            () =>
+            {
+                attempts.Add("dispose");
+                return Task.CompletedTask;
+            },
+            TimeSpan.FromSeconds(1));
+
+        var exception = await Assert.ThrowsAsync<IOException>(() => shutdown.StopAsync());
+        Assert.Equal("stop failed", exception.Message);
+        Assert.Equal(["force-stop", "dispose"], attempts);
+        Assert.False(shutdown.IsCompleted);
+
+        var disposalFailure = new CopilotClientShutdown(
+            () => Task.CompletedTask,
+            () => Task.FromException(new IOException("dispose failed")),
+            TimeSpan.FromSeconds(1));
+        var disposalException = await Assert.ThrowsAsync<IOException>(() => disposalFailure.StopAsync());
+        Assert.Equal("dispose failed", disposalException.Message);
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
     public async Task ActiveTurnCancellationAndBudgetTransitionsAreHostControlled()
     {
         var active = new CopilotActiveTurn(2);
