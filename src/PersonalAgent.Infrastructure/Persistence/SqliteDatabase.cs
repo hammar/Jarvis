@@ -8,6 +8,7 @@ namespace PersonalAgent.Infrastructure.Persistence;
 /// <summary>Owns a single SQLite database file, its connections, and forward-only schema migrations.</summary>
 public sealed class SqliteDatabase
 {
+    private static readonly TimeSpan ImmediateTransactionTimeout = TimeSpan.FromSeconds(10);
     private const UnixFileMode OwnerPrivateDirectory =
         UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute;
     private const UnixFileMode OwnerPrivateFile = UnixFileMode.UserRead | UnixFileMode.UserWrite;
@@ -127,6 +128,7 @@ public sealed class SqliteDatabase
         SqliteConnection connection,
         CancellationToken cancellationToken)
     {
+        var startedAt = System.Diagnostics.Stopwatch.GetTimestamp();
         while (true)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -136,6 +138,11 @@ public sealed class SqliteDatabase
             }
             catch (SqliteException exception) when (exception.SqliteErrorCode is 5 or 6)
             {
+                if (System.Diagnostics.Stopwatch.GetElapsedTime(startedAt) >= ImmediateTransactionTimeout)
+                {
+                    throw;
+                }
+
                 await Task.Delay(TimeSpan.FromMilliseconds(10), cancellationToken);
             }
         }

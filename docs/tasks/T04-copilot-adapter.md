@@ -154,6 +154,10 @@ Initial pre-PR worktree review findings and dispositions:
 | T04-R23 | The terminal persistence timeout included time spent draining the event pump. | The dedicated timeout now starts immediately before the atomic terminal persistence call, after event draining and outcome classification. |
 | T04-R24 | Event persistence could ignore cancellation while synchronously waiting for SQLite's write lock. | The event store opens a connection with a one-second SQLite lock timeout and retries immediate-transaction acquisition with cancellation checks between attempts. `EventAppendHonorsCancellationWhileWaitingForImmediateWriteLock` holds a writer lock and verifies cancellation is observed within two seconds without persisting an event. |
 | T04-R25 | Terminal status/event persistence could ignore cancellation while synchronously waiting for SQLite's write lock. | Terminal outcome writes use the same one-second lock timeout and cancellation-aware immediate transaction acquisition. `TerminalOutcomeHonorsCancellationWhileWaitingForImmediateWriteLock` verifies cancellation within two seconds leaves both status and event unchanged. |
+| T04-R26 | A failed execution claim was caught as an engine failure and could terminalize another engine's active turn. | Durable claiming now occurs before the event pump and terminal-outcome handling; a rejected claim completes the output channel and propagates without writing events or terminal state. `RejectedDuplicateClaimDoesNotTerminalizeTheActiveTurn` verifies a pre-existing Running turn remains unchanged and does not reach the provider. |
+| T04-R27 | Cleanup `TimeoutException` could be classified as request-deadline expiration even when the deadline token had not fired. | The timeout handler now applies only when the request deadline is canceled; otherwise cancellation/cleanup exception classification remains in effect. |
+| T04-R28 | Repeated short SQLite busy waits could retry forever without caller cancellation. | Cancellable immediate-transaction retries now have a 10-second overall bound and rethrow the final SQLite busy error if the lock remains held. `ImmediateWriteLockWaitHasOverallBoundWithoutCallerCancellation` verifies a no-token write fails within 12 seconds and persists no event. |
+| T04-R29 | The PR description validation evidence and finding range were stale. | After pushing and validating the latest code revision, the PR description is refreshed with that exact revision, current local evidence, the coverage limitation, and the finding range through T04-R29. |
 
 The T04-R1 through T04-R21 findings were raised against earlier PR revisions
 and fixed in follow-up commits. Their review threads were resolved after those
@@ -173,6 +177,22 @@ Follow-up validation after T04-R22–R25:
   (95.1%); Infrastructure 1798/1945 lines (92.4%) and 448/579 branches
   (77.4%).
 - `tools/validate.sh docs`: internal Markdown link validation passed.
+
+Follow-up validation for the T04-R26–R28 fixes:
+
+- `tools/validate.sh build`: Release build and formatting passed with zero
+  warnings or errors.
+- `tools/validate.sh unit`: 8/8 passed.
+- Integration suite: 75/75 passed, including bounded lock acquisition,
+  cancellation during lock contention, and duplicate-claim safety.
+- `tools/validate.sh sdk-contracts`: pinned runtime harness passed; 13/13
+  actual SDK contract tests passed.
+- `tools/validate.sh architecture`: 6/6 passed.
+- `tools/validate.sh docs`: internal Markdown link validation passed.
+- The coverage-enabled integration command did not start a test host in this
+  local environment and hung in VSTest/collector startup on repeated attempts;
+  it was stopped. The full coverage gate therefore remains unverified locally
+  for this revision and must be established by the PR's CI coverage check.
 
 ## Completion criteria
 

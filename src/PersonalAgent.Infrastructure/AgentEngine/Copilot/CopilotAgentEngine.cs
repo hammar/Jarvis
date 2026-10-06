@@ -135,6 +135,17 @@ public sealed class CopilotAgentEngine : IAgentEngine
             callerToken,
             deadline.Token,
             active.EventCancellationToken);
+
+        try
+        {
+            await stateMachine.EnsureRunningAsync(request.TurnId, turnCancellation.Token);
+        }
+        catch
+        {
+            output.TryComplete();
+            throw;
+        }
+
         var observed = Channel.CreateUnbounded<AgentEvent>(new UnboundedChannelOptions
         {
             SingleReader = true,
@@ -147,7 +158,6 @@ public sealed class CopilotAgentEngine : IAgentEngine
 
         try
         {
-            await stateMachine.EnsureRunningAsync(request.TurnId, turnCancellation.Token);
             observed.Writer.TryWrite(new TurnStarted(request.TurnId, clock.UtcNow));
             observed.Writer.TryWrite(new RouteSelected(
                 request.TurnId,
@@ -184,7 +194,7 @@ public sealed class CopilotAgentEngine : IAgentEngine
                 clock,
                 CopilotTurnSignal.DeadlineExceeded);
         }
-        catch (TimeoutException)
+        catch (TimeoutException) when (deadline.IsCancellationRequested)
         {
             (terminalStatus, terminalEvent) = CopilotTurnStateMachine.CreateTerminalOutcome(
                 request.TurnId,

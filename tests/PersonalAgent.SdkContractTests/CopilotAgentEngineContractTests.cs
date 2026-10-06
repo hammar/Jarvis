@@ -66,6 +66,34 @@ public sealed class CopilotAgentEngineContractTests
 
     [Fact]
     [Trait("Category", "SdkContract")]
+    public async Task RejectedDuplicateClaimDoesNotTerminalizeTheActiveTurn()
+    {
+        using var data = IsolatedDirectory.Create();
+        using var databaseFile = IsolatedDatabaseFile.Create();
+        var store = new SqliteConversationStore(await CreateDatabaseAsync(databaseFile.Path), new TestClock());
+        await using var provider = await FakeOpenAiProvider.StartAsync();
+        var engine = CreateEngine(store, provider.BaseUrl, provider.BaseUrl, Path.Combine(data.Path, "runtime"));
+        var turnId = await CreateTurnAsync(store);
+        var turn = await store.GetTurnAsync(turnId, CancellationToken.None);
+        await store.UpdateTurnStatusAsync(
+            turnId,
+            TurnStatus.Running,
+            turn!.Version,
+            Now,
+            CancellationToken.None);
+
+        await Assert.ThrowsAsync<PersistenceConcurrencyException>(() =>
+            CollectAsync(engine.RunTurnAsync(
+                CreateRequest(turnId, ProviderKind.Local, "duplicate claim"),
+                CancellationToken.None)));
+
+        Assert.Equal(TurnStatus.Running, (await store.GetTurnAsync(turnId, CancellationToken.None))?.Status);
+        Assert.Empty(await store.ReadTurnEventsAfterAsync(turnId, 0, 100, CancellationToken.None));
+        Assert.Equal(0, provider.RequestCount);
+    }
+
+    [Fact]
+    [Trait("Category", "SdkContract")]
     public async Task ActualRuntimeInvokesOnlyRegisteredToolAndForwardsHostOutcome()
     {
         using var data = IsolatedDirectory.Create();

@@ -378,6 +378,30 @@ public sealed class CopilotTurnStateMachineTests
 
     [Fact]
     [Trait("Category", "Integration")]
+    public async Task ImmediateWriteLockWaitHasOverallBoundWithoutCallerCancellation()
+    {
+        using var databaseFile = IsolatedDatabaseFile.Create();
+        var database = new SqliteDatabase(databaseFile.Path);
+        await database.InitializeAsync();
+        var store = new SqliteConversationStore(database, new TestClock());
+        var turnId = TurnId.New();
+        await store.CreateTurnAsync(turnId, ConversationId.New(), TurnStatus.Received, Now, CancellationToken.None);
+        await using var blocker = await database.OpenConnectionAsync();
+        await using var heldTransaction = blocker.BeginTransaction(deferred: false);
+        var elapsed = System.Diagnostics.Stopwatch.StartNew();
+
+        var append = store.AppendTurnEventAsync(turnId, "test.event", "{}", Now, CancellationToken.None).AsTask();
+        var exception = await Assert.ThrowsAsync<Microsoft.Data.Sqlite.SqliteException>(() =>
+            append.WaitAsync(TimeSpan.FromSeconds(20)));
+
+        Assert.Equal(5, exception.SqliteErrorCode);
+        Assert.InRange(elapsed.Elapsed, TimeSpan.Zero, TimeSpan.FromSeconds(20));
+        await heldTransaction.DisposeAsync();
+        Assert.Empty(await store.ReadTurnEventsAfterAsync(turnId, 0, 10, CancellationToken.None));
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
     public async Task ActiveTurnCancellationAndBudgetTransitionsAreHostControlled()
     {
         var active = new CopilotActiveTurn(2);
