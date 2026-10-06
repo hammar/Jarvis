@@ -158,6 +158,10 @@ Initial pre-PR worktree review findings and dispositions:
 | T04-R27 | Cleanup `TimeoutException` could be classified as request-deadline expiration even when the deadline token had not fired. | The timeout handler now applies only when the request deadline is canceled; otherwise cancellation/cleanup exception classification remains in effect. |
 | T04-R28 | Repeated short SQLite busy waits could retry forever without caller cancellation. | Cancellable immediate-transaction retries now have a 10-second overall bound and rethrow the final SQLite busy error if the lock remains held. `ImmediateWriteLockWaitHasOverallBoundWithoutCallerCancellation` verifies a no-token write fails within 12 seconds and persists no event. |
 | T04-R29 | The PR description validation evidence and finding range were stale. | After pushing and validating the latest code revision, the PR description is refreshed with that exact revision, current local evidence, the coverage limitation, and the finding range through T04-R29. |
+| T04-R30 | A failing execution claim could still enter the terminal-outcome handler and overwrite a turn owned by another engine. | The claim is now performed before event-pump initialization and terminal handling. `RejectedDuplicateClaimDoesNotTerminalizeTheActiveTurn` runs the actual adapter with a pre-existing Running turn and verifies it stays Running, emits no events, and starts no provider request. |
+| T04-R31 | A cleanup `TimeoutException` without request-deadline cancellation could be mislabeled as a deadline outcome. | The deadline catch filter now requires `deadline.IsCancellationRequested`; without that signal, the timeout follows the existing cleanup/failure classification path. |
+| T04-R32 | Persistent SQLite lock contention could retry forever for non-cancellable callers. | Immediate transaction acquisition now has a fixed 10-second maximum and surfaces a SQLite busy exception when exceeded. `ImmediateWriteLockWaitHasOverallBoundWithoutCallerCancellation` verifies bounded failure and no partial event. |
+| T04-R33 | SQLite's configured busy timeout and the retry deadline could be interpreted in mismatched units. | The explicit busy `SqliteException` now preserves both SQLite error codes, ensuring callers still receive the correct busy classification after the overall retry bound. The bounded-lock integration test and Release build pass. |
 
 The T04-R1 through T04-R21 findings were raised against earlier PR revisions
 and fixed in follow-up commits. Their review threads were resolved after those
@@ -193,6 +197,8 @@ Follow-up validation for the T04-R26–R28 fixes:
   local environment and hung in VSTest/collector startup on repeated attempts;
   it was stopped. The full coverage gate therefore remains unverified locally
   for this revision and must be established by the PR's CI coverage check.
+  An additional focused collector attempt also hung before test discovery;
+  the same test passes without collection.
 
 ## Completion criteria
 

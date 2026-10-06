@@ -140,7 +140,10 @@ public sealed class SqliteDatabase
             {
                 if (System.Diagnostics.Stopwatch.GetElapsedTime(startedAt) >= ImmediateTransactionTimeout)
                 {
-                    throw;
+                    throw new SqliteException(
+                        "SQLite could not acquire an immediate write transaction before the configured timeout.",
+                        exception.SqliteErrorCode,
+                        exception.SqliteExtendedErrorCode);
                 }
 
                 await Task.Delay(TimeSpan.FromMilliseconds(10), cancellationToken);
