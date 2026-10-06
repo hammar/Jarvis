@@ -39,7 +39,9 @@ lines / 85% branches; combined unit+integration first-party runtime at 85% /
 `SqliteActionJournalStore.cs`, plus the Copilot turn terminal and cancellation
 state machine in `AgentEngine/Copilot/CopilotTurnStateMachine.cs` and active
 turn cancellation/runtime lifecycle in `AgentEngine/Copilot/CopilotActiveTurn.cs`,
-at 95% / 90%; changed executable lines at 90%.
+and M1 routing/context policy in `Application/Routing/LocalOnlyModelRouter.cs`
+and `Application/Context/ConversationContextBuilder.cs`, at 95% / 90%;
+changed executable lines at 90%.
 The coverage validator requires each critical source file to exist at its
 exact owned path, so renaming it cannot silently remove the gate. A module with no coverable lines
 does not count as evidence of passing its threshold; runtime assemblies with
@@ -128,6 +130,12 @@ authority.
 | Acceptance scenario | Test |
 | --- | --- |
 | Strong application IDs are independent | `IdentifierContractTests` |
+| LocalOnly text cannot change the selected provider or invoke cloud | `RoutingAndContextTests.LocalOnlyRouterKeepsUntrustedEscalationTextOnTheSelectedLocalRoute`, `RoutingAndContextTests.LocalOnlyRouterRejectsCloudModesAndTasksWithoutDowngrading` |
+| Ambiguous, unsupported and invalid route categories fail explicitly | `RoutingAndContextTests.LocalOnlyRouterClarifiesAmbiguousAndEmptyTasksAndRejectsUnsupportedCategories` |
+| Context is bounded, ordered, provenance-labelled and LocalOnly | `RoutingAndContextTests.ContextBuilderIncludesOrderedRecentHistoryAndLabelsEveryItemLocalOnly`, `ConversationContextBuilderTests.ContextBuilderUsesIsolatedSqliteHistoryAndPreservesOrderProvenanceAndPrivacyLabels` |
+| Unsupported roles, cross-conversation messages and oversized history are excluded | `RoutingAndContextTests.ContextBuilderExcludesUnsupportedRolesCrossConversationAndOversizedHistory` |
+| Prompt estimates include instructions, task, tool catalog, history, serialization and reserve | `RoutingAndContextTests.ContextEstimateIncludesInstructionsTaskToolsSerializationAndReserve` |
+| Mandatory context over budget is rejected before reading conversation history | `RoutingAndContextTests.ContextBuilderFailsExplicitlyBeforeReadingHistoryWhenRequiredPromptExceedsBudget` |
 | Real SQLite file persists across connections and stays test-owned | `SqliteAndWebSmokeTests.SqlitePersistsDataInAnIsolatedTestDatabase` |
 | Restore recovery artifacts cannot be used as backup paths | `SqlitePersistenceTests.BackupAndRestoreRejectRestoreArtifactsWithoutDeletingSourceBackup` |
 | Staging WAL/SHM aliases cannot consume a backup source | `SqlitePersistenceTests.BackupAndRestoreRejectRestoreArtifactsWithoutDeletingSourceBackup` |

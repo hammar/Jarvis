@@ -14,7 +14,8 @@ public sealed class ApplicationContractTests
         var context = new ContextPacket(
             "packet-1",
             "policy-1",
-            [new ContextItem("conversation:1", "approved text", "Personal")]);
+            [new ContextItem("conversation:1", "approved text", "LocalOnly", "user")],
+            new ContextEstimate(0, 0, 0, 0, 0, 0, 0, 0, 8192, 0, false, false, "fixture estimate"));
         var tool = new AgentToolDefinition("read_state", """{"type":"object"}""", true);
         var request = new AgentTurnRequest(
             turnId,
@@ -45,7 +46,7 @@ public sealed class ApplicationContractTests
         var approvalId = ApprovalId.New();
         var expiresAtUtc = new DateTimeOffset(2026, 10, 4, 12, 0, 0, TimeSpan.Zero);
         var routingRequest = new RoutingRequest(RouteMode.AskBeforeCloud, "private question", false);
-        var route = new RouteDecision(ProviderKind.Local, false, "local_default", "policy-1");
+        var route = RouteDecision.Local("local_default", "policy-1");
         var proposal = new ToolDispatchRequest(turnId, "call-1", "read_state", """{"entity":"sensor.temp"}""");
         var outcome = new ToolDispatchResult("Unknown", null, "physical_outcome_uncertain");
         var approval = new ApprovalRequest(approvalId, actionId, "owner", expiresAtUtc, 7);
