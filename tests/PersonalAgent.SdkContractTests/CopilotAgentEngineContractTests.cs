@@ -574,7 +574,11 @@ public sealed class CopilotAgentEngineContractTests
             turnId,
             provider,
             "Use only the selected context and registered tools.",
-            new ContextPacket($"packet-{marker}", "policy-test", [new ContextItem("fixture", marker, "Personal")]),
+            new ContextPacket(
+                $"packet-{marker}",
+                "policy-test",
+                [new ContextItem("fixture", marker, "LocalOnly", "user")],
+                new ContextEstimate(0, 0, 0, 0, 0, 0, 0, 0, 8192, 0, false, false, "fixture estimate")),
             tools ?? [],
             deadline ?? TimeSpan.FromSeconds(60),
             1);

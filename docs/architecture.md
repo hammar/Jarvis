@@ -55,6 +55,26 @@ where specified, and reports uncertain physical outcomes explicitly. Cloud
 context must be a minimal inspectable packet bound to the chosen provider and
 consent; neither the Local profile nor an SDK flag is an air-gap claim.
 
+M1 registers `LocalOnlyModelRouter` and `ConversationContextBuilder` as
+Application services. The router returns typed Local, Clarify, or Unsupported
+decisions with stable reason codes; cloud modes and cloud-required workflows
+are rejected instead of silently downgraded. Task categories must be selected
+by the host; missing or ambiguous classification clarifies rather than
+defaulting user text to a supported workflow. The context builder reads only
+bounded recent messages through `IConversationStore`, includes each as
+untrusted, provenance-labelled `LocalOnly` data, and adds the current task as
+the final item. System-role and tool-role messages are not treated as host
+instructions. It reads one extra history row to indicate when additional
+older history was truncated, without loading an unbounded transcript. Its
+`MinimumOmittedHistoryMessages` is a known lower bound, not the full count;
+`HasMoreHistory` separately reports when the sentinel proves older rows exist.
+Its
+estimate includes host instructions, task text, serialized
+tool definitions, conversation history and packet framing. Without a provider
+tokenizer it reports a four-UTF-16-characters-per-token estimate plus a 20%
+reserve, not an exact count. These M1 policies do not implement cloud consent,
+memory retrieval or tool execution.
+
 T04's `CopilotAgentEngine` creates a fresh SDK client/session and dedicated
 runtime/work directory for each turn. It uses empty SDK mode, explicit
 provider configuration, disabled logged-in-user discovery, a sanitized child

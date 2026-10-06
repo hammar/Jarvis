@@ -22,6 +22,32 @@ public enum RouteMode
     CloudAllowed
 }
 
+/// <summary>Describes a host-classified task category used by deterministic routing.</summary>
+public enum RoutingTaskKind
+{
+    /// <summary>A conversational request that can be handled as local text chat.</summary>
+    TextConversation,
+    /// <summary>A task already recognized by the host as a supported local workflow.</summary>
+    RecognizedLocalWorkflow,
+    /// <summary>A task that requires cloud inference to meet its stated requirements.</summary>
+    RequiresCloud,
+    /// <summary>A task whose supported workflow cannot be determined safely.</summary>
+    Ambiguous,
+    /// <summary>A task category for which the host has no supported capability.</summary>
+    Unsupported
+}
+
+/// <summary>Identifies the typed result of a host routing decision.</summary>
+public enum RouteDisposition
+{
+    /// <summary>Proceed using the local provider.</summary>
+    Local,
+    /// <summary>Ask the owner for information before starting a turn.</summary>
+    Clarify,
+    /// <summary>Do not start a turn because the requested capability is unavailable.</summary>
+    Unsupported
+}
+
 /// <summary>Describes a host-registered tool made available to one agent turn.</summary>
 /// <param name="Name">Stable tool name visible to the engine.</param>
 /// <param name="InputSchema">JSON Schema for the validated tool input.</param>
@@ -71,44 +97,189 @@ public interface IAgentEngine
 /// <param name="SourceId">Stable source identifier for provenance.</param>
 /// <param name="Text">Selected text after host policy filtering.</param>
 /// <param name="PrivacyClass">Privacy classification assigned by the host.</param>
-public sealed record ContextItem(string SourceId, string Text, string PrivacyClass);
+/// <param name="Role">Message role applied by the host, such as user or assistant.</param>
+public sealed record ContextItem(string SourceId, string Text, string PrivacyClass, string Role);
+
+/// <summary>Describes bounded, explicitly approximate prompt-size accounting.</summary>
+/// <param name="SystemInstructionsCharacters">UTF-16 code units in host instructions.</param>
+/// <param name="CurrentTaskCharacters">UTF-16 code units in the current user task.</param>
+/// <param name="ToolCatalogCharacters">UTF-16 code units in the serialized host tool catalog.</param>
+/// <param name="ConversationHistoryCharacters">UTF-16 code units in selected history message text.</param>
+/// <param name="SerializationOverheadCharacters">Packet framing and JSON escaping code units.</param>
+/// <param name="EstimatedInputTokens">Input token estimate before reserve margin.</param>
+/// <param name="ReservedMarginTokens">Additional tokens reserved for tokenizer/provider variance.</param>
+/// <param name="EstimatedInputTokensWithMargin">Estimate including the reserve margin.</param>
+/// <param name="MaximumEstimatedInputTokens">Hard maximum estimate accepted by the builder.</param>
+/// <param name="MinimumOmittedHistoryMessages">Known lower bound for messages not selected; the bounded history read cannot establish the full count.</param>
+/// <param name="HasMoreHistory">Whether the extra sentinel row proves older history exists beyond the selected-message limit.</param>
+/// <param name="IsExact">Whether a provider tokenizer produced an exact count; false for M1.</param>
+/// <param name="EstimationMethod">Human-readable description of the estimate and margin.</param>
+public sealed record ContextEstimate(
+    int SystemInstructionsCharacters,
+    int CurrentTaskCharacters,
+    int ToolCatalogCharacters,
+    int ConversationHistoryCharacters,
+    int SerializationOverheadCharacters,
+    int EstimatedInputTokens,
+    int ReservedMarginTokens,
+    int EstimatedInputTokensWithMargin,
+    int MaximumEstimatedInputTokens,
+    int MinimumOmittedHistoryMessages,
+    bool HasMoreHistory,
+    bool IsExact,
+    string EstimationMethod);
 
 /// <summary>Contains selected evidence and provenance for one inference request.</summary>
 /// <param name="PacketId">Stable identifier for review and consent binding.</param>
 /// <param name="PolicyVersion">Policy version used to select the content.</param>
 /// <param name="Items">Ordered, bounded context items.</param>
-public sealed record ContextPacket(string PacketId, string PolicyVersion, IReadOnlyList<ContextItem> Items);
+/// <param name="Estimate">Approximate size accounting for the complete prompt envelope.</param>
+public sealed record ContextPacket(
+    string PacketId,
+    string PolicyVersion,
+    IReadOnlyList<ContextItem> Items,
+    ContextEstimate Estimate);
+
+/// <summary>Contains host-owned inputs used to build bounded local context.</summary>
+/// <param name="ConversationId">Conversation whose durable history may be considered.</param>
+/// <param name="Provider">Inference destination; M1 accepts only <see cref="ProviderKind.Local"/>.</param>
+/// <param name="TaskText">Current user task, treated as untrusted text.</param>
+/// <param name="HostInstructions">Host-authored instructions, never derived from model output.</param>
+/// <param name="Tools">Exact host-registered tool definitions for the turn.</param>
+public sealed record ContextBuildRequest(
+    ConversationId ConversationId,
+    ProviderKind Provider,
+    string TaskText,
+    string HostInstructions,
+    IReadOnlyList<AgentToolDefinition> Tools);
+
+/// <summary>Documents fixed M1 input bounds used by routing and context construction.</summary>
+public static class LocalContextLimits
+{
+    /// <summary>Maximum UTF-16 code units accepted for the current task.</summary>
+    public const int MaximumTaskTextCharacters = 8_000;
+
+    /// <summary>Maximum UTF-16 code units accepted for host instructions.</summary>
+    public const int MaximumInstructionCharacters = 8_000;
+
+    /// <summary>Maximum registered tool definitions included in one estimate.</summary>
+    public const int MaximumToolCount = 8;
+
+    /// <summary>Maximum UTF-16 code units in a registered tool name.</summary>
+    public const int MaximumToolNameCharacters = 128;
+
+    /// <summary>Maximum UTF-16 code units in one registered tool schema.</summary>
+    public const int MaximumToolSchemaCharacters = 4_096;
+
+    /// <summary>Maximum recent messages read when constructing history context.</summary>
+    public const int MaximumHistoryMessages = 12;
+
+    /// <summary>Maximum UTF-16 code units selected from any one history message.</summary>
+    public const int MaximumHistoryMessageCharacters = 8_000;
+
+    /// <summary>Maximum approximate input tokens, including the reserved margin.</summary>
+    public const int MaximumEstimatedInputTokens = 8_192;
+
+    /// <summary>Character-to-token ratio used when no exact tokenizer is available.</summary>
+    public const int EstimatedCharactersPerToken = 4;
+
+    /// <summary>Percentage of estimated tokens held as a safety margin.</summary>
+    public const int ReservedTokenMarginPercent = 20;
+}
 
 /// <summary>Builds privacy-classified context from application-owned state.</summary>
 public interface IContextBuilder
 {
-    /// <summary>Builds a bounded context packet for the specified route.</summary>
-    /// <param name="conversationId">Conversation whose authorized history may be considered.</param>
-    /// <param name="provider">Destination that will receive the packet.</param>
+    /// <summary>Builds a bounded local context packet and estimates its full prompt envelope.</summary>
+    /// <param name="request">Host-selected task, instructions, provider, and registered tools.</param>
     /// <param name="cancellationToken">Token that cancels retrieval and packet construction.</param>
-    /// <returns>An inspectable packet with source provenance and privacy classifications.</returns>
-    ValueTask<ContextPacket> BuildAsync(
-        ConversationId conversationId,
-        ProviderKind provider,
-        CancellationToken cancellationToken);
+    /// <returns>An inspectable packet with source provenance, privacy classifications, and estimate.</returns>
+    ValueTask<ContextPacket> BuildAsync(ContextBuildRequest request, CancellationToken cancellationToken);
 }
 
 /// <summary>Represents the user's requested route and the host's policy context.</summary>
 /// <param name="RequestedMode">Owner-selected route mode.</param>
 /// <param name="TaskText">Current user request, treated as untrusted input.</param>
 /// <param name="HasLocalOnlyContent">Whether selected evidence contains LocalOnly material.</param>
-public sealed record RoutingRequest(RouteMode RequestedMode, string TaskText, bool HasLocalOnlyContent);
+/// <param name="TaskKind">Task category classified by the host, never by model output.</param>
+public sealed record RoutingRequest(
+    RouteMode RequestedMode,
+    string TaskText,
+    bool HasLocalOnlyContent,
+    RoutingTaskKind TaskKind = RoutingTaskKind.Ambiguous);
 
 /// <summary>Describes a deterministic routing decision made by host policy.</summary>
-/// <param name="Provider">Selected provider when routing can proceed.</param>
-/// <param name="RequiresClarification">Whether the host must ask before starting a turn.</param>
-/// <param name="ReasonCode">Stable policy reason explaining the decision.</param>
-/// <param name="PolicyVersion">Version of the policy that produced the decision.</param>
-public sealed record RouteDecision(
-    ProviderKind? Provider,
-    bool RequiresClarification,
-    string ReasonCode,
-    string PolicyVersion);
+public sealed record RouteDecision
+{
+    private RouteDecision(
+        RouteDisposition disposition,
+        ProviderKind? provider,
+        string reasonCode,
+        string policyVersion,
+        string? userMessage)
+    {
+        Disposition = disposition;
+        Provider = provider;
+        ReasonCode = reasonCode;
+        PolicyVersion = policyVersion;
+        UserMessage = userMessage;
+    }
+
+    /// <summary>Gets the typed route outcome.</summary>
+    public RouteDisposition Disposition { get; }
+
+    /// <summary>Gets the selected provider; non-null only for a local decision.</summary>
+    public ProviderKind? Provider { get; }
+
+    /// <summary>Gets the stable policy reason code.</summary>
+    public string ReasonCode { get; }
+
+    /// <summary>Gets the policy version that produced the decision.</summary>
+    public string PolicyVersion { get; }
+
+    /// <summary>Gets safe owner-facing explanation for clarification or unsupported outcomes.</summary>
+    public string? UserMessage { get; }
+
+    /// <summary>Creates a decision to proceed with the local provider.</summary>
+    /// <param name="reasonCode">Stable, non-empty policy reason code.</param>
+    /// <param name="policyVersion">Non-empty policy version.</param>
+    /// <returns>A typed Local decision with no cloud provider alternative.</returns>
+    public static RouteDecision Local(string reasonCode, string policyVersion)
+    {
+        ValidateReason(reasonCode, policyVersion);
+        return new RouteDecision(RouteDisposition.Local, ProviderKind.Local, reasonCode, policyVersion, null);
+    }
+
+    /// <summary>Creates a decision that requires owner clarification before a turn.</summary>
+    /// <param name="reasonCode">Stable, non-empty policy reason code.</param>
+    /// <param name="policyVersion">Non-empty policy version.</param>
+    /// <param name="userMessage">Safe clarification presented to the owner.</param>
+    /// <returns>A typed Clarify decision with no provider selected.</returns>
+    public static RouteDecision Clarify(string reasonCode, string policyVersion, string userMessage)
+    {
+        ValidateReason(reasonCode, policyVersion);
+        ArgumentException.ThrowIfNullOrWhiteSpace(userMessage);
+        return new RouteDecision(RouteDisposition.Clarify, null, reasonCode, policyVersion, userMessage);
+    }
+
+    /// <summary>Creates a decision that rejects an unavailable or prohibited task.</summary>
+    /// <param name="reasonCode">Stable, non-empty policy reason code.</param>
+    /// <param name="policyVersion">Non-empty policy version.</param>
+    /// <param name="userMessage">Safe explanation presented to the owner.</param>
+    /// <returns>A typed Unsupported decision with no provider selected.</returns>
+    public static RouteDecision Unsupported(string reasonCode, string policyVersion, string userMessage)
+    {
+        ValidateReason(reasonCode, policyVersion);
+        ArgumentException.ThrowIfNullOrWhiteSpace(userMessage);
+        return new RouteDecision(RouteDisposition.Unsupported, null, reasonCode, policyVersion, userMessage);
+    }
+
+    private static void ValidateReason(string reasonCode, string policyVersion)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(reasonCode);
+        ArgumentException.ThrowIfNullOrWhiteSpace(policyVersion);
+    }
+}
 
 /// <summary>Selects a provider from explicit owner policy and classified context.</summary>
 public interface IModelRouter

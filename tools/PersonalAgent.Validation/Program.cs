@@ -120,6 +120,8 @@ internal static class CoverageGate
     [
         ("Copilot turn terminal and cancellation state machine", "src/PersonalAgent.Infrastructure/AgentEngine/Copilot/CopilotTurnStateMachine.cs", 95, 90),
         ("Copilot active-turn cancellation and runtime lifecycle", "src/PersonalAgent.Infrastructure/AgentEngine/Copilot/CopilotActiveTurn.cs", 95, 90),
+        ("M1 local-only route policy", "src/PersonalAgent.Application/Routing/LocalOnlyModelRouter.cs", 95, 90),
+        ("M1 bounded context construction", "src/PersonalAgent.Application/Context/ConversationContextBuilder.cs", 95, 90),
         ("Approval persistence invariants", "src/PersonalAgent.Infrastructure/Persistence/SqliteApprovalStore.cs", 95, 90),
         ("Action journal idempotency", "src/PersonalAgent.Infrastructure/Persistence/SqliteActionJournalStore.cs", 95, 90)
     ];

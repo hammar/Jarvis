@@ -1,5 +1,7 @@
 using System.Globalization;
 using PersonalAgent.Application;
+using PersonalAgent.Application.Context;
+using PersonalAgent.Application.Routing;
 using PersonalAgent.Infrastructure.Persistence;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -34,6 +36,8 @@ await new SqliteRetentionService(database, clock, retentionOptions).CleanupExpir
 
 builder.Services.AddSingleton(database);
 builder.Services.AddSingleton<IClock>(clock);
+builder.Services.AddSingleton<IModelRouter, LocalOnlyModelRouter>();
+builder.Services.AddSingleton<IContextBuilder, ConversationContextBuilder>();
 builder.Services.AddSingleton(retentionOptions);
 builder.Services.AddSingleton<IConversationStore, SqliteConversationStore>();
 builder.Services.AddSingleton<IMemoryStore, SqliteMemoryStore>();

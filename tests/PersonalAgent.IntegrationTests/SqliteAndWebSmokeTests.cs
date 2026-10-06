@@ -2,7 +2,12 @@ using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using PersonalAgent.Application;
+using PersonalAgent.Application.Context;
+using PersonalAgent.Application.Routing;
+using PersonalAgent.Infrastructure.Persistence;
 using PersonalAgent.TestSupport;
 using Xunit;
 
@@ -72,6 +77,18 @@ public sealed class SqliteAndWebSmokeTests
 
         response.EnsureSuccessStatusCode();
         Assert.Contains("Running the Local profile.", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task ProductionCompositionRegistersApplicationOwnedRoutingAndContextPolicies()
+    {
+        using var data = IsolatedDirectory.Create();
+        await using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(web =>
+            web.UseSetting("JARVIS_DATA_DIR", data.Path));
+
+        Assert.IsType<LocalOnlyModelRouter>(factory.Services.GetRequiredService<IModelRouter>());
+        Assert.IsType<ConversationContextBuilder>(factory.Services.GetRequiredService<IContextBuilder>());
     }
 
     [Theory]
