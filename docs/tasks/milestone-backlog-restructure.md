@@ -48,6 +48,7 @@ the unstaged documentation diff and this brief against baseline
 | Finding | Severity | Disposition and evidence |
 |---|---|---|
 | MR-01: safe external-read retry lacked an implementation owner after splitting T11 | Medium | Fixed: M2-02 explicitly owns one transient Home Assistant read retry within the original deadline, request-count/cancellation tests, no nested retries/hedging and no uncertain-write retry. Specification backlog names that ownership; M2-04 exercises it cumulatively and M4-01 verifies it. |
+| MR-02: reusable handoff template still used obsolete Txx placeholder (PR review comment 4191955353 against 7213d80) | Low | Fixed: the template requires the exact backlog-table ID, with M1-01 and historical T02 examples. Documentation/link validation and whitespace checks passed for this correction before commit. |
 
 `tools/validate.sh docs` passed before review and after the MR-01 correction;
 `git diff --check` passed. Direct GitHub REST verification confirmed all 12

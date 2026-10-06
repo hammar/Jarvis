@@ -365,7 +365,7 @@ features, security, documentation, coverage or independent review.
 
 Task handoff template:
 
-> Read Personal-Agent-Project-Spec.md and the merged contract ADRs. Implement task Txx only. Own the listed files; coordinate any contract/schema change with the integration owner before editing shared surfaces. Use the pinned SDK documentation rather than inventing API signatures. Supply tests for the task’s failure modes, a runnable demonstration where applicable, and a short report of changes, validation and remaining limitations. Use fake providers/devices unless explicitly authorized to use live services. Do not add another agent framework or expand product scope.
+> Read Personal-Agent-Project-Spec.md and the merged contract ADRs. Implement only the assigned task, using its exact ID from the backlog table (for example, M1-01 for a remaining task or T02 for a historical foundation task). Own the listed files; coordinate any contract/schema change with the integration owner before editing shared surfaces. Use the pinned SDK documentation rather than inventing API signatures. Supply tests for the task’s failure modes, a runnable demonstration where applicable, and a short report of changes, validation and remaining limitations. Use fake providers/devices unless explicitly authorized to use live services. Do not add another agent framework or expand product scope.
 
 ### Bootstrap prompt for the lead development agent
 
