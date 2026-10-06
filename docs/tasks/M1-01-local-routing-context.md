@@ -129,7 +129,7 @@ the implementation addressed:
 
 | Reference | Finding | Disposition and evidence |
 | --- | --- | --- |
-| F-001 | Capped history read exposed a lower-bound omitted-message value as an exact total. | Fixed by renaming to `MinimumOmittedHistoryMessages`, documenting its lower-bound semantics and retaining the `HasMoreHistory` sentinel. Verified with a 100-message real-SQLite fixture and bounded 13-row read; see commit recorded in PR history and final integration/coverage checks. |
+| F-001 | Capped history read exposed a lower-bound omitted-message value as an exact total. | Fixed in `5670ea8` by renaming to `MinimumOmittedHistoryMessages`, documenting its lower-bound semantics and retaining the `HasMoreHistory` sentinel. Verified with a 100-message real-SQLite fixture and bounded 13-row read; `./tools/validate.sh integration` passed 81/81, and the coverage gate passed. |
 
 No schema/migration changes were made. Live local-model, cloud, credential,
 and physical-device behavior was not exercised and is not required for issue
