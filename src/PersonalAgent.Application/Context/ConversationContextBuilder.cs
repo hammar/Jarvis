@@ -41,7 +41,7 @@ public sealed class ConversationContextBuilder : IContextBuilder
             selectedNewestFirst,
             0,
             toolCatalogCharacters,
-            omittedHistoryMessages: 0);
+            minimumOmittedHistoryMessages: 0);
         EnsureWithinBudget(mandatoryEstimate, "mandatory_prompt_exceeds_limit");
 
         var historyReadLimit = LocalContextLimits.MaximumHistoryMessages + 1;
@@ -55,7 +55,7 @@ public sealed class ConversationContextBuilder : IContextBuilder
         }
 
         var hasMoreHistory = recent.Count > LocalContextLimits.MaximumHistoryMessages;
-        var omittedHistoryMessages = Math.Max(0, recent.Count - LocalContextLimits.MaximumHistoryMessages);
+        var minimumOmittedHistoryMessages = Math.Max(0, recent.Count - LocalContextLimits.MaximumHistoryMessages);
         var start = Math.Max(0, recent.Count - LocalContextLimits.MaximumHistoryMessages);
         for (var index = recent.Count - 1; index >= start; index--)
         {
@@ -63,7 +63,7 @@ public sealed class ConversationContextBuilder : IContextBuilder
             var message = recent[index];
             if (!CanInclude(message, request.ConversationId))
             {
-                omittedHistoryMessages++;
+                minimumOmittedHistoryMessages++;
                 continue;
             }
 
@@ -81,11 +81,11 @@ public sealed class ConversationContextBuilder : IContextBuilder
                 candidateNewestFirst,
                 candidateHistoryCharacters,
                 toolCatalogCharacters,
-                omittedHistoryMessages,
+                minimumOmittedHistoryMessages,
                 hasMoreHistory);
             if (candidateEstimate.EstimatedInputTokensWithMargin > LocalContextLimits.MaximumEstimatedInputTokens)
             {
-                omittedHistoryMessages++;
+                minimumOmittedHistoryMessages++;
                 continue;
             }
 
@@ -105,7 +105,7 @@ public sealed class ConversationContextBuilder : IContextBuilder
             selectedNewestFirst,
             historyCharacters,
             toolCatalogCharacters,
-            omittedHistoryMessages,
+            minimumOmittedHistoryMessages,
             hasMoreHistory);
         EnsureWithinBudget(estimate, "prompt_exceeds_limit");
         return new ContextPacket(packetId, PolicyVersion, orderedItems, estimate);
@@ -182,7 +182,7 @@ public sealed class ConversationContextBuilder : IContextBuilder
         IReadOnlyList<ContextItem> historyNewestFirst,
         int historyCharacters,
         int toolCatalogCharacters,
-        int omittedHistoryMessages,
+        int minimumOmittedHistoryMessages,
         bool hasMoreHistory = false)
     {
         var items = historyNewestFirst
@@ -217,7 +217,7 @@ public sealed class ConversationContextBuilder : IContextBuilder
             reservedMargin,
             estimatedTokens + reservedMargin,
             LocalContextLimits.MaximumEstimatedInputTokens,
-            omittedHistoryMessages,
+            minimumOmittedHistoryMessages,
             hasMoreHistory,
             IsExact: false,
             EstimationMethod);

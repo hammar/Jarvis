@@ -110,8 +110,8 @@ public sealed record ContextItem(string SourceId, string Text, string PrivacyCla
 /// <param name="ReservedMarginTokens">Additional tokens reserved for tokenizer/provider variance.</param>
 /// <param name="EstimatedInputTokensWithMargin">Estimate including the reserve margin.</param>
 /// <param name="MaximumEstimatedInputTokens">Hard maximum estimate accepted by the builder.</param>
-/// <param name="OmittedHistoryMessages">Messages not selected due to bounds or unsupported roles.</param>
-/// <param name="HasMoreHistory">Whether the store returned an extra message proving older history exists.</param>
+/// <param name="MinimumOmittedHistoryMessages">Known lower bound for messages not selected; the bounded history read cannot establish the full count.</param>
+/// <param name="HasMoreHistory">Whether the extra sentinel row proves older history exists beyond the selected-message limit.</param>
 /// <param name="IsExact">Whether a provider tokenizer produced an exact count; false for M1.</param>
 /// <param name="EstimationMethod">Human-readable description of the estimate and margin.</param>
 public sealed record ContextEstimate(
@@ -124,7 +124,7 @@ public sealed record ContextEstimate(
     int ReservedMarginTokens,
     int EstimatedInputTokensWithMargin,
     int MaximumEstimatedInputTokens,
-    int OmittedHistoryMessages,
+    int MinimumOmittedHistoryMessages,
     bool HasMoreHistory,
     bool IsExact,
     string EstimationMethod);

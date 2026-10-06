@@ -124,10 +124,12 @@ model, cloud, credential or device evidence is required by this issue.
 
 An independent read-only code review of the worktree diff against base commit
 `3b3d18f` reported no significant issues and no actionable findings. The
-finding ledger is empty; no residual risk has been accepted. Review was
-performed before a small follow-up strengthening SQLite estimate assertions;
-subsequent changes only strengthened integration assertions and documented
-fixed defaults and validation evidence; no implementation logic changed.
+initial finding ledger had no issues. A subsequent PR review identified and
+the implementation addressed:
+
+| Reference | Finding | Disposition and evidence |
+| --- | --- | --- |
+| F-001 | Capped history read exposed a lower-bound omitted-message value as an exact total. | Fixed by renaming to `MinimumOmittedHistoryMessages`, documenting its lower-bound semantics and retaining the `HasMoreHistory` sentinel. Verified with a 100-message real-SQLite fixture and bounded 13-row read; see commit recorded in PR history and final integration/coverage checks. |
 
 No schema/migration changes were made. Live local-model, cloud, credential,
 and physical-device behavior was not exercised and is not required for issue

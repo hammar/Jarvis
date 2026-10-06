@@ -150,7 +150,7 @@ public sealed class RoutingAndContextTests
         Assert.Equal("request:current", packet.Items[^1].SourceId);
         Assert.All(packet.Items, item => Assert.Equal("LocalOnly", item.PrivacyClass));
         Assert.All(packet.Items, item => Assert.Equal("user", item.Role));
-        Assert.Equal(1, packet.Estimate.OmittedHistoryMessages);
+        Assert.Equal(1, packet.Estimate.MinimumOmittedHistoryMessages);
         Assert.True(packet.Estimate.HasMoreHistory);
     }
 
@@ -173,7 +173,7 @@ public sealed class RoutingAndContextTests
         var packet = await builder.BuildAsync(Request(conversationId), CancellationToken.None);
 
         Assert.Equal(["retained", "current task"], packet.Items.Select(item => item.Text));
-        Assert.Equal(4, packet.Estimate.OmittedHistoryMessages);
+        Assert.Equal(4, packet.Estimate.MinimumOmittedHistoryMessages);
         Assert.False(packet.Estimate.HasMoreHistory);
         Assert.Equal($"conversation-message:{history[0].MessageId:D}", packet.Items[0].SourceId);
         Assert.Equal("assistant", packet.Items[0].Role);
@@ -196,7 +196,7 @@ public sealed class RoutingAndContextTests
         Assert.StartsWith("4:", packet.Items[0].Text, StringComparison.Ordinal);
         Assert.StartsWith("7:", packet.Items[3].Text, StringComparison.Ordinal);
         Assert.Equal("current task", packet.Items[^1].Text);
-        Assert.Equal(4, packet.Estimate.OmittedHistoryMessages);
+        Assert.Equal(4, packet.Estimate.MinimumOmittedHistoryMessages);
         Assert.False(packet.Estimate.HasMoreHistory);
         Assert.True(packet.Estimate.EstimatedInputTokensWithMargin <= LocalContextLimits.MaximumEstimatedInputTokens);
     }

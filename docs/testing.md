@@ -132,7 +132,7 @@ authority.
 | Strong application IDs are independent | `IdentifierContractTests` |
 | LocalOnly text cannot change the selected provider or invoke cloud | `RoutingAndContextTests.LocalOnlyRouterKeepsUntrustedEscalationTextOnTheSelectedLocalRoute`, `RoutingAndContextTests.LocalOnlyRouterRejectsCloudModesAndTasksWithoutDowngrading` |
 | Ambiguous, unsupported and invalid route categories fail explicitly | `RoutingAndContextTests.LocalOnlyRouterClarifiesAmbiguousAndEmptyTasksAndRejectsUnsupportedCategories` |
-| Context is bounded, ordered, provenance-labelled and LocalOnly | `RoutingAndContextTests.ContextBuilderIncludesOrderedRecentHistoryAndLabelsEveryItemLocalOnly`, `ConversationContextBuilderTests.ContextBuilderUsesIsolatedSqliteHistoryAndPreservesOrderProvenanceAndPrivacyLabels` |
+| Context is bounded, ordered, provenance-labelled and LocalOnly; omitted-history count is explicitly a lower bound when the bounded read detects older rows | `RoutingAndContextTests.ContextBuilderIncludesOrderedRecentHistoryAndLabelsEveryItemLocalOnly`, `ConversationContextBuilderTests.ContextBuilderUsesIsolatedSqliteHistoryAndPreservesOrderProvenanceAndPrivacyLabels` |
 | Unsupported roles, cross-conversation messages and oversized history are excluded | `RoutingAndContextTests.ContextBuilderExcludesUnsupportedRolesCrossConversationAndOversizedHistory` |
 | Prompt estimates include instructions, task, tool catalog, history, serialization and reserve | `RoutingAndContextTests.ContextEstimateIncludesInstructionsTaskToolsSerializationAndReserve` |
 | Mandatory context over budget is rejected before reading conversation history | `RoutingAndContextTests.ContextBuilderFailsExplicitlyBeforeReadingHistoryWhenRequiredPromptExceedsBudget` |

@@ -66,6 +66,9 @@ untrusted, provenance-labelled `LocalOnly` data, and adds the current task as
 the final item. System-role and tool-role messages are not treated as host
 instructions. It reads one extra history row to indicate when additional
 older history was truncated, without loading an unbounded transcript. Its
+`MinimumOmittedHistoryMessages` is a known lower bound, not the full count;
+`HasMoreHistory` separately reports when the sentinel proves older rows exist.
+Its
 estimate includes host instructions, task text, serialized
 tool definitions, conversation history and packet framing. Without a provider
 tokenizer it reports a four-UTF-16-characters-per-token estimate plus a 20%

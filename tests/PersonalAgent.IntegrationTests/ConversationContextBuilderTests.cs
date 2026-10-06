@@ -20,7 +20,7 @@ public sealed class ConversationContextBuilderTests
         await database.InitializeAsync();
         var store = new SqliteConversationStore(database, new SystemClock());
         var conversationId = ConversationId.New();
-        var messages = Enumerable.Range(0, 14)
+        var messages = Enumerable.Range(0, 100)
             .Select(index => new ConversationMessage(
                 Guid.NewGuid(),
                 conversationId,
@@ -48,17 +48,17 @@ public sealed class ConversationContextBuilderTests
             + estimate.SerializationOverheadCharacters;
 
         Assert.Equal(LocalContextLimits.MaximumHistoryMessages + 1, packet.Items.Count);
-        Assert.Equal(messages[2].Content, packet.Items[0].Text);
+        Assert.Equal(messages[88].Content, packet.Items[0].Text);
         Assert.Equal(messages[^1].Content, packet.Items[^2].Text);
         Assert.Equal("current request", packet.Items[^1].Text);
-        Assert.Equal($"conversation-message:{messages[2].MessageId:D}", packet.Items[0].SourceId);
+        Assert.Equal($"conversation-message:{messages[88].MessageId:D}", packet.Items[0].SourceId);
         Assert.Equal("user", packet.Items[0].Role);
         Assert.All(packet.Items, item => Assert.Equal("LocalOnly", item.PrivacyClass));
-        Assert.Equal(1, estimate.OmittedHistoryMessages);
+        Assert.Equal(1, estimate.MinimumOmittedHistoryMessages);
         Assert.True(estimate.HasMoreHistory);
         Assert.Equal(request.HostInstructions.Length, estimate.SystemInstructionsCharacters);
         Assert.Equal(request.TaskText.Length, estimate.CurrentTaskCharacters);
-        Assert.Equal(messages.Skip(2).Sum(message => message.Content.Length), estimate.ConversationHistoryCharacters);
+        Assert.Equal(messages.Skip(88).Sum(message => message.Content.Length), estimate.ConversationHistoryCharacters);
         Assert.True(estimate.ToolCatalogCharacters > request.Tools[0].InputSchema.Length);
         Assert.True(estimate.SerializationOverheadCharacters > 0);
         Assert.Equal((estimatedCharacters + 3) / 4, estimate.EstimatedInputTokens);
