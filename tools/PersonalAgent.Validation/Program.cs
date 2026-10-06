@@ -118,6 +118,8 @@ internal static class CoverageGate
 
     private static readonly (string Name, string RelativePath, double Lines, double Branches)[] CriticalModules =
     [
+        ("Copilot turn terminal and cancellation state machine", "src/PersonalAgent.Infrastructure/AgentEngine/Copilot/CopilotTurnStateMachine.cs", 95, 90),
+        ("Copilot active-turn cancellation and runtime lifecycle", "src/PersonalAgent.Infrastructure/AgentEngine/Copilot/CopilotActiveTurn.cs", 95, 90),
         ("Approval persistence invariants", "src/PersonalAgent.Infrastructure/Persistence/SqliteApprovalStore.cs", 95, 90),
         ("Action journal idempotency", "src/PersonalAgent.Infrastructure/Persistence/SqliteActionJournalStore.cs", 95, 90)
     ];
@@ -227,6 +229,7 @@ internal static class CoverageGate
         ExpectFailure(() => TestResults.VerifyDiscoveryXml(
             XDocument.Parse("<TestRun><ResultSummary><Counters total=\"0\" executed=\"0\" passed=\"0\" failed=\"0\" /></ResultSummary></TestRun>"),
             "missing discovery fixture"));
+        VerifyChangedLineDiscoveryIncludesTrackedWorktreeEdits();
     }
 
     internal static void Validate(string unitDirectory, string integrationDirectory)
@@ -600,8 +603,8 @@ internal static class CoverageGate
         var baseRef = Environment.GetEnvironmentVariable("GITHUB_BASE_REF");
         var eventName = Environment.GetEnvironmentVariable("GITHUB_EVENT_NAME");
         var comparison = !string.IsNullOrWhiteSpace(baseRef)
-            ? $"origin/{baseRef}...HEAD"
-            : eventName == "push" ? "HEAD^...HEAD" : "HEAD";
+            ? RunGit(root, ["merge-base", $"origin/{baseRef}", "HEAD"]).Trim()
+            : eventName == "push" ? "HEAD^" : "HEAD";
         var diff = RunGit(root, ["diff", "--no-ext-diff", "--unified=0", comparison, "--", "src"]);
         ParseAddedLines(root, diff, changed);
         var untracked = RunGit(root, ["ls-files", "--others", "--exclude-standard", "--", "src"]);
@@ -622,6 +625,80 @@ internal static class CoverageGate
         }
 
         return changed;
+    }
+
+    private static void VerifyChangedLineDiscoveryIncludesTrackedWorktreeEdits()
+    {
+        var directory = Directory.CreateTempSubdirectory("jarvis-coverage-diff-");
+        var root = directory.FullName;
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(root, "src"));
+            var sourcePath = Path.Combine(root, "src", "Fixture.cs");
+            File.WriteAllText(
+                sourcePath,
+                """
+                namespace Fixture;
+                public sealed class CoverageFixture
+                {
+                    public void Existing() { }
+                    public void TrackedWorktreeChange() { }
+                }
+                """);
+            RunGit(root, ["init", "--quiet", "-b", "main"]);
+            RunGit(root, ["config", "user.name", "Coverage Gate"]);
+            RunGit(root, ["config", "user.email", "coverage-gate@example.invalid"]);
+            RunGit(root, ["add", "src/Fixture.cs"]);
+            RunGit(root, ["commit", "--quiet", "-m", "base fixture"]);
+            RunGit(root, ["update-ref", "refs/remotes/origin/main", "HEAD"]);
+            File.WriteAllText(
+                sourcePath,
+                """
+                namespace Fixture;
+                public sealed class CoverageFixture
+                {
+                    public void CommittedChange() { }
+                    public void Existing() { }
+                    public void TrackedWorktreeChange() { }
+                }
+                """);
+            RunGit(root, ["add", "src/Fixture.cs"]);
+            RunGit(root, ["commit", "--quiet", "-m", "committed fixture change"]);
+            File.WriteAllText(
+                sourcePath,
+                """
+                namespace Fixture;
+                public sealed class CoverageFixture
+                {
+                    public void WorktreeInserted() { }
+                    public void CommittedChange() { }
+                    public void Existing() { }
+                    public void TrackedWorktreeChange() { }
+                }
+                """);
+
+            var previousBase = Environment.GetEnvironmentVariable("GITHUB_BASE_REF");
+            Environment.SetEnvironmentVariable("GITHUB_BASE_REF", "main");
+            try
+            {
+                var changes = ReadChangedSourceLines(root);
+                var absolutePath = Path.GetFullPath(sourcePath);
+                if (!changes.Contains(new CoverageLine(absolutePath, 4))
+                    || !changes.Contains(new CoverageLine(absolutePath, 5)))
+                {
+                    throw new ValidationException(
+                        "Changed-line discovery omitted a committed or tracked worktree source edit after line insertion.");
+                }
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("GITHUB_BASE_REF", previousBase);
+            }
+        }
+        finally
+        {
+            directory.Delete(recursive: true);
+        }
     }
 
     private static void ParseAddedLines(string root, string diff, ISet<CoverageLine> changed)

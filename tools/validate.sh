@@ -86,6 +86,15 @@ case "$COMMAND" in
   coverage)
     restore_solution
     dotnet run --project "$VALIDATOR" -c Release --no-restore -- gate-self-test
+    if [ -z "${GITHUB_BASE_REF:-}" ] && [ -z "${GITHUB_EVENT_NAME:-}" ]; then
+      GITHUB_BASE_REF=main
+      export GITHUB_BASE_REF
+    fi
+    if [ -n "${GITHUB_BASE_REF:-}" ] &&
+      ! git show-ref --verify --quiet "refs/remotes/origin/$GITHUB_BASE_REF"; then
+      echo "Coverage base origin/$GITHUB_BASE_REF is unavailable; fetch it before running the coverage gate." >&2
+      exit 1
+    fi
     unit_directory=${1:-$(latest_results_directory artifacts/coverage/unit)}
     integration_directory=${2:-$(latest_results_directory artifacts/coverage/integration)}
     dotnet run --project "$VALIDATOR" -c Release --no-restore -- coverage \

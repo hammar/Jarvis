@@ -302,6 +302,22 @@ public sealed class SqlitePersistenceTests
             Now.AddSeconds(20),
             CancellationToken.None);
         Assert.Empty(await reopened.ReadNonterminalTurnsAsync(10, CancellationToken.None));
+
+        var interruptedTurnId = TurnId.New();
+        await reopened.CreateTurnAsync(
+            interruptedTurnId,
+            recovered.ConversationId,
+            TurnStatus.Received,
+            Now.AddSeconds(30),
+            CancellationToken.None);
+        var interrupted = await reopened.GetTurnAsync(interruptedTurnId, CancellationToken.None);
+        await reopened.UpdateTurnStatusAsync(
+            interruptedTurnId,
+            TurnStatus.Interrupted,
+            interrupted!.Version,
+            Now.AddSeconds(31),
+            CancellationToken.None);
+        Assert.Empty(await reopened.ReadNonterminalTurnsAsync(10, CancellationToken.None));
     }
 
     [Fact]

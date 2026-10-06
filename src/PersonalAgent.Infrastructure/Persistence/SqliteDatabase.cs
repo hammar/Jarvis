@@ -8,6 +8,7 @@ namespace PersonalAgent.Infrastructure.Persistence;
 /// <summary>Owns a single SQLite database file, its connections, and forward-only schema migrations.</summary>
 public sealed class SqliteDatabase
 {
+    private static readonly TimeSpan ImmediateTransactionTimeout = TimeSpan.FromSeconds(10);
     private const UnixFileMode OwnerPrivateDirectory =
         UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute;
     private const UnixFileMode OwnerPrivateFile = UnixFileMode.UserRead | UnixFileMode.UserWrite;
@@ -82,16 +83,34 @@ public sealed class SqliteDatabase
     /// <summary>Opens a configured connection with foreign-key enforcement and a bounded busy timeout.</summary>
     /// <param name="cancellationToken">Token that cancels opening the connection.</param>
     /// <returns>An open connection owned by the caller.</returns>
-    public async Task<SqliteConnection> OpenConnectionAsync(CancellationToken cancellationToken = default)
+    public Task<SqliteConnection> OpenConnectionAsync(CancellationToken cancellationToken = default) =>
+        OpenConnectionAsync(connectionString, 10_000, cancellationToken);
+
+    internal Task<SqliteConnection> OpenConnectionWithDefaultTimeoutAsync(
+        int defaultTimeoutSeconds,
+        CancellationToken cancellationToken)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(defaultTimeoutSeconds);
+        var builder = new SqliteConnectionStringBuilder(connectionString)
+        {
+            DefaultTimeout = defaultTimeoutSeconds
+        };
+        return OpenConnectionAsync(builder.ToString(), checked(defaultTimeoutSeconds * 1000), cancellationToken);
+    }
+
+    private async Task<SqliteConnection> OpenConnectionAsync(
+        string configuredConnectionString,
+        int busyTimeoutMilliseconds,
+        CancellationToken cancellationToken)
     {
         EnsurePrivateDataDirectory(Path.GetDirectoryName(DatabasePath)
             ?? throw new InvalidOperationException("The SQLite database path must have a parent directory."));
-        var connection = new SqliteConnection(connectionString);
+        var connection = new SqliteConnection(configuredConnectionString);
         try
         {
             await connection.OpenAsync(cancellationToken);
             await using var command = connection.CreateCommand();
-            command.CommandText = "PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 10000;";
+            command.CommandText = $"PRAGMA foreign_keys = ON; PRAGMA busy_timeout = {busyTimeoutMilliseconds};";
             await command.ExecuteNonQueryAsync(cancellationToken);
             RestrictFilePermissions(DatabasePath);
             RestrictFilePermissions(DatabasePath + "-wal");
@@ -102,6 +121,33 @@ public sealed class SqliteDatabase
         {
             await connection.DisposeAsync();
             throw;
+        }
+    }
+
+    internal static async ValueTask<SqliteTransaction> BeginImmediateTransactionAsync(
+        SqliteConnection connection,
+        CancellationToken cancellationToken)
+    {
+        var startedAt = System.Diagnostics.Stopwatch.GetTimestamp();
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                return connection.BeginTransaction(deferred: false);
+            }
+            catch (SqliteException exception) when (exception.SqliteErrorCode is 5 or 6)
+            {
+                if (System.Diagnostics.Stopwatch.GetElapsedTime(startedAt) >= ImmediateTransactionTimeout)
+                {
+                    throw new SqliteException(
+                        "SQLite could not acquire an immediate write transaction before the configured timeout.",
+                        exception.SqliteErrorCode,
+                        exception.SqliteExtendedErrorCode);
+                }
+
+                await Task.Delay(TimeSpan.FromMilliseconds(10), cancellationToken);
+            }
         }
     }
 

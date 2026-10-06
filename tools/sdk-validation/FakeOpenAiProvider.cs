@@ -26,8 +26,13 @@ internal sealed class FakeOpenAiProvider : IAsyncDisposable
     public string RequestedTool { get; set; } = "read_only_lookup";
     public bool RepeatTool { get; set; }
     public bool FailInference { get; set; }
+    public bool StallInference { get; set; }
+    public string? StreamingContent { get; set; }
+    public int StreamingDeltaCount { get; set; }
     public string? RedirectUrl { get; set; }
     public string? ExpectedToolResult { get; set; } = "fixture-result:fixture-key";
+    public TaskCompletionSource InferenceStalled { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public TaskCompletionSource StreamingResponseWritten { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     public static Task<FakeOpenAiProvider> StartAsync()
     {
@@ -117,12 +122,30 @@ internal sealed class FakeOpenAiProvider : IAsyncDisposable
             return;
         }
 
+        if (StallInference)
+        {
+            InferenceStalled.TrySetResult();
+            try
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, _shutdown.Token);
+            }
+            catch (OperationCanceledException) when (_shutdown.IsCancellationRequested)
+            {
+            }
+
+            context.Response.Close();
+            return;
+        }
+
         if ((index == 1 || RepeatTool) && toolNames.Length > 0)
         {
             await WriteJsonAsync(context.Response,
                 JsonSerializer.Serialize(new
                 {
-                    id = $"chatcmpl-jarvis-{index}", @object = "chat.completion", created = 0, model = "fixture-model",
+                    id = $"chatcmpl-jarvis-{index}",
+                    @object = "chat.completion",
+                    created = 0,
+                    model = "fixture-model",
                     choices = new[] { new { index = 0, message = new { role = "assistant", content = (string?)null,
                         tool_calls = new[] { new { id = $"call-jarvis-{index}", type = "function",
                             function = new { name = RequestedTool, arguments = "{\"key\":\"fixture-key\"}" } } } },
@@ -134,7 +157,7 @@ internal sealed class FakeOpenAiProvider : IAsyncDisposable
         using var requestJson = JsonDocument.Parse(body);
         if (requestJson.RootElement.TryGetProperty("stream", out var stream) && stream.GetBoolean())
         {
-            await WriteStreamingResponseAsync(context.Response);
+            await WriteStreamingResponseAsync(context.Response, StreamingContent, StreamingDeltaCount);
             return;
         }
 
@@ -155,24 +178,57 @@ internal sealed class FakeOpenAiProvider : IAsyncDisposable
         }
         await WriteJsonAsync(context.Response, JsonSerializer.Serialize(new
         {
-            id = "chatcmpl-jarvis-final", @object = "chat.completion", created = 0, model = "fixture-model",
+            id = "chatcmpl-jarvis-final",
+            @object = "chat.completion",
+            created = 0,
+            model = "fixture-model",
             choices = new[] { new { index = 0, message = new { role = "assistant", content = answer }, finish_reason = "stop" } },
         }));
     }
 
-    private static async Task WriteStreamingResponseAsync(HttpListenerResponse response)
+    private async Task WriteStreamingResponseAsync(
+        HttpListenerResponse response,
+        string? contentOverride,
+        int deltaCount)
     {
         response.StatusCode = (int)HttpStatusCode.OK;
         response.ContentType = "text/event-stream";
         response.SendChunked = true;
         response.KeepAlive = false;
-        var chunks = new[]
-        {
-            """data: {"id":"chatcmpl-stream","object":"chat.completion.chunk","created":0,"model":"fixture-model","choices":[{"index":0,"delta":{"role":"assistant","content":"streamed "},"finish_reason":null}]}""",
-            """data: {"id":"chatcmpl-stream","object":"chat.completion.chunk","created":0,"model":"fixture-model","choices":[{"index":0,"delta":{"content":"fixture answer"},"finish_reason":null}]}""",
-            """data: {"id":"chatcmpl-stream","object":"chat.completion.chunk","created":0,"model":"fixture-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}""",
-            "data: [DONE]",
-        };
+        var chunks = deltaCount > 0
+            ? Enumerable.Range(0, deltaCount)
+                .Select(_ => $"data: {JsonSerializer.Serialize(new
+                {
+                    id = "chatcmpl-stream",
+                    @object = "chat.completion.chunk",
+                    created = 0,
+                    model = "fixture-model",
+                    choices = new[] { new { index = 0, delta = new { content = "x" }, finish_reason = (string?)null } }
+                })}")
+                .Append("""data: {"id":"chatcmpl-stream","object":"chat.completion.chunk","created":0,"model":"fixture-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}""")
+                .Append("data: [DONE]")
+                .ToArray()
+            : contentOverride is null
+            ? new[]
+                {
+                    """data: {"id":"chatcmpl-stream","object":"chat.completion.chunk","created":0,"model":"fixture-model","choices":[{"index":0,"delta":{"role":"assistant","content":"streamed "},"finish_reason":null}]}""",
+                    """data: {"id":"chatcmpl-stream","object":"chat.completion.chunk","created":0,"model":"fixture-model","choices":[{"index":0,"delta":{"content":"fixture answer"},"finish_reason":null}]}""",
+                    """data: {"id":"chatcmpl-stream","object":"chat.completion.chunk","created":0,"model":"fixture-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}""",
+                    "data: [DONE]",
+                }
+            : new[]
+            {
+                $"data: {JsonSerializer.Serialize(new
+                {
+                    id = "chatcmpl-stream",
+                    @object = "chat.completion.chunk",
+                    created = 0,
+                    model = "fixture-model",
+                    choices = new[] { new { index = 0, delta = new { role = "assistant", content = contentOverride }, finish_reason = (string?)null } }
+                })}",
+                """data: {"id":"chatcmpl-stream","object":"chat.completion.chunk","created":0,"model":"fixture-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}""",
+                "data: [DONE]"
+            };
         foreach (var chunk in chunks)
         {
             var bytes = Encoding.UTF8.GetBytes(chunk + "\n\n");
@@ -180,6 +236,7 @@ internal sealed class FakeOpenAiProvider : IAsyncDisposable
             await response.OutputStream.FlushAsync();
         }
         response.Close();
+        StreamingResponseWritten.TrySetResult();
     }
 
     private static async Task WriteJsonAsync(HttpListenerResponse response, string json)

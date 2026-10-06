@@ -7,7 +7,7 @@
 | Unit | `PersonalAgent.UnitTests` / `unit-tests` | Domain and Application contracts without network or real clocks. |
 | Architecture | `PersonalAgent.ArchitectureTests` / `architecture` | Direct project references, compiled dependency boundaries, Copilot confinement, and Web composition exception. |
 | Integration | `PersonalAgent.IntegrationTests` / `integration-tests` | Real isolated SQLite and in-process Web HTTP composition. |
-| SDK contract | `tools/sdk-validation` / `sdk-contracts` | Actual pinned Copilot runtime contracts, credential-free on Linux and macOS. |
+| SDK contract | `tools/sdk-validation` and `PersonalAgent.SdkContractTests` / `sdk-contracts` | Actual pinned Copilot runtime and adapter contracts against controlled endpoints, credential-free on Linux and macOS. |
 | Aspire E2E | `PersonalAgent.E2ETests` / `aspire-e2e` | Out-of-process AppHost Web and managed deterministic endpoints; temporary data is isolated. |
 | Browser E2E | `PersonalAgent.E2ETests` / `browser-e2e` | Playwright drives the Razor page through the Aspire resource endpoint. |
 
@@ -36,7 +36,10 @@ Enforced targets follow AGENTS.md: Domain and Application unit-only at 90%
 lines / 85% branches; combined unit+integration first-party runtime at 85% /
 75%; each runtime assembly at 80% / 70%; approval persistence invariants in
 `SqliteApprovalStore.cs` and action-journal idempotency in
-`SqliteActionJournalStore.cs` at 95% / 90%; changed executable lines at 90%.
+`SqliteActionJournalStore.cs`, plus the Copilot turn terminal and cancellation
+state machine in `AgentEngine/Copilot/CopilotTurnStateMachine.cs` and active
+turn cancellation/runtime lifecycle in `AgentEngine/Copilot/CopilotActiveTurn.cs`,
+at 95% / 90%; changed executable lines at 90%.
 The coverage validator requires each critical source file to exist at its
 exact owned path, so renaming it cannot silently remove the gate. A module with no coverable lines
 does not count as evidence of passing its threshold; runtime assemblies with
@@ -44,9 +47,10 @@ no coverable lines fail, and branch coverage is N/A only when a module has no
 coverable branches. Thresholds apply as executable production code is
 introduced; compiler-generated record boilerplate is excluded by attribute,
 while handwritten code remains covered. E2E execution is not counted as
-in-process coverage. No broad Infrastructure exclusion is allowed: the
-currently empty Infrastructure assembly activates its per-assembly 80%/70%
-requirement as soon as it contains handwritten C#.
+in-process coverage. The adapter runtime contracts are linked into the
+integration test project and run with the integration collector so exercised
+adapter code contributes to the combined runtime and changed-line gates. No
+broad Infrastructure exclusion is allowed.
 
 The `gate-self-test` operation runs low-line, low-branch, low-critical-module,
 complementary branch-outcome, empty/missing OpenCover-module, empty-coverage,
@@ -150,6 +154,21 @@ authority.
 | Local and Hybrid use explicit external endpoint configuration | `ExternalEndpointProfileTests.LocalAndHybridProfilesLaunchWithExplicitExternalEndpointReferences` |
 | Browser reaches actual AppHost Web resource | `BrowserSmokeTests.PlaywrightLoadsTheAspireSimulatorPage` |
 | SDK compatibility uses pinned actual runtime | T01 `--contracts` suite, `sdk-contracts-platform` on Linux/macOS |
+| Adapter streams events with explicit local/cloud provider and transcript isolation | `CopilotAgentEngineContractTests.ActualRuntimeStreamsEventsUsesExplicitProviderAndPersistsOrderedTerminalOutcome` |
+| Adapter exposes only the exact registered tool and forwards host outcome; reconnect replay resumes after the observed sequence without redispatching or duplicating the final event | `CopilotAgentEngineContractTests.ActualRuntimeInvokesOnlyRegisteredToolAndForwardsHostOutcome` |
+| Tool execution count cannot exceed the host budget | `CopilotAgentEngineContractTests.ActualRuntimeToolLoopCannotExceedHostBudget` |
+| Explicit cancellation reaches a blocked host callback exactly once | `CopilotAgentEngineContractTests.CancelAsyncCancelsHostToolAndEmitsOnePersistedCancellationOutcome` |
+| SDK child-process crash becomes interruption; next turn starts a fresh runtime | `CopilotAgentEngineContractTests.RuntimeProcessCrashBecomesInterruptedAndNextTurnStartsFreshRuntime` |
+| Provider failure is explicit and does not include provider error content | `CopilotAgentEngineContractTests.ProviderFailureEmitsSafeFailureCodeWithoutLeakingProviderMessage` |
+| Event-persistence failure aborts runtime and commits an interrupted terminal outcome when storage recovers; deadline cancellation bounds a blocked append without being classified as a persistence failure | `CopilotAgentEngineContractTests.EventPersistenceFailureInterruptsRuntimeAndPersistsTerminalOutcome`, `CopilotAgentEngineContractTests.DeadlineBoundsBlockedEventPersistenceWithoutMisclassifyingCancellation` |
+| A stalled provider is canceled at the request deadline and persists one interrupted terminal outcome | `CopilotAgentEngineContractTests.DeadlineCancelsStalledProviderAndPersistsOneInterruptedOutcome` |
+| Terminal status and event commit atomically; stale compare-and-swap writes do not append an event | `CopilotTurnStateMachineTests.TurnStateMachineAppliesRunningAndTerminalTransitionsWithCompareAndSwap` |
+| Terminal persistence observes its bounded cancellation token | `CopilotTurnStateMachineTests.TurnStateMachineAppliesRunningAndTerminalTransitionsWithCompareAndSwap` |
+| Every terminal signal maps to one typed status/event pair | `CopilotTurnStateMachineTests.TurnStateMachineMapsEveryEngineSignalToOneTypedTerminalOutcome` |
+| Active-turn cancellation, tool-budget transitions, and terminal-signal precedence | `CopilotTurnStateMachineTests.ActiveTurnCancellationAndBudgetTransitionsAreHostControlled`, `CopilotTurnStateMachineTests.ActiveTurnSelectsTerminalOutcomeByBudgetCancellationDeadlinePrecedence` |
+| Interrupted turns are terminal and excluded from post-restart recovery work | `SqlitePersistenceTests.NonterminalTurnStateAndVersionCanBeRecoveredAfterRestart` |
+| Runtime cleanup deletes the turn directory after shutdown and classifies cleanup failures | `CopilotTurnStateMachineTests.RuntimeCleanupDeletesTurnDirectoryAfterStoppingRuntime`, `CopilotTurnStateMachineTests.RuntimeCleanupAttemptsEveryResourceAndReportsCleanupFailure` |
+| A timed-out runtime force-stop is shared; disposal does not race the still-running stop | `CopilotTurnStateMachineTests.RuntimeStopTimeoutSharesInFlightStopAndWaitsBeforeDisposal` |
 | Prohibited dependency edges are rejected | `ArchitectureBoundaryTests` negative fixtures |
 | Missing discovery/report/low coverage fails | `PersonalAgent.Validation gate-self-test` |
 | Browser test failure is visible | `BrowserSmokeTests.DeliberatelyIncorrectBrowserAssertionFails` probe |

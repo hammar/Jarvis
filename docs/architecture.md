@@ -55,6 +55,24 @@ where specified, and reports uncertain physical outcomes explicitly. Cloud
 context must be a minimal inspectable packet bound to the chosen provider and
 consent; neither the Local profile nor an SDK flag is an air-gap claim.
 
+T04's `CopilotAgentEngine` creates a fresh SDK client/session and dedicated
+runtime/work directory for each turn. It uses empty SDK mode, explicit
+provider configuration, disabled logged-in-user discovery, a sanitized child
+environment, and only the caller's registered tool catalog. Every tool
+callback goes through `IToolDispatcher`; the engine does not provide tool
+authorization. Typed events are appended through `IConversationStore` before
+they are yielded, so persistent per-turn sequence numbers are the replay
+cursor. Terminal status and its terminal event are committed atomically using
+the stored expected version. Deadlines
+bound SDK waits and abort/stop are bounded; timeout and process cleanup
+uncertainty are reported as interruption. The per-turn SDK runtime/workspace
+directory is removed after shutdown, with cleanup failures surfaced as
+interruption. Terminal persistence has a separate bounded timeout so
+cancellation cannot skip the durable outcome. Event persistence observes the
+turn token; force-stop and disposal share one shutdown task, preventing
+disposal or directory removal from racing a timed-out stop. The native runtime
+remains a trusted dependency under ADR 0001, not an OS-isolated process.
+
 ## Aspire resource ownership
 
 AppHost owns only processes it launches. The Simulator/E2E profiles start Web

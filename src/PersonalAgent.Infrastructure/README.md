@@ -69,5 +69,62 @@ Simulator and E2E Web processes require an explicit isolated
 is not automatic; restore a backup made for the prior binary. Use
 `tools/validate.sh integration` for the real SQLite persistence suite.
 
-Tests: `tools/validate.sh integration`, `tools/validate.sh architecture`, and
-`tools/validate.sh coverage`.
+## Copilot agent engine
+
+`AgentEngine/Copilot/CopilotAgentEngine` implements the Application-owned
+`IAgentEngine` without allowing SDK types to cross the Infrastructure adapter
+namespace. The caller supplies the selected provider, host instructions,
+already-selected context, exact tool catalog, deadline, and maximum tool-call
+count. The adapter does not route, approve context, or authorize a tool;
+callbacks always pass through the host's `IToolDispatcher`.
+
+Configure `CopilotAgentEngineOptions` from trusted host configuration. Set
+`RuntimeDirectory` beneath a private application data directory; local and
+cloud provider settings each require an explicit OpenAI-compatible `Model` and
+`BaseUrl`. Local endpoints must be loopback. Non-loopback cloud endpoints must
+use HTTPS. `WireApi` is optional. Use `ApiKeyReference` and an
+application-owned `ISecretResolver` for provider keys; resolved key values are
+passed only to the SDK and never enter the child-process environment, events,
+or logs. A configured key reference without a registered resolver fails the
+turn explicitly.
+
+Every turn starts a fresh SDK client and session in
+`<RuntimeDirectory>/turn-<TurnId>/`, with empty SDK mode, logged-in-user
+discovery disabled, session storage disabled, and a sanitized environment.
+Only request-registered custom tools are exposed. The adapter streams typed
+events and appends each to `IConversationStore`, which assigns an atomic,
+monotonic per-turn sequence for later event replay. Terminal status changes and
+their terminal event are committed together through
+`IAtomicTurnOutcomeStore`, using the persisted turn version; a stale or
+already-terminal update fails rather than overwriting another outcome.
+
+The host deadline bounds a send even when the SDK runtime dies without
+completing its wait. Cancellation/deadline requests abort the active session
+and stop the turn-owned runtime with bounded cleanup. A process crash or
+cleanup failure is `Interrupted`, provider failure is `Failed`, and explicit
+cancellation is `Cancelled`; an ambiguous physical result remains the
+dispatcher’s responsibility. This design uses the accepted native trusted
+runtime from ADR 0001 and does not claim OS-enforced egress containment.
+Observed-event and caller-output channels are bounded to 128 events each, and
+each turn accepts at most 10,000 events and 1,000,000 streamed UTF-16 code
+units. Reaching either the channel capacity or turn event budget cancels the
+runtime and persists an `event_budget_exceeded` failure rather than dropping
+text silently. Terminal outcomes are persisted before publishing to the caller;
+if the caller stops reading, delivery is cancelled without blocking turn
+shutdown, and the durable event remains available for replay. A slow reader
+cannot block terminal delivery indefinitely. Cancellation or deadline expiry
+while acquiring the durable turn claim also persists a terminal outcome using
+the pre-claim version, so a competing engine's claim cannot be overwritten.
+The per-turn runtime/workspace directory is removed after bounded runtime
+shutdown; a removal failure is surfaced as cleanup uncertainty. Terminal
+outcome persistence has its own bounded timeout so turn cancellation does not
+prevent recording the terminal result.
+Event persistence observes the turn cancellation/deadline token. Runtime
+force-stop and disposal share one in-flight shutdown operation; disposal and
+runtime-directory removal do not race a force-stop that exceeded its wait
+bound.
+The adapter is not yet an end-user conversation flow: routing, consent,
+dispatcher policy, UI/SSE, and coordinator integration are later task scope.
+
+Tests: `tools/validate.sh integration`, `tools/validate.sh architecture`,
+`tools/validate.sh sdk-contracts`, and `tools/validate.sh coverage`.
