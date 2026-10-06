@@ -56,7 +56,7 @@ until explicitly resolved.
 
 Use optimistic compare-and-swap updates for versioned facts, approval requests,
 and action journal state. Keep job due-work leasing as an atomic persistence
-primitive; scheduler policy remains in T09.
+primitive; scheduler policy remains in M3-02 (formerly T09).
 
 ## Rationale and consequences
 

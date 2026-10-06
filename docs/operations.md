@@ -8,4 +8,6 @@ manager or expose its dashboard publicly.
 Use Simulator for credential-free development. Local and Hybrid require
 explicit trusted endpoint configuration; use secret references rather than
 embedding credentials in URIs or source control. Runtime secret resolution,
-backup/restore, native restart policy, and update procedures are owned by T12.
+backup/restore deployment procedures, native restart policy, and update
+procedures are owned by M4-02 (formerly T12). T03 already supplies the
+SQLite backup/restore primitives; M4-02 rehearses their deployment use.
