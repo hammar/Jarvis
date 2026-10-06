@@ -35,8 +35,9 @@ originates from issue #4 and depends on completed T02 (#3).
 
 ## Exclusions
 
-No memory conflict/supersede business logic (T08), scheduler/lease worker logic
-(T09), approval authorization or action execution logic (T06), UI, real model
+No memory conflict/supersede business logic (M2-03, formerly T08),
+scheduler/lease worker logic (M3-02, formerly T09), approval authorization or
+action execution logic (M2-01, formerly T06), UI, real model
 or household integration, backup automation, schema downgrade, secure-erasure
 claim, or automatic replay of jobs/actions during restore.
 

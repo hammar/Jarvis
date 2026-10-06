@@ -5,6 +5,18 @@ Ollama, approved Home Assistant tools, and the GitHub Copilot SDK behind an
 application-owned adapter. The host owns privacy policy, approvals, durable
 state and execution; model output is untrusted.
 
+## Delivery milestones
+
+Complete milestones in order: M0 SDK Validation, M1 Local Chat, M2 Home
+Assistant & Memory, M3 Cloud Consent & Reminders, M4 Release Readiness.
+Every task belongs to one milestone and closes within it; every milestone
+ends with a cumulative runnable demo and its required checks. See the
+[ordered task backlog](docs/Personal-Agent-Project-Spec.md#15-agent-ready-implementation-backlog)
+and [demo/exit criteria](docs/Personal-Agent-Project-Spec.md#16-milestones-and-release-boundaries).
+T01-T04 retain their completed historical IDs; remaining work uses
+milestone-local IDs such as M1-01. This plan is not a claim that later demos
+are implemented today.
+
 ## Prerequisites and quick start
 
 - .NET SDK `10.0.401`, pinned in [`global.json`](global.json). Historical T01

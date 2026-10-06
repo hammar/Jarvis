@@ -1,8 +1,13 @@
 # Local-first personal assistant — development specification
 
-Version: 0.3 · 2026-10-05 · Status: proposed implementation baseline
+Version: 0.4 · 2026-10-05 · Status: proposed implementation baseline
 
 Revision 0.2 made Aspire the development orchestration baseline and added an enforceable agentic development workflow. Revision 0.3 records the owner's accepted agentic implementation/review policy: specifications and acceptance evidence, rather than owner manual inspection of generated code, govern acceptance. Sections 18–21 and the companion AGENTS.md define the detailed requirements. They supersede the abbreviated workflow guidance in section 15.
+
+Revision 0.4 reorganizes the remaining backlog into chronological, runnable
+milestones at the owner's request. Each task has exactly one milestone and is
+completed within it. Product scope, accepted ADRs and validation gates are
+unchanged; legacy cross-milestone tasks are replaced by separately closable tasks.
 
 ## 1. Purpose and decisions
 
@@ -310,22 +315,53 @@ Definition of done: runnable simulator demo; build and CI tests pass; critical S
 
 ## 15. Agent-ready implementation backlog
 
-T01 and T02 are sequential gates. After contracts are merged, tasks with satisfied dependencies can be assigned to separate development agents. The integration owner controls shared contracts, schema and composition. Tasks describe development delegation, not runtime multi-agent features.
+Execute milestones in order: M0, M1, M2, M3, M4. Close the current milestone
+only after all its tasks, its cumulative demo and its applicable checks pass.
+No task remains open for work in a later milestone. A dependency on a completed
+earlier milestone is a prerequisite, not a second parent.
 
-| ID | Task / file ownership | Dependencies | Acceptance / deliverables |
+T01-T04 retain their historical IDs and completed records. Remaining tasks use
+milestone-local IDs: M1-01, for example, belongs only to M1. The table gives the
+recommended serial order; independent tasks may run in parallel only after their
+explicit prerequisites are satisfied and ownership is isolated. The integration
+owner controls shared contracts, schema and composition. These are development
+tasks, not runtime multi-agent features.
+
+| Milestone | ID / issue | Deliverable and ownership | Prerequisites |
 |---|---|---|---|
-| T01 | SDK feasibility spike; docs/sdk-validation.md; isolated spike project | None | Complete M0; pin versions; show local tool call and permission denial; go/no-go report |
-| T02 | Aspire AppHost/ServiceDefaults, solution/contracts, configuration, architecture tests and CI quality gates | T01 | Simulator starts via Aspire; agreed records; dependency rules; coverage threshold failure proven; initial browser E2E; documentation skeleton |
-| T03 | SQLite persistence, migrations, repositories, backup/restore | T02 | Restart persistence, concurrency and migration tests; database upgrade fixture; restore procedure |
-| T04 | Copilot adapter, runtime isolation, streaming/cancellation | T02 + T01 | SDK contract tests; no ambient tools/config; clean terminal outcomes and explicit provider selection |
-| T05 | Routing/context builder and cloud consent | T02; integrate T03 | Route matrix tests; LocalOnly enforcement; exact packet review/hash binding; no full transcript forwarding |
-| T06 | Tool dispatcher, approval/action journal | T02; integrate T03 | Unknown outcomes, single-use approval, entity restrictions and repeated-call tests |
-| T07 | Home Assistant adapter and fake fixtures | T02 | Typed reads/service mapping; timeout and verification tests; no credentials in output |
-| T08 | Memory use cases and FTS retrieval | T03 | Explicit proposals, conflicts, edit/delete, provenance, privacy-filtered retrieval |
-| T09 | Persisted reminders/scheduler/inbox | T03 | Lease recovery, request dedupe, DST, recurrence and misfire tests with fake clock |
-| T10 | Razor UI, authentication, APIs and SSE | T02; integrate T03–T09 | Aspire/Playwright simulator flows; CSRF/object auth; reconnect/cancel; local/cloud indicators; documented user flows |
-| T11 | Turn coordinator and end-to-end integration | T04–T10 | MVP stories work using fake engine/HA; bounded turns; cloud transition avoids action replay |
-| T12 | Deployment, upgrade rehearsal, evaluation and release review | T11 | Native macOS runbook; Aspire profiles; clean-room setup; restore rehearsal; evaluation report; independent PR review; all mandatory CI gates |
+| M0 | T01 / #2 | SDK spike, pinned versions, isolation/tool/cancellation evidence and go/no-go | None |
+| M1 | T02 / #3 | Aspire scaffold, frozen contracts, architecture/CI enforcement and documentation skeleton | M0 closed |
+| M1 | T03 / #4 | SQLite persistence, migrations, concurrency and backup/restore primitives | T02 |
+| M1 | T04 / #6 | Isolated Copilot adapter, explicit providers, streaming/cancellation and actual-runtime contracts | T02 and M0 |
+| M1 | M1-01 / #7 | Local-only routing and bounded context; cloud denial; Application routing/context | T03, T04 |
+| M1 | M1-02 / #12 | Local turn use case, durable lifecycle, limits, cancellation, recovery and production composition | M1-01 |
+| M1 | M1-03 / #11 | Owner bootstrap/auth, chat APIs/UI/SSE, local settings/activity and runnable chat demo | M1-02 |
+| M2 | M2-01 / #5 | Tool dispatcher, exact approvals, authorization and durable action journal | M1 closed |
+| M2 | M2-02 / #8 | Typed Home Assistant REST adapter, one bounded transient safe-read retry, controlled fixtures and home tools | M2-01 |
+| M2 | M2-03 / #9 | Confirmed memory proposals, FTS retrieval, conflicts, deletion and memory tools | M2-01 |
+| M2 | M2-04 / #29 | Household/memory/approval UI, local coordinator integration, audit and runnable M2 demo | M2-02, M2-03 |
+| M3 | M3-01 / #30 | Cloud route matrix, exact packets, persisted consent, privacy invalidation and budgets | M2 closed |
+| M3 | M3-02 / #10 | Reminder proposals, scheduler/leases, DST/recurrence/misfires and durable inbox | M2 closed |
+| M3 | M3-03 / #31 | Cloud review and reminder UI/APIs, coordinator/worker integration and runnable M3 demo | M3-01, M3-02 |
+| M4 | M4-01 / #32 | Complete MVP scenario evidence, operational limits, failure/recovery and cumulative demo | M3 closed |
+| M4 | M4-02 / #13 | Deployment, upgrade/restore rehearsal, evaluation, protection proof and pilot readiness | M4-01 |
+
+Scope migration preserves all original acceptance obligations:
+
+| Legacy task | Replacement ownership |
+|---|---|
+| T05 | M1-01 owns local-only routing/context; M3-01 owns cloud policy/consent/budgets |
+| T06, T07, T08, T09 | M2-01, M2-02, M2-03, M3-02 respectively |
+| T10 | M1-03 owns chat/auth/SSE; M2-04 owns household/memory/approval UI; M3-03 owns cloud/reminder UI |
+| T11 | M1-02 owns local coordination; M2-04 and M3-03 own their feature integration; M4-01 owns complete acceptance evidence |
+| T12 | M4-02 owns release readiness |
+
+Each task's issue defines its own tests, documentation, exclusions and completion
+criteria. Write its implementation brief under `docs/tasks/` before coding.
+Milestone demo tasks exercise production composition using deliberate controlled
+adapters/endpoints, not success stubs. Their implemented acceptance scenarios and
+required checks must pass before closure; M4 is not permission to defer working
+features, security, documentation, coverage or independent review.
 
 Task handoff template:
 
@@ -354,11 +390,30 @@ The companion AGENTS.md is the canonical detailed instruction file to copy into 
 
 ## 16. Milestones and release boundaries
 
-- M0: SDK feasibility and version pin. No product commitment until isolation controls are demonstrated.
-- M1: Local text chat + simulator + app-owned durable conversation state; no real writes.
-- M2: HA reads and approved lights, explicit memory, local audit and approvals.
-- M3: Exact-context cloud consent + independent cloud sessions, persisted reminders and inbox.
-- M4: Restart/upgrade/restore validation, evaluation set and owner pilot.
+Each milestone is a cumulative runnable increment. Complete and close it before
+starting the next. The task list in section 15 is the exclusive membership list;
+there are no shared tasks or deferred portions of a closed task.
+
+| Milestone | Runnable demo at closure | Exit gate |
+|---|---|---|
+| M0: SDK Validation | Run the SDK harness: controlled tool invocation, denial, explicit provider isolation and bounded cancellation | T01 evidence/go decision and pinned versions; no product-service claim |
+| M1: Local Chat | Launch Aspire, authenticate, chat with streamed local responses, reconnect/cancel, restart and reopen durable history | T02-T04 and M1-01 through M1-03 complete; Simulator API/browser flows and applicable mandatory gates pass; no cloud or household writes |
+| M2: Home Assistant & Memory | Repeat M1; read a timestamped simulated sensor, control an allowed simulated light, approve/reject a gated proposal, remember/retrieve/edit/delete a fact after restart and inspect audit | M2-01 through M2-04 complete; entity/approval/Unknown-outcome/privacy and cumulative M1/M2 scenarios pass |
+| M3: Cloud Consent & Reminders | Repeat M2; review the exact context, consent to an isolated controlled cloud answer, confirm a reminder, restart and receive one durable inbox notification | M3-01 through M3-03 complete; consent/budget/no-replay and scheduler/DST/recovery scenarios pass; all nine MVP stories implemented end-to-end |
+| M4: Release Readiness | Run the full demo plus failure/restart and matched upgrade/restore rehearsals using the documented deployment path | M4-01 and M4-02 complete; full scenario matrix, required checks, protection proof, evaluation and independent review dispositions support owner acceptance |
+
+Required demos and CI use controlled endpoints, isolated data and no household
+or cloud credentials. The Local profile provides native Ollama wiring at M1;
+live local-model runs remain opt-in and must be identified separately from
+deterministic simulator and actual-runtime contract evidence. M2 provides opt-in
+Home Assistant smoke guidance; M3 provides opt-in cloud smoke guidance. Never
+describe a simulated observation or response as a live result.
+
+M4 prepares an owner pilot; it does not require physical writes or public
+deployment. Run and record the selected-local-model evaluation before the pilot
+or enabling automatic writes, as required by section 14. Live credentials,
+cloud disclosure and device writes require explicit consent. An unavailable
+required check blocks its existing gate; this reorganization waives none.
 
 Pilot in read-only mode first; enable individual allowed light operations after verifying behavior. This is an implementation sequencing choice, not a request for repeated approval of ordinary development. All non-MVP integrations require a new scoped specification.
 
@@ -412,7 +467,7 @@ Use service discovery/resource references rather than fixed ports for managed re
 
 ServiceDefaults includes useful health checks, service discovery and local OpenTelemetry configuration, with privacy filtering. Review default HTTP resilience: automatic retries/hedging must not repeat physical writes, provider turns or non-idempotent operations. Put safe reads and unsafe writes behind different policies. Aspire dashboard is local/authenticated; do not expose it or its logs publicly. Local dashboard export is distinct from hosted tracing, which stays opt-in.
 
-Ship both the canonical Aspire development command and a direct Web host deployment procedure. Aspire AppHost is not automatically a production supervisor for an always-on Mac. T12 records native service startup, restart behavior, external Ollama lifecycle and backup/restore. Optional publish/deployment support does not authorize public deployment.
+Ship both the canonical Aspire development command and a direct Web host deployment procedure. Aspire AppHost is not automatically a production supervisor for an always-on Mac. M4-02 records native service startup, restart behavior, external Ollama lifecycle and backup/restore. Optional publish/deployment support does not authorize public deployment.
 
 Aspire acceptance: simulator launches from clean checkout; dependency endpoints are discovered; required readiness failures are visible; tests run simultaneously with separate data/ports; disposing the test host cleans up only resources it owns; stopping AppHost preserves real development data and does not stop external HA/Ollama; telemetry contains no simulated secrets or raw prompts; all profiles have documented prerequisites.
 
