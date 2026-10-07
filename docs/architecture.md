@@ -115,8 +115,10 @@ before routing pending work, after routing returns and before starting inference
 Held publication cannot convert an already-cancelled request into a clarification,
 route rejection or new provider execution.
 Shutdown closes acceptance and the queue before awaiting publication; its
-15-second budget starts before selection/publication, and the caller token
-also bounds every wait. Held callbacks never block readiness or cause premature
+15-second budget starts when the shared cleanup operation runs, after synchronous
+cause selection and asynchronous publication scheduling but before awaiting
+publication, engine stops, monitors or workers. The caller token bounds its own
+wait. Held callbacks never block readiness or cause premature
 resource disposal; they may finish cleanup after a reported timeout/cancellation.
 Shutdown closes admission and selects accepted turns' causes under the same
 lifecycle lock before scheduling cleanup; context completion cannot observe

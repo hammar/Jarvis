@@ -647,3 +647,20 @@ measured 95.3% (1147/1203). Critical thresholds and negative fixtures passed
 unchanged. No generated-output cleanup was needed this run. All required CI
 passed prior HEAD `558a494`; exact-commit independent review and new-HEAD CI
 remain pending.
+
+Independent review of exact
+`847cda3ec97e561a0036e929a9067485f339d0fe` against `558a494` confirmed R27
+fixed and retained R1-R26 dispositions without re-review. It rebuilt exact
+Release source with SDK 10.0.401 and independently passed 21 focused tests,
+including the actual 15-second timeout, boundary/first-cause cases and adjacent
+callback/failure/admission/startup behavior. Diff hygiene passed and the tracked
+tree remained unchanged. Full native gates/coverage are implementer evidence;
+new-revision Linux CI, live Ollama, launched-Web recovery and exhaustive
+interleavings were not independently verified. The reviewer found no executable
+defect but raised **R28 (low)**: the architecture text still claimed the budget
+starts before selection/publication. Fixed the text to state that the shared
+cleanup operation starts its budget after synchronous selection/asynchronous
+publication scheduling and before awaiting any owned cleanup. This is a
+documentation correction, not a timeout/behavior change. R27/R28 are fixed;
+new-HEAD CI remains pending. No finding is accepted as a residual risk by the
+owner.
