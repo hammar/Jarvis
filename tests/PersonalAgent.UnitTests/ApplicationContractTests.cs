@@ -17,6 +17,7 @@ public sealed class ApplicationContractTests
             [new ContextItem("conversation:1", "approved text", "LocalOnly", "user")],
             new ContextEstimate(0, 0, 0, 0, 0, 0, 0, 0, 8192, 0, false, false, "fixture estimate"));
         var tool = new AgentToolDefinition("read_state", """{"type":"object"}""", true);
+        using var deadlineCancellation = new CancellationTokenSource();
         var request = new AgentTurnRequest(
             turnId,
             ProviderKind.Cloud,
@@ -24,7 +25,8 @@ public sealed class ApplicationContractTests
             context,
             [tool],
             TimeSpan.FromSeconds(30),
-            2);
+            2,
+            DeadlineCancellationToken: deadlineCancellation.Token);
         var result = new AgentTurnResult(TurnStatus.Interrupted, null, "engine_timeout");
 
         Assert.Equal(turnId, request.TurnId);
@@ -33,6 +35,7 @@ public sealed class ApplicationContractTests
         Assert.Equal("read_state", request.Tools[0].Name);
         Assert.Equal(TimeSpan.FromSeconds(30), request.Deadline);
         Assert.Equal(2, request.MaximumToolCalls);
+        Assert.Equal(deadlineCancellation.Token, request.DeadlineCancellationToken);
         Assert.Equal(TurnStatus.Interrupted, result.Status);
         Assert.Equal("engine_timeout", result.FailureCode);
     }

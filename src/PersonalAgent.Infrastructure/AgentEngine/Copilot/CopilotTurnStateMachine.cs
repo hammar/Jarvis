@@ -9,6 +9,7 @@ internal enum CopilotTurnSignal
 {
     Completed,
     Cancelled,
+    HostShutdown,
     ToolBudgetExceeded,
     EventBudgetExceeded,
     DeadlineExceeded,
@@ -52,7 +53,8 @@ internal sealed class CopilotTurnStateMachine(
         TurnStatus status,
         AgentEvent terminalEvent,
         CancellationToken cancellationToken,
-        long? expectedVersion = null)
+        long? expectedVersion = null,
+        ConversationMessage? finalAssistantMessage = null)
     {
         if (!IsTerminal(status))
         {
@@ -86,7 +88,8 @@ internal sealed class CopilotTurnStateMachine(
             terminalEvent.GetType().Name,
             JsonSerializer.Serialize(terminalEvent, terminalEvent.GetType()),
             terminalEvent.OccurredAtUtc,
-            cancellationToken);
+            cancellationToken,
+            finalAssistantMessage);
     }
 
     public static (TurnStatus Status, AgentEvent Event) CreateTerminalOutcome(
@@ -99,6 +102,8 @@ internal sealed class CopilotTurnStateMachine(
                 (TurnStatus.Completed, new TurnCompleted(turnId, clock.UtcNow)),
             CopilotTurnSignal.Cancelled =>
                 (TurnStatus.Cancelled, new TurnCancelled(turnId, clock.UtcNow)),
+            CopilotTurnSignal.HostShutdown =>
+                (TurnStatus.Interrupted, new TurnInterrupted(turnId, clock.UtcNow, "host_shutdown")),
             CopilotTurnSignal.ToolBudgetExceeded =>
                 (TurnStatus.Failed, new TurnFailed(turnId, clock.UtcNow, "tool_budget_exceeded")),
             CopilotTurnSignal.EventBudgetExceeded =>

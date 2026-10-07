@@ -27,6 +27,10 @@ public sealed class SimulatorHostFixture : IAsyncLifetime
     /// <summary>Gets an HTTP client routed to the controlled Home Assistant fixture.</summary>
     public HttpClient HomeAssistantClient { get; private set; } = null!;
 
+    /// <summary>Gets the private E2E data directory owned by this fixture.</summary>
+    public string DataDirectoryPath => dataDirectory?.Path
+        ?? throw new InvalidOperationException("The E2E host fixture has not started.");
+
     /// <summary>Builds and starts the isolated E2E resource graph.</summary>
     public async Task InitializeAsync()
     {

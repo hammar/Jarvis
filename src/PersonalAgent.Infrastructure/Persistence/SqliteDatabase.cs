@@ -18,7 +18,8 @@ public sealed class SqliteDatabase
     private static readonly (int Version, string ResourceName)[] Migrations =
     [
         (1, "PersonalAgent.Infrastructure.Persistence.Migrations.001-initial.sql"),
-        (2, "PersonalAgent.Infrastructure.Persistence.Migrations.002-durable-state.sql")
+        (2, "PersonalAgent.Infrastructure.Persistence.Migrations.002-durable-state.sql"),
+        (3, "PersonalAgent.Infrastructure.Persistence.Migrations.003-turn-request-idempotency.sql")
     ];
 
     private readonly string connectionString;
@@ -75,9 +76,65 @@ public sealed class SqliteDatabase
         await ApplyMigrationsAsync(connection, cancellationToken);
         await EnsureForeignKeysAreValidAsync(connection, cancellationToken);
         RestrictFilePermissions(DatabasePath);
-        RestrictFilePermissions(DatabasePath + "-wal");
-        RestrictFilePermissions(DatabasePath + "-shm");
+        RestrictFilePermissions(DatabasePath + "-wal", sidecarMayDisappear: true);
+        RestrictFilePermissions(DatabasePath + "-shm", sidecarMayDisappear: true);
         RestrictFilePermissions(SqliteBackupRestoreService.RestoreLockPath(DatabasePath));
+    }
+
+    /// <summary>Checks that the database is reachable and its current schema migrations are applied.</summary>
+    /// <param name="cancellationToken">Token that cancels the readiness probe.</param>
+    /// <returns><see langword="true"/> when SQLite responds and the expected turn schema is present.</returns>
+    public async Task<bool> CheckReadinessAsync(CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            await using var connection = await OpenReadOnlyConnectionAsync(cancellationToken);
+            await using var command = connection.CreateCommand();
+            command.CommandText = "PRAGMA user_version;";
+            var schemaVersion = Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken));
+            if (schemaVersion != Migrations[^1].Version)
+            {
+                return false;
+            }
+
+            command.CommandText = "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'turns');";
+            return Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken)) == 1;
+        }
+        catch (SqliteException)
+        {
+            return false;
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
+    private async Task<SqliteConnection> OpenReadOnlyConnectionAsync(CancellationToken cancellationToken)
+    {
+        var readOnlyConnectionString = new SqliteConnectionStringBuilder(connectionString)
+        {
+            Mode = SqliteOpenMode.ReadOnly,
+            DefaultTimeout = 1
+        }.ToString();
+        var connection = new SqliteConnection(readOnlyConnectionString);
+        try
+        {
+            await connection.OpenAsync(cancellationToken);
+            await using var command = connection.CreateCommand();
+            command.CommandText = "PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 1000;";
+            await command.ExecuteNonQueryAsync(cancellationToken);
+            return connection;
+        }
+        catch
+        {
+            await connection.DisposeAsync();
+            throw;
+        }
     }
 
     /// <summary>Opens a configured connection with foreign-key enforcement and a bounded busy timeout.</summary>
@@ -113,8 +170,8 @@ public sealed class SqliteDatabase
             command.CommandText = $"PRAGMA foreign_keys = ON; PRAGMA busy_timeout = {busyTimeoutMilliseconds};";
             await command.ExecuteNonQueryAsync(cancellationToken);
             RestrictFilePermissions(DatabasePath);
-            RestrictFilePermissions(DatabasePath + "-wal");
-            RestrictFilePermissions(DatabasePath + "-shm");
+            RestrictFilePermissions(DatabasePath + "-wal", sidecarMayDisappear: true);
+            RestrictFilePermissions(DatabasePath + "-shm", sidecarMayDisappear: true);
             return connection;
         }
         catch
@@ -197,7 +254,7 @@ public sealed class SqliteDatabase
         ValidatePrivateWindowsDirectory(directory);
     }
 
-    internal static void RestrictFilePermissions(string path)
+    internal static void RestrictFilePermissions(string path, bool sidecarMayDisappear = false)
     {
         if (!File.Exists(path))
         {
@@ -222,7 +279,22 @@ public sealed class SqliteDatabase
             return;
         }
 
-        File.SetUnixFileMode(path, OwnerPrivateFile);
+        for (var attempt = 0; ; attempt++)
+        {
+            try
+            {
+                File.SetUnixFileMode(path, OwnerPrivateFile);
+                return;
+            }
+            catch (FileNotFoundException) when (sidecarMayDisappear && !File.Exists(path))
+            {
+                return;
+            }
+            catch (FileNotFoundException) when (sidecarMayDisappear && attempt < 2)
+            {
+                // SQLite may replace a WAL sidecar between the existence check and chmod.
+            }
+        }
     }
 
     [SupportedOSPlatform("windows")]

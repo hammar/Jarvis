@@ -129,6 +129,23 @@ public sealed class CopilotAgentEngine : IAgentEngine
         await active.AbortAsync(cancellationToken);
     }
 
+    /// <inheritdoc />
+    public async ValueTask StopAsync(TurnId turnId, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!activeTurns.TryGetValue(turnId, out var active))
+        {
+            return;
+        }
+
+        if (!active.StopForHostShutdown())
+        {
+            return;
+        }
+
+        await active.AbortAsync(cancellationToken);
+    }
+
     private async Task ExecuteTurnAsync(
         AgentTurnRequest request,
         CopilotActiveTurn active,
@@ -137,14 +154,89 @@ public sealed class CopilotAgentEngine : IAgentEngine
         CancellationToken consumerStoppedToken)
     {
         using var deadline = new CancellationTokenSource(request.Deadline);
-        using var turnCancellation = CancellationTokenSource.CreateLinkedTokenSource(
-            callerToken,
-            deadline.Token,
-            active.CancellationToken);
+        using var turnCancellation = new CancellationTokenSource();
         using var eventCancellation = CancellationTokenSource.CreateLinkedTokenSource(
-            callerToken,
-            deadline.Token,
             active.EventCancellationToken);
+        var cancellationSync = new object();
+        var cancellationObserversInitializing = true;
+        var pendingCancellationSignals = 0;
+        var cancellationSignal = (int)CopilotTurnSignal.Completed;
+        void RecordCancellation(CopilotTurnSignal signal, bool preserveToolBudgetDrain = false)
+        {
+            lock (cancellationSync)
+            {
+                if (cancellationObserversInitializing)
+                {
+                    pendingCancellationSignals |= 1 << (int)signal;
+                    return;
+                }
+                else if (cancellationSignal == (int)CopilotTurnSignal.Completed)
+                {
+                    Volatile.Write(ref cancellationSignal, (int)signal);
+                }
+            }
+
+            // Publish the cause before waking execution; independent linked-token callbacks can run first.
+            turnCancellation.Cancel();
+            // Only the internal budget stop drains rejection events; external cancellation still bounds that drain.
+            if (!preserveToolBudgetDrain)
+            {
+                eventCancellation.Cancel();
+            }
+        }
+
+        CopilotTurnSignal GetCancellationSignal() =>
+            request.ReadCancellationCause?.Invoke() switch
+            {
+                CancellationCause.Owner => CopilotTurnSignal.Cancelled,
+                CancellationCause.Shutdown => CopilotTurnSignal.HostShutdown,
+                CancellationCause.Deadline => CopilotTurnSignal.DeadlineExceeded,
+                _ => (CopilotTurnSignal)Volatile.Read(ref cancellationSignal)
+            };
+        bool IsCancellationRequested() =>
+            GetCancellationSignal() != CopilotTurnSignal.Completed;
+
+        // Cancellation sources already signaled during observer setup are ambiguous; system interruption wins.
+        using var callerCancellation = callerToken.Register(() => RecordCancellation(CopilotTurnSignal.Cancelled));
+        using var hostCancellation = request.HostShutdownToken.Register(
+            () => RecordCancellation(CopilotTurnSignal.HostShutdown));
+        using var activeCancellation = active.CancellationToken.Register(
+            () => RecordCancellation(active.StoppedForHostShutdown
+                ? CopilotTurnSignal.HostShutdown
+                : CopilotTurnSignal.Cancelled,
+                preserveToolBudgetDrain: active.FailureCode == "tool_budget_exceeded" && !active.CancelledByHost));
+        using var acceptedDeadlineCancellation = request.DeadlineCancellationToken.Register(
+            () => RecordCancellation(CopilotTurnSignal.DeadlineExceeded));
+        using var engineDeadlineCancellation = deadline.Token.Register(
+            () => RecordCancellation(request.ResolveDeadlineCancellation is { } resolve
+                ? resolve() switch
+                {
+                    CancellationCause.Owner => CopilotTurnSignal.Cancelled,
+                    CancellationCause.Shutdown => CopilotTurnSignal.HostShutdown,
+                    CancellationCause.Deadline => CopilotTurnSignal.DeadlineExceeded,
+                    _ => throw new InvalidOperationException("The host deadline arbiter must select a cancellation cause.")
+                }
+                : CopilotTurnSignal.DeadlineExceeded));
+        lock (cancellationSync)
+        {
+            var hostShutdownMask = 1 << (int)CopilotTurnSignal.HostShutdown;
+            var deadlineMask = 1 << (int)CopilotTurnSignal.DeadlineExceeded;
+            var callerCancellationMask = 1 << (int)CopilotTurnSignal.Cancelled;
+            cancellationSignal = (pendingCancellationSignals & hostShutdownMask) != 0
+                ? (int)CopilotTurnSignal.HostShutdown
+                : (pendingCancellationSignals & deadlineMask) != 0
+                    ? (int)CopilotTurnSignal.DeadlineExceeded
+                    : (pendingCancellationSignals & callerCancellationMask) != 0
+                        ? (int)CopilotTurnSignal.Cancelled
+                        : (int)CopilotTurnSignal.Completed;
+            cancellationObserversInitializing = false;
+        }
+
+        if (IsCancellationRequested())
+        {
+            turnCancellation.Cancel();
+            eventCancellation.Cancel();
+        }
 
         var claimCandidate = await stateMachine.GetClaimCandidateAsync(request.TurnId);
         try
@@ -152,19 +244,15 @@ public sealed class CopilotAgentEngine : IAgentEngine
             await stateMachine.EnsureRunningAsync(claimCandidate, turnCancellation.Token);
         }
         catch (OperationCanceledException) when (
-            callerToken.IsCancellationRequested || active.CancelledByHost || deadline.IsCancellationRequested)
+            IsCancellationRequested())
         {
             try
             {
                 active.MarkTerminal();
-                var signal = CopilotActiveTurn.SelectCompletedSignal(
-                    false,
-                    callerToken.IsCancellationRequested || active.CancelledByHost,
-                    deadline.IsCancellationRequested);
                 var (status, claimCancellationEvent) = CopilotTurnStateMachine.CreateTerminalOutcome(
                     request.TurnId,
                     clock,
-                    signal);
+                    GetCancellationSignal());
                 using var terminalPersistence = new CancellationTokenSource(TerminalPersistenceTimeout);
                 await stateMachine.SetTerminalOutcomeAsync(
                     request.TurnId,
@@ -202,6 +290,7 @@ public sealed class CopilotAgentEngine : IAgentEngine
         var eventPump = PumpEventsAsync(request.TurnId, observed.Reader, output, active, eventCancellation.Token);
         TurnStatus terminalStatus;
         AgentEvent terminalEvent;
+        string? finalMessage = null;
 
         try
         {
@@ -210,11 +299,17 @@ public sealed class CopilotAgentEngine : IAgentEngine
                 request.TurnId,
                 clock.UtcNow,
                 request.Provider,
-                "explicit_host_provider"), turnCancellation.Token);
+                request.RouteReasonCode), turnCancellation.Token);
 
             var provider = GetProvider(request.Provider);
             var apiKey = await ResolveApiKeyAsync(provider, turnCancellation.Token);
-            await RunSdkSessionAsync(request, provider, apiKey, active, observed.Writer, turnCancellation.Token);
+            finalMessage = await RunSdkSessionAsync(
+                request,
+                provider,
+                apiKey,
+                active,
+                observed.Writer,
+                turnCancellation.Token);
             (terminalStatus, terminalEvent) = CopilotTurnStateMachine.CreateTerminalOutcome(
                 request.TurnId,
                 clock,
@@ -227,28 +322,28 @@ public sealed class CopilotAgentEngine : IAgentEngine
                 clock,
                 active.GetFailureSignal());
         }
-        catch (OperationCanceledException) when (callerToken.IsCancellationRequested || active.CancelledByHost)
+        catch (OperationCanceledException) when (IsCancellationRequested())
         {
             (terminalStatus, terminalEvent) = CopilotTurnStateMachine.CreateTerminalOutcome(
                 request.TurnId,
                 clock,
-                CopilotTurnSignal.Cancelled);
+                GetCancellationSignal());
         }
-        catch (OperationCanceledException) when (deadline.IsCancellationRequested)
-        {
-            (terminalStatus, terminalEvent) = CopilotTurnStateMachine.CreateTerminalOutcome(
-                request.TurnId,
-                clock,
-                CopilotTurnSignal.DeadlineExceeded);
-        }
-        catch (TimeoutException) when (deadline.IsCancellationRequested)
+        catch (OperationCanceledException) when (IsDeadlineCancellationRequested(request, deadline))
         {
             (terminalStatus, terminalEvent) = CopilotTurnStateMachine.CreateTerminalOutcome(
                 request.TurnId,
                 clock,
                 CopilotTurnSignal.DeadlineExceeded);
         }
-        catch (Exception) when (deadline.IsCancellationRequested)
+        catch (TimeoutException) when (IsDeadlineCancellationRequested(request, deadline))
+        {
+            (terminalStatus, terminalEvent) = CopilotTurnStateMachine.CreateTerminalOutcome(
+                request.TurnId,
+                clock,
+                CopilotTurnSignal.DeadlineExceeded);
+        }
+        catch (Exception) when (IsDeadlineCancellationRequested(request, deadline))
         {
             terminalStatus = TurnStatus.Interrupted;
             terminalEvent = new TurnInterrupted(request.TurnId, clock.UtcNow, "runtime_cleanup_failed");
@@ -274,10 +369,7 @@ public sealed class CopilotAgentEngine : IAgentEngine
             {
                 var signal = active.FailureCode is not null
                     ? active.GetFailureSignal()
-                    : CopilotActiveTurn.SelectCompletedSignal(
-                        false,
-                        callerToken.IsCancellationRequested || active.CancelledByHost,
-                        deadline.IsCancellationRequested);
+                    : GetCancellationSignal();
                 (terminalStatus, terminalEvent) = CopilotTurnStateMachine.CreateTerminalOutcome(
                     request.TurnId,
                     clock,
@@ -292,16 +384,19 @@ public sealed class CopilotAgentEngine : IAgentEngine
                     "event_persistence_failed");
             }
 
-            var cancelledByHost = active.MarkTerminal();
+            var hostCancellationWonTerminal = active.MarkTerminal();
             if (terminalStatus == TurnStatus.Completed)
             {
-                var signal = CopilotActiveTurn.SelectCompletedSignal(
-                    false,
-                    callerToken.IsCancellationRequested || cancelledByHost,
-                    deadline.IsCancellationRequested);
+                var signal = GetCancellationSignal();
                 if (active.FailureCode is not null)
                 {
                     signal = active.GetFailureSignal();
+                }
+                else if (hostCancellationWonTerminal && signal == CopilotTurnSignal.Completed)
+                {
+                    signal = active.StoppedForHostShutdown
+                        ? CopilotTurnSignal.HostShutdown
+                        : CopilotTurnSignal.Cancelled;
                 }
 
                 (terminalStatus, terminalEvent) = CopilotTurnStateMachine.CreateTerminalOutcome(
@@ -315,7 +410,15 @@ public sealed class CopilotAgentEngine : IAgentEngine
                 request.TurnId,
                 terminalStatus,
                 terminalEvent,
-                terminalPersistence.Token);
+                terminalPersistence.Token,
+                finalAssistantMessage: terminalStatus == TurnStatus.Completed && finalMessage is not null
+                    ? new ConversationMessage(
+                        Guid.NewGuid(),
+                        claimCandidate.ConversationId,
+                        "assistant",
+                        finalMessage,
+                        clock.UtcNow)
+                    : null);
             using var deliveryTimeout = new CancellationTokenSource(TerminalPersistenceTimeout);
             using var deliveryCancellation = CancellationTokenSource.CreateLinkedTokenSource(
                 callerToken,
@@ -340,7 +443,7 @@ public sealed class CopilotAgentEngine : IAgentEngine
         }
     }
 
-    private async Task RunSdkSessionAsync(
+    private async Task<string> RunSdkSessionAsync(
         AgentTurnRequest request,
         CopilotProviderOptions provider,
         string? apiKey,
@@ -418,10 +521,13 @@ public sealed class CopilotAgentEngine : IAgentEngine
             });
             var turn = session.SendAndWaitAsync(new MessageOptions { Prompt = prompt });
             var response = await turn.WaitAsync(cancellationToken);
-            if (response?.Data.Content is null)
+            var content = response?.Data.Content;
+            if (string.IsNullOrWhiteSpace(content) || content.Length > 1_000_000)
             {
-                throw new InvalidOperationException("The engine returned no final assistant response.");
+                throw new InvalidOperationException("The engine returned no bounded final assistant response.");
             }
+
+            return content;
         }
         catch (OperationCanceledException)
         {
@@ -521,6 +627,11 @@ public sealed class CopilotAgentEngine : IAgentEngine
         exception is RuntimeCleanupException
             ? CopilotTurnSignal.RuntimeCleanupFailed
             : CopilotTurnSignal.Failed;
+
+    private static bool IsDeadlineCancellationRequested(
+        AgentTurnRequest request,
+        CancellationTokenSource engineDeadline) =>
+        engineDeadline.IsCancellationRequested || request.DeadlineCancellationToken.IsCancellationRequested;
 
     private async Task<Exception?> PumpEventsAsync(
         TurnId turnId,

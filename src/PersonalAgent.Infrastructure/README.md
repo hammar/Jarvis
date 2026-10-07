@@ -12,6 +12,12 @@ Set `JARVIS_DATA_DIR` to a writable directory outside the deployment folder;
 the database is `jarvis.db` inside it. If unset, the Web host uses the
 per-user LocalApplicationData `Jarvis` directory. Startup enables WAL and
 applies the embedded SQL migrations in order using SQLite `user_version`.
+Migration 003 adds nullable client request identity/fingerprint columns and a
+per-conversation unique request key, preserving existing turn rows. It also
+enforces at most one user and one assistant message per turn. Submission
+persists the received turn, user message, request identity, and initial event
+in one transaction; terminal completion persists its answer, status, and event
+atomically.
 If only the previous AppHost `PersonalAgent` default contains a database, the
 Web host continues using that location; if both defaults contain a database,
 configure `JARVIS_DATA_DIR` explicitly.

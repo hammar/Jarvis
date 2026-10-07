@@ -16,6 +16,22 @@ public sealed class SqlitePersistenceTests
 
     [Fact]
     [Trait("Category", "Integration")]
+    public async Task DatabaseReadinessChecksSchemaWithoutCreatingMissingDatabase()
+    {
+        using var directory = IsolatedDirectory.Create();
+        var databasePath = Path.Combine(directory.Path, "readiness.db");
+        var missing = new SqliteDatabase(databasePath);
+
+        Assert.False(await missing.CheckReadinessAsync());
+        Assert.False(File.Exists(databasePath));
+
+        await missing.InitializeAsync();
+
+        Assert.True(await missing.CheckReadinessAsync());
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
     public void DataDirectoryUsesConfiguredPathOrValidatedPerUserFallback()
     {
         Assert.Equal("/owner/data", SqliteDataDirectory.Resolve("/owner/data", "/user/local"));
@@ -74,7 +90,7 @@ public sealed class SqlitePersistenceTests
         await using var foreignKeys = connection.CreateCommand();
         foreignKeys.CommandText = "PRAGMA foreign_keys;";
         Assert.Equal(1L, (long)(await foreignKeys.ExecuteScalarAsync())!);
-        Assert.Equal(2, await UserVersionAsync(connection));
+        Assert.Equal(3, await UserVersionAsync(connection));
     }
 
     [Fact]
@@ -95,7 +111,7 @@ public sealed class SqlitePersistenceTests
         Assert.Equal(messageId, messages[0].MessageId);
         Assert.Equal("before upgrade", messages[0].Content);
         await using var migrated = await database.OpenConnectionAsync();
-        Assert.Equal(2, await UserVersionAsync(migrated));
+        Assert.Equal(3, await UserVersionAsync(migrated));
         await using var table = migrated.CreateCommand();
         table.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'cloud_consents';";
         Assert.Equal(1L, (long)(await table.ExecuteScalarAsync())!);
@@ -250,6 +266,194 @@ public sealed class SqlitePersistenceTests
         Assert.Equal([first], beginning);
         await Assert.ThrowsAsync<PersistenceConcurrencyException>(
             async () => await reopened.UpdateTurnStatusAsync(turnId, TurnStatus.Failed, turn.Version, Now, CancellationToken.None));
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task TurnSubmissionIsAtomicAndDeduplicatedAcrossStoreReopen()
+    {
+        using var file = IsolatedDatabaseFile.Create();
+        var database = new SqliteDatabase(file.Path);
+        await database.InitializeAsync();
+        var conversationId = ConversationId.New();
+        var requestId = "client-turn-001";
+        var text = "What time is it?";
+        var fingerprint = Convert.ToHexString(
+            System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(text)));
+        var firstStore = new SqliteConversationStore(database, new MutableClock(Now));
+        var first = await firstStore.SubmitTurnAsync(
+            new ConversationTurnSubmission(
+                TurnId.New(),
+                conversationId,
+                requestId,
+                fingerprint,
+                Guid.NewGuid(),
+                text,
+                Now),
+            CancellationToken.None);
+
+        var reopened = new SqliteConversationStore(new SqliteDatabase(file.Path), new MutableClock(Now));
+        var retry = await reopened.SubmitTurnAsync(
+            new ConversationTurnSubmission(
+                TurnId.New(),
+                conversationId,
+                requestId,
+                fingerprint,
+                Guid.NewGuid(),
+                text,
+                Now.AddSeconds(1)),
+            CancellationToken.None);
+
+        Assert.False(first.IsDuplicate);
+        Assert.True(retry.IsDuplicate);
+        Assert.Equal(first.Turn, retry.Turn);
+        Assert.Equal(first.UserMessageId, retry.UserMessageId);
+        Assert.Single(await reopened.ReadRecentAsync(conversationId, 10, CancellationToken.None));
+        Assert.Single(await reopened.ReadTurnEventsAfterAsync(first.Turn.Id, 0, 10, CancellationToken.None));
+        await Assert.ThrowsAsync<TurnRequestConflictException>(async () =>
+            await reopened.SubmitTurnAsync(
+                new ConversationTurnSubmission(
+                    TurnId.New(),
+                    conversationId,
+                    requestId,
+                    Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
+                        System.Text.Encoding.UTF8.GetBytes("different request"))),
+                    Guid.NewGuid(),
+                    "different request",
+                    Now.AddSeconds(2)),
+                CancellationToken.None));
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task TerminalCompletionPersistsItsFinalAssistantMessageAtomicallyOnce()
+    {
+        using var file = IsolatedDatabaseFile.Create();
+        var database = new SqliteDatabase(file.Path);
+        await database.InitializeAsync();
+        var store = new SqliteConversationStore(database, new MutableClock(Now));
+        var conversationId = ConversationId.New();
+        var submission = await store.SubmitTurnAsync(
+            new ConversationTurnSubmission(
+                TurnId.New(),
+                conversationId,
+                "final-message",
+                Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
+                    System.Text.Encoding.UTF8.GetBytes("question"))),
+                Guid.NewGuid(),
+                "question",
+                Now),
+            CancellationToken.None);
+        await store.TransitionTurnAndAppendEventAsync(
+            submission.Turn.Id,
+            TurnStatus.Routing,
+            submission.Turn.Version,
+            Now,
+            nameof(TurnRouting),
+            System.Text.Json.JsonSerializer.Serialize(new TurnRouting(submission.Turn.Id, Now)),
+            Now,
+            CancellationToken.None);
+        var running = await store.GetTurnAsync(submission.Turn.Id, CancellationToken.None);
+        var assistant = new ConversationMessage(
+            Guid.NewGuid(),
+            conversationId,
+            "assistant",
+            "It is noon.",
+            Now.AddSeconds(1));
+
+        await store.UpdateTurnStatusAndAppendEventAsync(
+            submission.Turn.Id,
+            TurnStatus.Completed,
+            running!.Version,
+            Now.AddSeconds(1),
+            nameof(TurnCompleted),
+            System.Text.Json.JsonSerializer.Serialize(new TurnCompleted(submission.Turn.Id, Now.AddSeconds(1))),
+            Now.AddSeconds(1),
+            CancellationToken.None,
+            assistant);
+
+        var messages = await store.ReadRecentAsync(conversationId, 10, CancellationToken.None);
+        Assert.Collection(
+            messages,
+            user => Assert.Equal("user", user.Role),
+            answer =>
+            {
+                Assert.Equal("assistant", answer.Role);
+                Assert.Equal("It is noon.", answer.Content);
+            });
+        Assert.Equal(TurnStatus.Completed, (await store.GetTurnAsync(submission.Turn.Id, CancellationToken.None))!.Status);
+        await Assert.ThrowsAsync<PersistenceConcurrencyException>(async () =>
+            await store.UpdateTurnStatusAndAppendEventAsync(
+                submission.Turn.Id,
+                TurnStatus.Completed,
+                running.Version,
+                Now.AddSeconds(2),
+                nameof(TurnCompleted),
+                System.Text.Json.JsonSerializer.Serialize(new TurnCompleted(submission.Turn.Id, Now.AddSeconds(2))),
+                Now.AddSeconds(2),
+                CancellationToken.None));
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task FailedClarificationPersistsItsOwnerFacingMessageAtomically()
+    {
+        using var file = IsolatedDatabaseFile.Create();
+        var database = new SqliteDatabase(file.Path);
+        await database.InitializeAsync();
+        var store = new SqliteConversationStore(database, new MutableClock(Now));
+        var conversationId = ConversationId.New();
+        var submission = await store.SubmitTurnAsync(
+            new ConversationTurnSubmission(
+                TurnId.New(),
+                conversationId,
+                "clarification",
+                Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
+                    System.Text.Encoding.UTF8.GetBytes("ambiguous task"))),
+                Guid.NewGuid(),
+                "ambiguous task",
+                Now),
+            CancellationToken.None);
+        await store.TransitionTurnAndAppendEventAsync(
+            submission.Turn.Id,
+            TurnStatus.Routing,
+            submission.Turn.Version,
+            Now,
+            nameof(TurnRouting),
+            System.Text.Json.JsonSerializer.Serialize(new TurnRouting(submission.Turn.Id, Now)),
+            Now,
+            CancellationToken.None);
+        var routing = await store.GetTurnAsync(submission.Turn.Id, CancellationToken.None);
+        var clarification = new TurnClarificationRequired(
+            submission.Turn.Id,
+            Now.AddSeconds(1),
+            "task_category_ambiguous",
+            "Please clarify the supported local task.");
+        var assistant = new ConversationMessage(
+            Guid.NewGuid(),
+            conversationId,
+            "assistant",
+            clarification.UserMessage,
+            Now.AddSeconds(1));
+
+        await store.UpdateTurnStatusAndAppendEventAsync(
+            submission.Turn.Id,
+            TurnStatus.Failed,
+            routing!.Version,
+            Now.AddSeconds(1),
+            nameof(TurnClarificationRequired),
+            System.Text.Json.JsonSerializer.Serialize(clarification),
+            Now.AddSeconds(1),
+            CancellationToken.None,
+            assistant);
+
+        var messages = await store.ReadRecentAsync(conversationId, 10, CancellationToken.None);
+        Assert.Equal(TurnStatus.Failed, (await store.GetTurnAsync(submission.Turn.Id, CancellationToken.None))!.Status);
+        Assert.Contains(messages, message =>
+            message.Role == "assistant" && message.Content == clarification.UserMessage);
+        Assert.Contains(
+            await store.ReadTurnEventsAfterAsync(submission.Turn.Id, 0, 10, CancellationToken.None),
+            item => item.EventType == nameof(TurnClarificationRequired));
     }
 
     [Fact]
@@ -1548,7 +1752,7 @@ public sealed class SqlitePersistenceTests
                 return true;
             });
         await using var connection = await first.OpenConnectionAsync();
-        Assert.Equal(2, await UserVersionAsync(connection));
+        Assert.Equal(3, await UserVersionAsync(connection));
     }
 
     private static async Task<T[]> RunConcurrentlyAsync<T>(params Func<Task<T>>[] operations)

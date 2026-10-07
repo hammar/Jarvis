@@ -122,6 +122,7 @@ internal static class CoverageGate
         ("Copilot active-turn cancellation and runtime lifecycle", "src/PersonalAgent.Infrastructure/AgentEngine/Copilot/CopilotActiveTurn.cs", 95, 90),
         ("M1 local-only route policy", "src/PersonalAgent.Application/Routing/LocalOnlyModelRouter.cs", 95, 90),
         ("M1 bounded context construction", "src/PersonalAgent.Application/Context/ConversationContextBuilder.cs", 95, 90),
+        ("M1 local turn coordination, bounds, and recovery", "src/PersonalAgent.Application/TurnCoordination/LocalTurnCoordinator.cs", 95, 90),
         ("Approval persistence invariants", "src/PersonalAgent.Infrastructure/Persistence/SqliteApprovalStore.cs", 95, 90),
         ("Action journal idempotency", "src/PersonalAgent.Infrastructure/Persistence/SqliteActionJournalStore.cs", 95, 90)
     ];
@@ -592,8 +593,15 @@ internal static class CoverageGate
         var rate = (double)covered / executable.Count;
         if (rate < 0.90)
         {
+            var uncovered = executable
+                .Where(line => !coverage.CoveredLines.Contains(line))
+                .OrderBy(line => line.File, StringComparer.Ordinal)
+                .ThenBy(line => line.Number)
+                .Take(20)
+                .Select(line => $"{Path.GetRelativePath(root, line.File)}:{line.Number}");
             throw new ValidationException(
-                $"Changed executable lines require 90% coverage; measured {Percent(covered, executable.Count)}.");
+                $"Changed executable lines require 90% coverage; measured {Percent(covered, executable.Count)}. " +
+                $"First uncovered lines: {string.Join(", ", uncovered)}.");
         }
 
         Console.WriteLine($"Changed executable lines: {Percent(covered, executable.Count)}.");

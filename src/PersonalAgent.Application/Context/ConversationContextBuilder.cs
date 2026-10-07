@@ -48,7 +48,8 @@ public sealed class ConversationContextBuilder : IContextBuilder
         var recent = await conversations.ReadRecentAsync(
             request.ConversationId,
             historyReadLimit,
-            cancellationToken);
+            cancellationToken,
+            request.CurrentTaskMessageId);
         if (recent is null)
         {
             throw new InvalidOperationException("The conversation store returned no history collection.");
@@ -61,6 +62,11 @@ public sealed class ConversationContextBuilder : IContextBuilder
         {
             cancellationToken.ThrowIfCancellationRequested();
             var message = recent[index];
+            if (request.CurrentTaskMessageId == message.MessageId)
+            {
+                continue;
+            }
+
             if (!CanInclude(message, request.ConversationId))
             {
                 minimumOmittedHistoryMessages++;

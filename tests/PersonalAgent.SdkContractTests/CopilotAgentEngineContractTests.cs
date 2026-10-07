@@ -10,6 +10,7 @@ using Xunit;
 namespace PersonalAgent.SdkContractTests;
 
 [Trait("Category", "Integration")]
+[Collection("Copilot runtime process isolation")]
 public sealed class CopilotAgentEngineContractTests
 {
     private static readonly DateTimeOffset Now = new(2026, 10, 5, 12, 0, 0, TimeSpan.Zero);
@@ -224,6 +225,23 @@ public sealed class CopilotAgentEngineContractTests
         Assert.DoesNotContain(events, item => item is TurnCompleted);
     }
 
+    private static async Task AssertPreCancelledOutcomeAsync(
+        CopilotAgentEngine engine,
+        SqliteConversationStore store,
+        AgentTurnRequest request,
+        CancellationToken callerToken,
+        string expectedReason)
+    {
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => CollectAsync(engine.RunTurnAsync(request, callerToken)));
+
+        Assert.Equal(TurnStatus.Interrupted, (await store.GetTurnAsync(request.TurnId, CancellationToken.None))?.Status);
+        var persisted = await store.ReadTurnEventsAfterAsync(request.TurnId, 0, 1000, CancellationToken.None);
+        var interrupted = Assert.Single(persisted, item => item.EventType == nameof(TurnInterrupted));
+        Assert.Contains(expectedReason, interrupted.PayloadJson, StringComparison.Ordinal);
+        Assert.DoesNotContain(persisted, item => item.EventType == nameof(TurnCancelled));
+    }
+
     [Fact]
     [Trait("Category", "SdkContract")]
     public async Task ActualRuntimeInvokesOnlyRegisteredToolAndForwardsHostOutcome()
@@ -300,6 +318,62 @@ public sealed class CopilotAgentEngineContractTests
         Assert.Equal(TurnStatus.Failed, (await store.GetTurnAsync(turnId, CancellationToken.None))?.Status);
     }
 
+    [Theory]
+    [InlineData("deadline")]
+    [InlineData("caller")]
+    [InlineData("shutdown")]
+    [Trait("Category", "SdkContract")]
+    public async Task ExternalCancellationBoundsBlockedToolBudgetRejectionPersistence(string cause)
+    {
+        using var data = IsolatedDirectory.Create();
+        using var databaseFile = IsolatedDatabaseFile.Create();
+        var store = new SqliteConversationStore(await CreateDatabaseAsync(databaseFile.Path), new TestClock());
+        var blockingStore = new ControlledTurnEventStore(store, blockBudgetRejectionUntilCancelled: true);
+        await using var provider = await FakeOpenAiProvider.StartAsync();
+        provider.RepeatTool = true;
+        var dispatcher = new RecordingDispatcher(new ToolDispatchResult("Succeeded", """{"ok":true}""", null));
+        var engine = CreateEngine(blockingStore, provider.BaseUrl, provider.BaseUrl,
+            Path.Combine(data.Path, "runtime"), dispatcher);
+        var turnId = await CreateTurnAsync(store);
+        using var caller = new CancellationTokenSource();
+        using var shutdown = new CancellationTokenSource();
+        var request = CreateRequest(turnId, ProviderKind.Local, "blocked budget rejection",
+            [new AgentToolDefinition(ToolName, ToolSchema, true)], deadline: TimeSpan.FromSeconds(5)) with
+        {
+            HostShutdownToken = shutdown.Token
+        };
+        var collecting = CollectAsync(engine.RunTurnAsync(request, caller.Token));
+        await blockingStore.BudgetRejectionStarted.Task.WaitAsync(TimeSpan.FromSeconds(4));
+        Assert.False(blockingStore.BudgetRejectionCancelled.Task.IsCompleted);
+        Assert.False(collecting.IsCompleted);
+        if (cause == "caller")
+        {
+            caller.Cancel();
+        }
+        else if (cause == "shutdown")
+        {
+            shutdown.Cancel();
+        }
+
+        await blockingStore.BudgetRejectionCancelled.Task.WaitAsync(TimeSpan.FromSeconds(7));
+        if (cause == "caller")
+        {
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+                await collecting.WaitAsync(TimeSpan.FromSeconds(10)));
+        }
+        else
+        {
+            Assert.Equal("tool_budget_exceeded",
+                Assert.Single((await collecting.WaitAsync(TimeSpan.FromSeconds(10))).OfType<TurnFailed>()).ReasonCode);
+        }
+        Assert.Equal(1, dispatcher.Calls);
+        Assert.Equal(TurnStatus.Failed, (await store.GetTurnAsync(turnId, CancellationToken.None))!.Status);
+        var events = await store.ReadTurnEventsAfterAsync(turnId, 0, 100, CancellationToken.None);
+        var terminal = Assert.Single(events, item => item.EventType == nameof(TurnFailed));
+        Assert.Contains("tool_budget_exceeded", terminal.PayloadJson, StringComparison.Ordinal);
+        Assert.DoesNotContain(events, item => item.EventType == nameof(TurnCompleted));
+    }
+
     [Fact]
     [Trait("Category", "SdkContract")]
     public async Task ProviderFailureEmitsSafeFailureCodeWithoutLeakingProviderMessage()
@@ -348,9 +422,11 @@ public sealed class CopilotAgentEngineContractTests
         Assert.Equal(nameof(TurnInterrupted), Assert.Single(persisted).EventType);
     }
 
-    [Fact]
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     [Trait("Category", "SdkContract")]
-    public async Task DeadlineBoundsBlockedEventPersistenceWithoutMisclassifyingCancellation()
+    public async Task DeadlineBoundsBlockedEventPersistenceWithoutMisclassifyingCancellation(bool hostArbitration)
     {
         using var data = IsolatedDirectory.Create();
         using var databaseFile = IsolatedDatabaseFile.Create();
@@ -365,7 +441,10 @@ public sealed class CopilotAgentEngineContractTests
         var turnId = await CreateTurnAsync(store);
 
         var events = await CollectAsync(engine.RunTurnAsync(
-            CreateRequest(turnId, ProviderKind.Local, "event persistence deadline", deadline: TimeSpan.FromSeconds(2)),
+            CreateRequest(turnId, ProviderKind.Local, "event persistence deadline", deadline: TimeSpan.FromSeconds(2)) with
+            {
+                ResolveDeadlineCancellation = hostArbitration ? () => CancellationCause.Deadline : null
+            },
             CancellationToken.None)).WaitAsync(TimeSpan.FromSeconds(10));
 
         Assert.Equal("engine_deadline_exceeded", Assert.Single(events.OfType<TurnInterrupted>()).ReasonCode);
@@ -374,6 +453,83 @@ public sealed class CopilotAgentEngineContractTests
         Assert.Equal(
             nameof(TurnInterrupted),
             Assert.Single(persisted, item => item.EventType == nameof(TurnInterrupted)).EventType);
+    }
+
+    [Fact]
+    [Trait("Category", "SdkContract")]
+    public async Task AcceptanceDeadlineBeforeCallerCancellationPersistsInterruptedOutcome()
+    {
+        using var data = IsolatedDirectory.Create();
+        using var databaseFile = IsolatedDatabaseFile.Create();
+        var store = new SqliteConversationStore(await CreateDatabaseAsync(databaseFile.Path), new TestClock());
+        await using var provider = await FakeOpenAiProvider.StartAsync();
+        provider.StallInference = true;
+        var engine = CreateEngine(store, provider.BaseUrl, provider.BaseUrl, Path.Combine(data.Path, "runtime"));
+        var turnId = await CreateTurnAsync(store);
+        using var acceptedDeadline = new CancellationTokenSource();
+        using var callerCancellation = new CancellationTokenSource();
+        var eventsTask = CollectAsync(engine.RunTurnAsync(
+                CreateRequest(
+                    turnId,
+                    ProviderKind.Local,
+                    "acceptance deadline",
+                    deadline: TimeSpan.FromSeconds(20),
+                    deadlineCancellationToken: acceptedDeadline.Token),
+                callerCancellation.Token));
+
+        await provider.InferenceStalled.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        acceptedDeadline.Cancel();
+        callerCancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            async () => await eventsTask.WaitAsync(TimeSpan.FromSeconds(10)));
+
+        Assert.Equal(TurnStatus.Interrupted, (await store.GetTurnAsync(turnId, CancellationToken.None))?.Status);
+        var persisted = await store.ReadTurnEventsAfterAsync(turnId, 0, 1000, CancellationToken.None);
+        Assert.Single(persisted, item => item.EventType == nameof(TurnInterrupted));
+        Assert.DoesNotContain(persisted, item => item.EventType == nameof(TurnCancelled));
+    }
+
+    [Fact]
+    [Trait("Category", "SdkContract")]
+    public async Task PreCancelledSystemSignalsTakePrecedenceOverCallerCancellation()
+    {
+        using var data = IsolatedDirectory.Create();
+        using var databaseFile = IsolatedDatabaseFile.Create();
+        var store = new SqliteConversationStore(await CreateDatabaseAsync(databaseFile.Path), new TestClock());
+        await using var provider = await FakeOpenAiProvider.StartAsync();
+        var engine = CreateEngine(store, provider.BaseUrl, provider.BaseUrl, Path.Combine(data.Path, "runtime"));
+
+        using var deadline = new CancellationTokenSource();
+        using var deadlineCaller = new CancellationTokenSource();
+        deadline.Cancel();
+        deadlineCaller.Cancel();
+        var deadlineTurn = await CreateTurnAsync(store);
+        await AssertPreCancelledOutcomeAsync(
+            engine,
+            store,
+            CreateRequest(
+                deadlineTurn,
+                ProviderKind.Local,
+                "pre-cancelled deadline",
+                deadlineCancellationToken: deadline.Token),
+            deadlineCaller.Token,
+            "engine_deadline_exceeded");
+
+        using var hostShutdown = new CancellationTokenSource();
+        using var hostCaller = new CancellationTokenSource();
+        hostShutdown.Cancel();
+        hostCaller.Cancel();
+        var shutdownTurn = await CreateTurnAsync(store);
+        var shutdownRequest = CreateRequest(shutdownTurn, ProviderKind.Local, "pre-cancelled shutdown") with
+        {
+            HostShutdownToken = hostShutdown.Token
+        };
+        await AssertPreCancelledOutcomeAsync(
+            engine,
+            store,
+            shutdownRequest,
+            hostCaller.Token,
+            "host_shutdown");
     }
 
     [Fact]
@@ -506,6 +662,84 @@ public sealed class CopilotAgentEngineContractTests
         Assert.Equal(TurnStatus.Cancelled, (await store.GetTurnAsync(turnId, CancellationToken.None))?.Status);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("Category", "SdkContract")]
+    public async Task DirectCancellationWinningTerminalLockPreventsCompletionBeforeTokenCallbacks(bool shutdown)
+    {
+        using var data = IsolatedDirectory.Create();
+        using var databaseFile = IsolatedDatabaseFile.Create();
+        var store = new SqliteConversationStore(await CreateDatabaseAsync(databaseFile.Path), new TestClock());
+        await using var provider = await FakeOpenAiProvider.StartAsync();
+        provider.PauseInference = true;
+        var engine = CreateEngine(store, provider.BaseUrl, provider.BaseUrl, Path.Combine(data.Path, "runtime"));
+        var turnId = await CreateTurnAsync(store);
+        var request = CreateRequest(turnId, ProviderKind.Local, "direct cancellation race");
+        var execution = CollectAsync(engine.RunTurnAsync(request, CancellationToken.None));
+        await provider.InferenceStalled.Task.WaitAsync(TimeSpan.FromSeconds(20));
+
+        var activeTurns = (System.Collections.IDictionary)typeof(CopilotAgentEngine)
+            .GetField("activeTurns", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .GetValue(engine)!;
+        var active = activeTurns[turnId]!;
+        var token = (CancellationToken)active.GetType().GetProperty("CancellationToken")!.GetValue(active)!;
+        using var release = new ManualResetEventSlim();
+        var publicationHeld = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var holdBeforeObserver = token.Register(() =>
+        {
+            publicationHeld.TrySetResult();
+            if (!release.Wait(TimeSpan.FromSeconds(30)))
+            {
+                throw new TimeoutException("Direct cancellation callback barrier was not released.");
+            }
+        });
+        var cancelling = Task.Run(async () =>
+        {
+            if (shutdown)
+            {
+                await engine.StopAsync(turnId, CancellationToken.None);
+            }
+            else
+            {
+                await engine.CancelAsync(turnId, CancellationToken.None);
+            }
+        });
+
+        try
+        {
+            await publicationHeld.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            provider.ContinueInference.TrySetResult();
+            await provider.StreamingResponseWritten.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            var events = await execution.WaitAsync(TimeSpan.FromSeconds(20));
+
+            Assert.DoesNotContain(events, item => item is TurnCompleted);
+            if (shutdown)
+            {
+                Assert.Single(events.OfType<TurnInterrupted>());
+                Assert.Equal("host_shutdown", Assert.Single(events.OfType<TurnInterrupted>()).ReasonCode);
+                Assert.Equal(TurnStatus.Interrupted, (await store.GetTurnAsync(turnId, CancellationToken.None))!.Status);
+            }
+            else
+            {
+                Assert.Single(events.OfType<TurnCancelled>());
+                Assert.Equal(TurnStatus.Cancelled, (await store.GetTurnAsync(turnId, CancellationToken.None))!.Status);
+            }
+            Assert.DoesNotContain(
+                await store.ReadRecentAsync((await store.GetTurnAsync(turnId, CancellationToken.None))!.ConversationId,
+                    10, CancellationToken.None),
+                message => message.Role == "assistant");
+            Assert.False(cancelling.IsCompleted);
+        }
+        finally
+        {
+            provider.ContinueInference.TrySetResult();
+            release.Set();
+        }
+
+        await cancelling.WaitAsync(TimeSpan.FromSeconds(10));
+    }
+
     [Fact]
     [Trait("Category", "SdkContract")]
     public async Task RuntimeProcessCrashBecomesInterruptedAndNextTurnStartsFreshRuntime()
@@ -569,7 +803,8 @@ public sealed class CopilotAgentEngineContractTests
         ProviderKind provider,
         string marker,
         IReadOnlyList<AgentToolDefinition>? tools = null,
-        TimeSpan? deadline = null) =>
+        TimeSpan? deadline = null,
+        CancellationToken deadlineCancellationToken = default) =>
         new(
             turnId,
             provider,
@@ -581,7 +816,8 @@ public sealed class CopilotAgentEngineContractTests
                 new ContextEstimate(0, 0, 0, 0, 0, 0, 0, 0, 8192, 0, false, false, "fixture estimate")),
             tools ?? [],
             deadline ?? TimeSpan.FromSeconds(60),
-            1);
+            1,
+            DeadlineCancellationToken: deadlineCancellationToken);
 
     private static async Task<SqliteDatabase> CreateDatabaseAsync(string path)
     {
@@ -685,10 +921,13 @@ public sealed class CopilotAgentEngineContractTests
 
     private sealed class ControlledTurnEventStore(
         IConversationStore inner,
-        bool blockFirstAppendUntilCancelled = false)
+        bool blockFirstAppendUntilCancelled = false,
+        bool blockBudgetRejectionUntilCancelled = false)
         : IConversationStore, IAtomicTurnOutcomeStore
     {
         private int shouldFail = 1;
+        public TaskCompletionSource BudgetRejectionStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource BudgetRejectionCancelled { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public ValueTask<ConversationMessage> AppendMessageAsync(
             ConversationMessage message,
@@ -698,8 +937,21 @@ public sealed class CopilotAgentEngineContractTests
         public ValueTask<IReadOnlyList<ConversationMessage>> ReadRecentAsync(
             ConversationId conversationId,
             int maximumMessages,
+            CancellationToken cancellationToken,
+            Guid? currentTaskMessageId = null) =>
+            inner.ReadRecentAsync(conversationId, maximumMessages, cancellationToken, currentTaskMessageId);
+
+        public ValueTask<SubmittedConversationTurn> SubmitTurnAsync(
+            ConversationTurnSubmission submission,
             CancellationToken cancellationToken) =>
-            inner.ReadRecentAsync(conversationId, maximumMessages, cancellationToken);
+            inner.SubmitTurnAsync(submission, cancellationToken);
+
+        public ValueTask<SubmittedConversationTurn?> FindSubmittedTurnAsync(
+            ConversationId conversationId,
+            string clientRequestId,
+            string requestFingerprint,
+            CancellationToken cancellationToken) =>
+            inner.FindSubmittedTurnAsync(conversationId, clientRequestId, requestFingerprint, cancellationToken);
 
         public ValueTask<ConversationTurn> CreateTurnAsync(
             TurnId turnId,
@@ -728,6 +980,25 @@ public sealed class CopilotAgentEngineContractTests
             return inner.UpdateTurnStatusAsync(turnId, status, expectedVersion, updatedAtUtc, cancellationToken);
         }
 
+        public ValueTask<PersistedTurnEvent> TransitionTurnAndAppendEventAsync(
+            TurnId turnId,
+            TurnStatus status,
+            long expectedVersion,
+            DateTimeOffset updatedAtUtc,
+            string eventType,
+            string payloadJson,
+            DateTimeOffset occurredAtUtc,
+            CancellationToken cancellationToken) =>
+            inner.TransitionTurnAndAppendEventAsync(
+                turnId,
+                status,
+                expectedVersion,
+                updatedAtUtc,
+                eventType,
+                payloadJson,
+                occurredAtUtc,
+                cancellationToken);
+
         public TaskCompletionSource? TurnStatusUpdateStarted { get; set; }
         public TaskCompletionSource? ClaimCancellationOutcomeStarted { get; set; }
         public TaskCompletionSource? AllowClaimCancellationOutcome { get; set; }
@@ -739,6 +1010,16 @@ public sealed class CopilotAgentEngineContractTests
             DateTimeOffset occurredAtUtc,
             CancellationToken cancellationToken)
         {
+            if (blockBudgetRejectionUntilCancelled)
+            {
+                if (eventType == nameof(ToolCompleted) &&
+                    System.Text.Json.JsonSerializer.Deserialize<ToolCompleted>(payloadJson)!.Outcome == "Rejected")
+                {
+                    BudgetRejectionStarted.TrySetResult();
+                    return WaitForBudgetCancellationAsync(cancellationToken);
+                }
+                return inner.AppendTurnEventAsync(turnId, eventType, payloadJson, occurredAtUtc, cancellationToken);
+            }
             if (Interlocked.Exchange(ref shouldFail, 0) == 1)
             {
                 if (blockFirstAppendUntilCancelled)
@@ -750,6 +1031,18 @@ public sealed class CopilotAgentEngineContractTests
             }
 
             return inner.AppendTurnEventAsync(turnId, eventType, payloadJson, occurredAtUtc, cancellationToken);
+        }
+
+        private async ValueTask<PersistedTurnEvent> WaitForBudgetCancellationAsync(CancellationToken cancellationToken)
+        {
+            try
+            {
+                return await WaitForCancellationAsync(cancellationToken);
+            }
+            finally
+            {
+                BudgetRejectionCancelled.TrySetResult();
+            }
         }
 
         private static async ValueTask<PersistedTurnEvent> WaitForCancellationAsync(
@@ -774,7 +1067,8 @@ public sealed class CopilotAgentEngineContractTests
             string eventType,
             string payloadJson,
             DateTimeOffset occurredAtUtc,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            ConversationMessage? finalAssistantMessage = null)
         {
             if (eventType == nameof(TurnCancelled) &&
                 ClaimCancellationOutcomeStarted is { } started &&
@@ -792,7 +1086,8 @@ public sealed class CopilotAgentEngineContractTests
                 eventType,
                 payloadJson,
                 occurredAtUtc,
-                cancellationToken);
+                cancellationToken,
+                finalAssistantMessage);
         }
     }
 

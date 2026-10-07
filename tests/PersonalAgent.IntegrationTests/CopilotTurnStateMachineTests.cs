@@ -433,26 +433,34 @@ public sealed class CopilotTurnStateMachineTests
 
     [Fact]
     [Trait("Category", "Integration")]
-    public void ActiveTurnSelectsTerminalOutcomeByBudgetCancellationDeadlinePrecedence()
+    public void ActiveTurnDistinguishesHostShutdownAndEnforcesPersistedEventBudgets()
     {
-        Assert.Equal(
-            CopilotTurnSignal.Completed,
-            CopilotActiveTurn.SelectCompletedSignal(false, false, false));
-        Assert.Equal(
-            CopilotTurnSignal.DeadlineExceeded,
-            CopilotActiveTurn.SelectCompletedSignal(false, false, true));
-        Assert.Equal(
-            CopilotTurnSignal.Cancelled,
-            CopilotActiveTurn.SelectCompletedSignal(false, true, false));
-        Assert.Equal(
-            CopilotTurnSignal.Cancelled,
-            CopilotActiveTurn.SelectCompletedSignal(false, true, true));
-        Assert.Equal(
-            CopilotTurnSignal.ToolBudgetExceeded,
-            CopilotActiveTurn.SelectCompletedSignal(true, false, false));
-        Assert.Equal(
-            CopilotTurnSignal.ToolBudgetExceeded,
-            CopilotActiveTurn.SelectCompletedSignal(true, true, true));
+        var turnId = TurnId.New();
+        var now = Now;
+        var shutdown = new CopilotActiveTurn(0);
+        Assert.False(shutdown.StoppedForHostShutdown);
+        Assert.True(shutdown.StopForHostShutdown());
+        Assert.True(shutdown.StoppedForHostShutdown);
+        Assert.True(shutdown.CancelledByHost);
+        Assert.True(shutdown.CancellationToken.IsCancellationRequested);
+        Assert.True(shutdown.EventCancellationToken.IsCancellationRequested);
+        Assert.True(shutdown.MarkTerminal());
+        Assert.False(shutdown.StopForHostShutdown());
+
+        var eventBudget = new CopilotActiveTurn(0);
+        for (var index = 0; index < 10_000; index++)
+        {
+            Assert.True(eventBudget.TryAcceptEvent(new TurnStarted(turnId, now)));
+        }
+
+        Assert.False(eventBudget.TryAcceptEvent(new TurnStarted(turnId, now)));
+        Assert.Equal("event_budget_exceeded", eventBudget.FailureCode);
+        Assert.Equal(CopilotTurnSignal.EventBudgetExceeded, eventBudget.GetFailureSignal());
+
+        var textBudget = new CopilotActiveTurn(0);
+        Assert.False(textBudget.TryAcceptEvent(new TextDelta(turnId, now, new string('x', 1_000_001))));
+        Assert.Equal("event_budget_exceeded", textBudget.FailureCode);
+        Assert.Equal(CopilotTurnSignal.EventBudgetExceeded, textBudget.GetFailureSignal());
     }
 
     private sealed class TestClock : IClock

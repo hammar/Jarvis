@@ -383,12 +383,25 @@ public sealed class RoutingAndContextTests
         public ValueTask<IReadOnlyList<ConversationMessage>> ReadRecentAsync(
             ConversationId conversationId,
             int maximumMessages,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            Guid? currentTaskMessageId = null)
         {
             ReadCount++;
             RequestedMaximum = maximumMessages;
             return ValueTask.FromResult(returnNullHistory ? null! : messages);
         }
+
+        public ValueTask<SubmittedConversationTurn> SubmitTurnAsync(
+            ConversationTurnSubmission submission,
+            CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
+        public ValueTask<SubmittedConversationTurn?> FindSubmittedTurnAsync(
+            ConversationId conversationId,
+            string clientRequestId,
+            string requestFingerprint,
+            CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
 
         public ValueTask<ConversationTurn> CreateTurnAsync(
             TurnId turnId,
@@ -411,6 +424,17 @@ public sealed class RoutingAndContextTests
             TurnStatus status,
             long expectedVersion,
             DateTimeOffset updatedAtUtc,
+            CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
+        public ValueTask<PersistedTurnEvent> TransitionTurnAndAppendEventAsync(
+            TurnId turnId,
+            TurnStatus status,
+            long expectedVersion,
+            DateTimeOffset updatedAtUtc,
+            string eventType,
+            string payloadJson,
+            DateTimeOffset occurredAtUtc,
             CancellationToken cancellationToken) =>
             throw new NotSupportedException();
 

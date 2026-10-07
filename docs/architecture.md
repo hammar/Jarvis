@@ -66,6 +66,11 @@ untrusted, provenance-labelled `LocalOnly` data, and adds the current task as
 the final item. System-role and tool-role messages are not treated as host
 instructions. It reads one extra history row to indicate when additional
 older history was truncated, without loading an unbounded transcript. Its
+turn-aware read is bounded by the current accepted user-message ID: later
+submissions cannot enter or displace earlier context. Completed answers belong
+to their originating turn, even when appended after the current submission;
+history is ordered by turn acceptance and then by message order within the turn.
+Its
 `MinimumOmittedHistoryMessages` is a known lower bound, not the full count;
 `HasMoreHistory` separately reports when the sentinel proves older rows exist.
 Its
@@ -74,6 +79,80 @@ tool definitions, conversation history and packet framing. Without a provider
 tokenizer it reports a four-UTF-16-characters-per-token estimate plus a 20%
 reserve, not an exact count. These M1 policies do not implement cloud consent,
 memory retrieval or tool execution.
+
+`LocalTurnCoordinator` is the Application-owned lifecycle boundary for local
+turns. It transactionally accepts the request, user message, durable
+per-conversation request ID and initial event before queueing. SQLite is the
+authority for request deduplication and ordered event replay; the bounded
+in-memory queue is replaceable and never reconstructs model work after restart.
+The coordinator caps execution at four turns globally, serializes turns for
+each conversation, and allows at most 20 queued submissions. Queue overflow is
+explicit. Same-conversation waiters remain queued and do not occupy execution
+workers or release their queue slots; a different conversation can use an
+available worker.
+Same-conversation work retains acceptance order in a removable pending set.
+The bounded notification channel carries only wake-up bytes, never requests.
+Persisting cancellation or expiry removes pending work, and its deadline
+monitor disposes resources before releasing the reservation, independently of
+execution workers. Owner cancellation waits for that cleanup.
+Its supplied token bounds that wait without undoing the selected cancellation
+or stranding cleanup. Pending terminal persistence has one owner: its monitor.
+The default interactive turn deadline is 120 seconds from
+durable acceptance, including queue wait, routing, context construction, and
+inference; the engine receives only the remaining budget and a separate
+deadline-cancellation token so timeout remains distinct from owner cancellation.
+Trusted host configuration may bound a provider/model override. User cancellation is
+`Cancelled`; host shutdown, deadline expiry, process failure, or uncertain
+cleanup is `Interrupted`.
+The coordinator selects one winning cancellation cause; only that cause may
+signal the engine, including direct engine cancellation/shutdown. It publishes
+the winning engine signal before waking routing/context cleanup and defers
+resource disposal during reentrant cancellation publication. Cause selection
+does not invoke callbacks: publication runs asynchronously outside the lifecycle
+lock, and its task remains owned by the work item, worker and monitor.
+Workers consult the selected cause, not only its eventually published token,
+before routing pending work, after routing returns and before starting inference.
+Held publication cannot convert an already-cancelled request into a clarification,
+route rejection or new provider execution.
+Shutdown closes acceptance and the queue before awaiting publication; its
+15-second budget starts when the shared cleanup operation runs, after synchronous
+cause selection and asynchronous publication scheduling but before awaiting
+publication, engine stops, monitors or workers. The caller token bounds its own
+wait. Held callbacks never block readiness or cause premature
+resource disposal; they may finish cleanup after a reported timeout/cancellation.
+Shutdown closes admission and selects accepted turns' causes under the same
+lifecycle lock before scheduling cleanup; context completion cannot observe
+stopping without a selected cause. Selection preserves an earlier owner or
+deadline winner and never runs cancellation callbacks synchronously.
+Concurrent and repeated shutdown callers await the same owned operation rather
+than treating "stopping" as successful completion. Each caller may cancel its
+wait; the shared 15-second budget, completed result, timeout or failure remains
+authoritative and is never restarted or converted into success by a later call.
+Callback failures remain explicit and fail readiness rather than stranding
+pending work. Delayed cleanup
+or a concurrent losing signal cannot reclassify the outcome.
+The adapter's own finite timeout participates in the same host arbiter through
+`AgentTurnRequest.ResolveDeadlineCancellation`, rather than bypassing it.
+Terminal selection also consults `AgentTurnRequest.ReadCancellationCause`,
+a non-mutating view of the selected cause. Successful inference cannot persist
+completion or a final assistant answer when owner cancellation or shutdown
+was selected but callback delivery remains held. Reading None does not
+select a deadline or change standalone engine behavior.
+Standalone engine requests without this delegate retain engine-owned timeout
+classification and enforcement.
+Failed or cancelled workers/deadline monitors
+make readiness unhealthy and reject new submissions before durable creation.
+Clarification decisions are persisted
+as terminal `TurnClarificationRequired` events with their safe owner-facing
+message; unsupported routes persist a safe limitation message. Final assistant
+content, terminal state, and terminal event commit atomically. Startup marks
+every persisted nonterminal turn interrupted instead of replaying inference.
+Startup reserves recovery and worker creation before awaiting storage;
+overlapping starts are rejected without launching another worker set.
+Failed/cancelled recovery releases the reservation for retry. Shutdown during
+recovery prevents later worker creation and admission.
+Readiness checks SQLite reachability and the applied schema version separately
+from local provider configuration; model connectivity is not probed.
 
 T04's `CopilotAgentEngine` creates a fresh SDK client/session and dedicated
 runtime/work directory for each turn. It uses empty SDK mode, explicit
@@ -89,7 +168,11 @@ uncertainty are reported as interruption. The per-turn SDK runtime/workspace
 directory is removed after shutdown, with cleanup failures surfaced as
 interruption. Terminal persistence has a separate bounded timeout so
 cancellation cannot skip the durable outcome. Event persistence observes the
-turn token; force-stop and disposal share one shutdown task, preventing
+turn token. Internal tool-budget overflow preserves the bounded rejection-event
+drain, but deadline, caller and host-shutdown cancellation can still cancel
+blocked event persistence during that drain. The budget failure remains the
+truthful terminal outcome; external cancellation does not require an infinite
+wait to persist it. Force-stop and disposal share one shutdown task, preventing
 disposal or directory removal from racing a timed-out stop. The native runtime
 remains a trusted dependency under ADR 0001, not an OS-isolated process.
 
@@ -97,8 +180,9 @@ remains a trusted dependency under ADR 0001, not an OS-isolated process.
 
 AppHost owns only processes it launches. The Simulator/E2E profiles start Web
 and deterministic model/HA fixture processes with random managed endpoints.
-They explicitly clear external provider and Home Assistant endpoint/secret
-references for Web rather than forwarding developer credentials.
+Web uses the Aspire-discovered loopback model fixture as its local
+OpenAI-compatible provider and explicitly clears cloud and Home Assistant
+endpoint/secret references rather than forwarding developer credentials.
 Simulator data is persistent beneath the user's application data directory;
 E2E requires a unique, test-owned temporary directory. AppHost never stops or
 deletes external Ollama, Home Assistant, or real developer data. SQLite is a

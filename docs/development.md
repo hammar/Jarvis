@@ -25,6 +25,21 @@ test stack is xUnit 2.9.3 + `Microsoft.NET.Test.Sdk` 18.10.1 +
 Aspire packages and AppHost SDK are pinned to 13.6.0. Do not pass
 Microsoft.Testing.Platform-only switches to VSTest.
 
+### Validation environment troubleshooting
+
+Linux browser validation installs Chromium and its system libraries. Ensure
+the container filesystem has room for NuGet packages, build outputs, browsers,
+and OS package installation. Docker disk exhaustion can present as invalid
+APT signatures before installation reports insufficient space. Use an isolated
+host-backed build directory or enlarge Docker storage; do not disable signature
+verification or prune unrelated containers, images, or household-data volumes.
+
+Keep macOS and Linux `bin`/`obj` outputs separate. If native coverage collection
+stalls, inspect the generated test output directory for numbered duplicate
+assemblies and generated NuGet imports. Recreate only the affected generated
+outputs, then rerun the unchanged validation command. Never delete durable
+application data or exclude production assemblies to make the collector pass.
+
 ## Aspire profiles
 
 The normal development entry point defaults to Simulator:
@@ -38,16 +53,42 @@ never through a model or request payload.
 
 | Profile | Configuration and effect |
 | --- | --- |
-| Simulator | No credentials or real endpoints. External model, cloud, and Home Assistant settings are cleared for Web. Runs deterministic fake model/Home Assistant processes. Simulator data is persistent and separate from Local data. |
-| Local | Requires `JARVIS_OLLAMA_BASE_URL`; cloud is disabled. Optional HA uses `JARVIS_HOME_ASSISTANT_BASE_URL` and a secret reference. |
-| Hybrid | Requires explicit Ollama and cloud HTTP(S) endpoints plus `JARVIS_CLOUD_SECRET_REFERENCE`. Configuring Hybrid does not bypass packet review or consent. |
-| E2E | Test-only; requires unique `JARVIS_E2E_DATA_DIR`, launches controlled fixture endpoints and clears external model, cloud, and Home Assistant settings for Web. |
+| Simulator | No credentials or real endpoints. AppHost supplies Web with a discovered deterministic OpenAI-compatible model fixture and fake Home Assistant process; external cloud and Home Assistant credentials are not forwarded. Simulator data is persistent and separate from Local data. |
+| Local | Requires `JARVIS_OLLAMA_BASE_URL` and `JARVIS_OLLAMA_MODEL`; cloud is disabled. Optional HA uses `JARVIS_HOME_ASSISTANT_BASE_URL` and a secret reference. |
+| Hybrid | Requires explicit Ollama endpoint/model and cloud HTTP(S) endpoints plus `JARVIS_CLOUD_SECRET_REFERENCE`. Configuring Hybrid does not bypass packet review or consent. |
+| E2E | Test-only; requires unique `JARVIS_E2E_DATA_DIR`, launches controlled model/Home Assistant fixtures, and configures Web to use the discovered model fixture instead of external inference. |
 
 Endpoint settings must be absolute HTTP(S) URIs without embedded user info or
 query data. Supply tokens through a named protected secret reference, not an
 endpoint URL. The AppHost does not resolve or print secret values. macOS uses
 native Ollama as an external endpoint; no Apple GPU/container assumption is
 made.
+
+Bare loopback Ollama origins (with no path or `/`) are normalized to the
+OpenAI-compatible `/v1` API base. Explicit API paths, such as `/v1` or a
+custom proxy prefix, are preserved. Controlled integration tests execute the
+actual Copilot runtime through production Local/Hybrid composition against
+strict completion paths; startup-only checks are not inference evidence.
+
+The M1 local coordinator uses a 120-second end-to-end interactive turn
+deadline by default, starting at durable acceptance and including queue wait,
+routing, context construction, and inference. The engine receives only the
+remaining budget plus a separate deadline-cancellation token, preserving the
+distinction from owner cancellation in terminal outcomes.
+`JARVIS_LOCAL_TURN_MAX_DEADLINE_SECONDS` is a trusted host setting
+that bounds explicit provider/model overrides from 120 through 1200 seconds;
+invalid values fail startup. The coordinator permits four executing turns and
+20 queued turns. Same-conversation work stays in the counted queue while it
+waits and does not occupy an execution worker, so unrelated conversations can
+use available capacity. A stable client request ID is
+deduplicated per conversation in SQLite; conflicting reuse is rejected.
+Shutdown stops acceptance, persists queued work as interrupted, requests
+bounded engine shutdown, and surfaces timeout/persistence failures. On restart,
+persisted nonterminal turns are marked interrupted and are never automatically
+replayed. Readiness probes SQLite reachability and the applied schema version, along
+with local-policy availability,
+coordinator recovery, and provider configuration separately from model
+connectivity; it does not probe or log the model endpoint.
 
 ## Direct Web host and resources
 
