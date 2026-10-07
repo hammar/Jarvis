@@ -453,5 +453,12 @@ Infrastructure measured 91.5% lines (2234/2442), 73.6% branches (522/709);
 changed executable lines measured 93.9% (1120/1193). Critical-module gates
 and negative validation fixtures passed unchanged. Native collectors completed
 normally despite slower generated-output processing; no cleanup or gate
-changes were needed. Exact-commit independent re-review and Linux CI remain
-pending at this recording point.
+changes were needed. Narrow independent re-review of exact commit
+`9b255ec72ad1bc5577f922e4a4e44b13b73a77de` found no significant issue.
+Its brief response supplied no separate executed-check evidence; it does not
+establish that any additional tests or Linux gates ran. The substantive
+preceding independent review, its R21 interleaving, and the complete
+dispositions remain recorded above. R21's fix is supported by the explicit
+selected-cause checks and seven implementer-executed barrier regressions,
+not by treating the brief re-review response as test evidence. Linux CI
+against the pushed revision remains pending.
