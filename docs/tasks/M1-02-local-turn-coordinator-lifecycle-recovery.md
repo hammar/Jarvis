@@ -682,3 +682,14 @@ dispositions remain unchanged. R29's potential throughput optimization is
 explicitly deferred pending a measured need; it is not represented as a
 performance guarantee. The reflection barrier remains a test-maintenance
 tradeoff, not a product residual risk or production diagnostic capability.
+
+Independent review of exact `a9e26f7d96adb102c4c5d466641685f00114659e`
+against `1d4c692` confirmed R31 fixed, retained the R29/R30 dispositions
+without deeper re-review, and found no new actionable finding. It verified
+all three integration `Task.Yield` loops were replaced with cancellation-
+bounded 10 ms delays under their existing 5/5/15-second deadlines and found no
+remaining `Task.Yield`/`Thread.Sleep`/`SpinWait` polling in Integration tests.
+Its search of Unit tests found remaining yields only in bounded in-memory
+state/GC loops, outside R31's SQLite polling scope. It did not independently
+rerun integration; 113/113 and docs are implementer evidence. Final-HEAD CI
+is pending. This focused review is not exhaustive.
