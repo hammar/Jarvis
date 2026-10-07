@@ -411,10 +411,47 @@ The real SQLite/production-adapter held-owner/shutdown regressions also
 passed with the asynchronous publication implementation; they stall before
 SDK startup and are not live inference evidence.
 
-Independent review of the exact follow-up commit remains pending at this
-recording point. Linux validation of this revision remains pending CI; prior
+Independent review of `ecf430f9d4dc57a8ca2fa8ac942fe2c28e7c43c3`
+confirmed R19/R20 fixed, retained all R1-R18 dispositions, and independently
+passed 55 coordinator unit cases and seven coordinator integration cases.
+It found R21 below and did not repeat the full native gates, runtime harness
+or Linux CI. Linux validation of this revision remains pending CI; prior
 green CI applies only to `16ab471`. No credentials, cloud disclosure,
 household data or physical writes were used. Timeout or caller cancellation
 does not prove callback/worker cleanup has finished: stalled callbacks retain
 their owned resources until they return, and bounded failure is reported
 explicitly. No finding is accepted as a residual risk by the owner.
+
+## Independent review follow-up: R21
+
+**R21 (medium, Previously missed):** cancellation cause selection precedes
+asynchronous publication, but workers used only the not-yet-signalled execution
+token to decide whether to route claimed pending work. With a winning callback
+held and a worker released, an ambiguous/unsupported request could persist
+`Failed` and an assistant clarification instead of its selected owner
+cancellation. The independent reviewer established the interleaving from
+source; its prior passing checks did not exercise this window.
+
+Fixed by consulting the authoritative selected cause before executing claimed
+pending work, after routing returns and under the lifecycle lock before
+dispatching inference. Cancellation resolution does not wait for publication
+to classify the durable outcome; resource disposal still does. Seven
+`SelectedOwnerCausePreventsRoutingOutcomeOrInferenceBeforePublication`
+cases hold the owner callback while freeing a worker or releasing delayed
+routing/context. They exercise the production local-only router's
+clarification, unsupported and local decisions and assert one `Cancelled`
+event, no clarification/rejection/assistant message for the cancelled request,
+no provider dispatch, and responsive readiness before callback release.
+
+This finding extends the full R1-R20 ledger above and is not an accepted
+residual risk. Final native macOS validation passed: `tools/validate.sh build`
+(zero warnings/errors), `unit` (83/83), `integration` (99/99), `coverage`,
+`architecture` (6/6), `sdk-contracts` (20/20 and pinned runtime harness),
+`aspire-e2e` (3/3), `browser-e2e` (1/1 and deliberate failure probe), and
+`docs`. Application measured 97.9% lines (905/924), 92.9% branches (274/295);
+Infrastructure measured 91.5% lines (2234/2442), 73.6% branches (522/709);
+changed executable lines measured 93.9% (1120/1193). Critical-module gates
+and negative validation fixtures passed unchanged. Native collectors completed
+normally despite slower generated-output processing; no cleanup or gate
+changes were needed. Exact-commit independent re-review and Linux CI remain
+pending at this recording point.

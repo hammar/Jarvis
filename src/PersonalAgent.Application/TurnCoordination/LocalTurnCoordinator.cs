@@ -455,7 +455,7 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
                         item.ExpireDeadline();
                     }
 
-                    if (item.ExecutionCancellation.IsCancellationRequested)
+                    if (item.CancellationCause != CancellationCause.None || item.ExecutionCancellation.IsCancellationRequested)
                     {
                         await ResolveCancellationAsync(item);
                     }
@@ -521,6 +521,12 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
             var route = await router.RouteAsync(
                 new RoutingRequest(RouteMode.LocalOnly, item.Request.Text, true, item.Request.TaskKind),
                 routingCancellation.Token);
+            if (item.CancellationCause != CancellationCause.None)
+            {
+                await ResolveCancellationAsync(item);
+                return;
+            }
+
             if (route.Disposition != RouteDisposition.Local || route.Provider != ProviderKind.Local)
             {
                 if (route.Disposition == RouteDisposition.Clarify)
@@ -569,6 +575,11 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
                 if (remainingDeadline <= TimeSpan.Zero)
                 {
                     item.ExpireDeadline();
+                }
+
+                if (item.CancellationCause != CancellationCause.None)
+                {
+                    throw new OperationCanceledException(routingCancellation.Token);
                 }
 
                 routingCancellation.Token.ThrowIfCancellationRequested();

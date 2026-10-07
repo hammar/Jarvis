@@ -110,6 +110,10 @@ the winning engine signal before waking routing/context cleanup and defers
 resource disposal during reentrant cancellation publication. Cause selection
 does not invoke callbacks: publication runs asynchronously outside the lifecycle
 lock, and its task remains owned by the work item, worker and monitor.
+Workers consult the selected cause, not only its eventually published token,
+before routing pending work, after routing returns and before starting inference.
+Held publication cannot convert an already-cancelled request into a clarification,
+route rejection or new provider execution.
 Shutdown closes acceptance and the queue before awaiting publication; its
 15-second budget starts before selection/publication, and the caller token
 also bounds every wait. Held callbacks never block readiness or cause premature

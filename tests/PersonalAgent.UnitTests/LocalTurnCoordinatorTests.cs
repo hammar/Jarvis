@@ -3,6 +3,7 @@ using System.Runtime.CompilerServices;
 using System.Reflection;
 using System.Text.Json;
 using PersonalAgent.Application;
+using PersonalAgent.Application.Routing;
 using PersonalAgent.Application.TurnCoordination;
 using PersonalAgent.Domain;
 using Xunit;
@@ -1271,6 +1272,102 @@ public sealed class LocalTurnCoordinatorTests
         await Assert.ThrowsAsync<AggregateException>(() => scope.Coordinator.StopAsync(CancellationToken.None));
     }
 
+    [Theory]
+    [InlineData(0, RoutingTaskKind.Ambiguous)]
+    [InlineData(0, RoutingTaskKind.Unsupported)]
+    [InlineData(0, RoutingTaskKind.TextConversation)]
+    [InlineData(1, RoutingTaskKind.Ambiguous)]
+    [InlineData(1, RoutingTaskKind.Unsupported)]
+    [InlineData(1, RoutingTaskKind.TextConversation)]
+    [InlineData(2, RoutingTaskKind.TextConversation)]
+    [Trait("Category", "Unit")]
+    public async Task SelectedOwnerCausePreventsRoutingOutcomeOrInferenceBeforePublication(
+        int stage, RoutingTaskKind taskKind)
+    {
+        var store = new InMemoryConversationStore();
+        var engine = new ControlledEngine(store, block: true);
+        var router = new PausedRouter();
+        var context = new ControlledContextBuilder(block: stage == 2);
+        await using var scope = CreateCoordinator(store, engine, router, context);
+        await scope.Coordinator.StartAsync(CancellationToken.None);
+        var running = new List<TurnId>();
+        if (stage == 0)
+        {
+            for (var index = 0; index < 4; index++)
+            {
+                var activeTurn = await scope.Coordinator.SubmitAsync(Request(requestId: $"active-{index}"), CancellationToken.None);
+                running.Add(activeTurn.Turn.Id);
+                await engine.WaitForTurnStartedAsync(activeTurn.Turn.Id);
+            }
+        }
+
+        router.BlockNextRoute = stage == 1;
+        var turn = await scope.Coordinator.SubmitAsync(Request(taskKind: taskKind), CancellationToken.None);
+        if (stage == 1)
+        {
+            await router.Started.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        }
+        else if (stage == 2)
+        {
+            await context.Started.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        }
+
+        var collection = (System.Collections.IDictionary)typeof(LocalTurnCoordinator)
+            .GetField(stage == 0 ? "queued" : "active", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .GetValue(scope.Coordinator)!;
+        var entry = collection[turn.Turn.Id]!;
+        var item = stage == 0 ? entry : entry.GetType().GetProperty("Item")!.GetValue(entry)!;
+        var owner = (CancellationTokenSource)item.GetType().GetProperty("Cancellation")!.GetValue(item)!;
+        var publicationPaused = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var release = new ManualResetEventSlim();
+        using var registration = owner.Token.Register(() =>
+        {
+            publicationPaused.TrySetResult();
+            release.Wait();
+        });
+        var cancellation = scope.Coordinator.CancelAsync(turn.Turn.Id, CancellationToken.None).AsTask();
+        try
+        {
+            await publicationPaused.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            if (stage == 0)
+            {
+                engine.ReleaseTurn(running[0]);
+            }
+            else if (stage == 1)
+            {
+                router.Continue.TrySetResult();
+            }
+            else
+            {
+                context.Continue.TrySetResult();
+            }
+
+            await WaitForTerminalEventAsync(store, turn.Turn.Id);
+            Assert.False(cancellation.IsCompleted);
+            Assert.Equal(stage == 0 ? 4 : 0, engine.ExecutionCount);
+            Assert.Equal(TurnStatus.Cancelled, (await store.GetTurnAsync(turn.Turn.Id, CancellationToken.None))!.Status);
+            var events = await scope.Coordinator.ReadEventsAfterAsync(turn.Turn.Id, 0, 20, CancellationToken.None);
+            Assert.Single(events, item => item.EventType == nameof(TurnCancelled));
+            Assert.DoesNotContain(events, item => item.EventType is nameof(TurnFailed) or nameof(TurnClarificationRequired));
+            if (stage == 0)
+            {
+                Assert.DoesNotContain(events, item => item.EventType == nameof(TurnRouting));
+            }
+            Assert.DoesNotContain(store.Messages,
+                message => message.ConversationId == turn.Turn.ConversationId && message.Role == "assistant");
+            Assert.True(scope.Coordinator.IsReady);
+        }
+        finally
+        {
+            release.Set();
+            router.Continue.TrySetResult();
+            context.Continue.TrySetResult();
+        }
+
+        await cancellation.WaitAsync(TimeSpan.FromSeconds(5));
+        await scope.Coordinator.StopAsync(CancellationToken.None);
+    }
+
     [Fact]
     [Trait("Category", "Unit")]
     public async Task WorkerClaimDuringPendingCancellationPersistenceReclaimsExactlyOnce()
@@ -1358,7 +1455,7 @@ public sealed class LocalTurnCoordinatorTests
     private static Scope CreateCoordinator(
         InMemoryConversationStore store,
         ControlledEngine engine,
-        ControlledRouter? router = null,
+        IModelRouter? router = null,
         ControlledContextBuilder? contextBuilder = null,
         FixedClock? clock = null) =>
         new(new LocalTurnCoordinator(
@@ -1427,6 +1524,27 @@ public sealed class LocalTurnCoordinatorTests
     private sealed class FixedClock : IClock
     {
         public DateTimeOffset UtcNow => Now;
+    }
+
+    private sealed class PausedRouter : IModelRouter
+    {
+        private readonly LocalOnlyModelRouter router = new();
+        public bool BlockNextRoute { get; set; }
+        public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Continue { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async ValueTask<RouteDecision> RouteAsync(RoutingRequest request, CancellationToken cancellationToken)
+        {
+            var decision = await router.RouteAsync(request, cancellationToken);
+            if (BlockNextRoute)
+            {
+                BlockNextRoute = false;
+                Started.TrySetResult();
+                await Continue.Task;
+            }
+
+            return decision;
+        }
     }
 
     private sealed class ControlledRouter(RouteDecision decision) : IModelRouter
