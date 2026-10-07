@@ -158,7 +158,11 @@ uncertainty are reported as interruption. The per-turn SDK runtime/workspace
 directory is removed after shutdown, with cleanup failures surfaced as
 interruption. Terminal persistence has a separate bounded timeout so
 cancellation cannot skip the durable outcome. Event persistence observes the
-turn token; force-stop and disposal share one shutdown task, preventing
+turn token. Internal tool-budget overflow preserves the bounded rejection-event
+drain, but deadline, caller and host-shutdown cancellation can still cancel
+blocked event persistence during that drain. The budget failure remains the
+truthful terminal outcome; external cancellation does not require an infinite
+wait to persist it. Force-stop and disposal share one shutdown task, preventing
 disposal or directory removal from racing a timed-out stop. The native runtime
 remains a trusted dependency under ADR 0001, not an OS-isolated process.
 

@@ -318,6 +318,62 @@ public sealed class CopilotAgentEngineContractTests
         Assert.Equal(TurnStatus.Failed, (await store.GetTurnAsync(turnId, CancellationToken.None))?.Status);
     }
 
+    [Theory]
+    [InlineData("deadline")]
+    [InlineData("caller")]
+    [InlineData("shutdown")]
+    [Trait("Category", "SdkContract")]
+    public async Task ExternalCancellationBoundsBlockedToolBudgetRejectionPersistence(string cause)
+    {
+        using var data = IsolatedDirectory.Create();
+        using var databaseFile = IsolatedDatabaseFile.Create();
+        var store = new SqliteConversationStore(await CreateDatabaseAsync(databaseFile.Path), new TestClock());
+        var blockingStore = new ControlledTurnEventStore(store, blockBudgetRejectionUntilCancelled: true);
+        await using var provider = await FakeOpenAiProvider.StartAsync();
+        provider.RepeatTool = true;
+        var dispatcher = new RecordingDispatcher(new ToolDispatchResult("Succeeded", """{"ok":true}""", null));
+        var engine = CreateEngine(blockingStore, provider.BaseUrl, provider.BaseUrl,
+            Path.Combine(data.Path, "runtime"), dispatcher);
+        var turnId = await CreateTurnAsync(store);
+        using var caller = new CancellationTokenSource();
+        using var shutdown = new CancellationTokenSource();
+        var request = CreateRequest(turnId, ProviderKind.Local, "blocked budget rejection",
+            [new AgentToolDefinition(ToolName, ToolSchema, true)], deadline: TimeSpan.FromSeconds(5)) with
+        {
+            HostShutdownToken = shutdown.Token
+        };
+        var collecting = CollectAsync(engine.RunTurnAsync(request, caller.Token));
+        await blockingStore.BudgetRejectionStarted.Task.WaitAsync(TimeSpan.FromSeconds(4));
+        Assert.False(blockingStore.BudgetRejectionCancelled.Task.IsCompleted);
+        Assert.False(collecting.IsCompleted);
+        if (cause == "caller")
+        {
+            caller.Cancel();
+        }
+        else if (cause == "shutdown")
+        {
+            shutdown.Cancel();
+        }
+
+        await blockingStore.BudgetRejectionCancelled.Task.WaitAsync(TimeSpan.FromSeconds(7));
+        if (cause == "caller")
+        {
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+                await collecting.WaitAsync(TimeSpan.FromSeconds(10)));
+        }
+        else
+        {
+            Assert.Equal("tool_budget_exceeded",
+                Assert.Single((await collecting.WaitAsync(TimeSpan.FromSeconds(10))).OfType<TurnFailed>()).ReasonCode);
+        }
+        Assert.Equal(1, dispatcher.Calls);
+        Assert.Equal(TurnStatus.Failed, (await store.GetTurnAsync(turnId, CancellationToken.None))!.Status);
+        var events = await store.ReadTurnEventsAfterAsync(turnId, 0, 100, CancellationToken.None);
+        var terminal = Assert.Single(events, item => item.EventType == nameof(TurnFailed));
+        Assert.Contains("tool_budget_exceeded", terminal.PayloadJson, StringComparison.Ordinal);
+        Assert.DoesNotContain(events, item => item.EventType == nameof(TurnCompleted));
+    }
+
     [Fact]
     [Trait("Category", "SdkContract")]
     public async Task ProviderFailureEmitsSafeFailureCodeWithoutLeakingProviderMessage()
@@ -787,10 +843,13 @@ public sealed class CopilotAgentEngineContractTests
 
     private sealed class ControlledTurnEventStore(
         IConversationStore inner,
-        bool blockFirstAppendUntilCancelled = false)
+        bool blockFirstAppendUntilCancelled = false,
+        bool blockBudgetRejectionUntilCancelled = false)
         : IConversationStore, IAtomicTurnOutcomeStore
     {
         private int shouldFail = 1;
+        public TaskCompletionSource BudgetRejectionStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource BudgetRejectionCancelled { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public ValueTask<ConversationMessage> AppendMessageAsync(
             ConversationMessage message,
@@ -873,6 +932,16 @@ public sealed class CopilotAgentEngineContractTests
             DateTimeOffset occurredAtUtc,
             CancellationToken cancellationToken)
         {
+            if (blockBudgetRejectionUntilCancelled)
+            {
+                if (eventType == nameof(ToolCompleted) &&
+                    System.Text.Json.JsonSerializer.Deserialize<ToolCompleted>(payloadJson)!.Outcome == "Rejected")
+                {
+                    BudgetRejectionStarted.TrySetResult();
+                    return WaitForBudgetCancellationAsync(cancellationToken);
+                }
+                return inner.AppendTurnEventAsync(turnId, eventType, payloadJson, occurredAtUtc, cancellationToken);
+            }
             if (Interlocked.Exchange(ref shouldFail, 0) == 1)
             {
                 if (blockFirstAppendUntilCancelled)
@@ -884,6 +953,18 @@ public sealed class CopilotAgentEngineContractTests
             }
 
             return inner.AppendTurnEventAsync(turnId, eventType, payloadJson, occurredAtUtc, cancellationToken);
+        }
+
+        private async ValueTask<PersistedTurnEvent> WaitForBudgetCancellationAsync(CancellationToken cancellationToken)
+        {
+            try
+            {
+                return await WaitForCancellationAsync(cancellationToken);
+            }
+            finally
+            {
+                BudgetRejectionCancelled.TrySetResult();
+            }
         }
 
         private static async ValueTask<PersistedTurnEvent> WaitForCancellationAsync(

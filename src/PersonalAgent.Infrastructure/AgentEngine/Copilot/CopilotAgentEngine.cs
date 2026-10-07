@@ -161,7 +161,7 @@ public sealed class CopilotAgentEngine : IAgentEngine
         var cancellationObserversInitializing = true;
         var pendingCancellationSignals = 0;
         var cancellationSignal = (int)CopilotTurnSignal.Completed;
-        void RecordCancellation(CopilotTurnSignal signal)
+        void RecordCancellation(CopilotTurnSignal signal, bool preserveToolBudgetDrain = false)
         {
             lock (cancellationSync)
             {
@@ -178,7 +178,8 @@ public sealed class CopilotAgentEngine : IAgentEngine
 
             // Publish the cause before waking execution; independent linked-token callbacks can run first.
             turnCancellation.Cancel();
-            if (active.FailureCode != "tool_budget_exceeded")
+            // Only the internal budget stop drains rejection events; external cancellation still bounds that drain.
+            if (!preserveToolBudgetDrain)
             {
                 eventCancellation.Cancel();
             }
@@ -202,7 +203,8 @@ public sealed class CopilotAgentEngine : IAgentEngine
         using var activeCancellation = active.CancellationToken.Register(
             () => RecordCancellation(active.StoppedForHostShutdown
                 ? CopilotTurnSignal.HostShutdown
-                : CopilotTurnSignal.Cancelled));
+                : CopilotTurnSignal.Cancelled,
+                preserveToolBudgetDrain: active.FailureCode == "tool_budget_exceeded" && !active.CancelledByHost));
         using var acceptedDeadlineCancellation = request.DeadlineCancellationToken.Register(
             () => RecordCancellation(CopilotTurnSignal.DeadlineExceeded));
         using var engineDeadlineCancellation = deadline.Token.Register(

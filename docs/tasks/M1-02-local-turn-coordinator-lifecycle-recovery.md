@@ -512,3 +512,39 @@ No finding is accepted as a residual risk by the owner.
 The final actual-runtime theory also includes an uncancelled response, proving
 that reading None remains non-mutating and preserves normal completion with
 one stored assistant answer.
+
+## PR review follow-up: R24-R25
+
+The review of `6af1f56` adds R24 (high) inline and R25 (medium) only in the
+top-level **Previously missed** summary. Both are retained alongside the
+complete R1-R23 ledger above. All required CI passed on `6af1f56`; that is
+earlier-revision evidence, not validation of these follow-ups.
+
+| Finding | Disposition and regression evidence |
+| --- | --- |
+| R24: tool-budget failure suppresses later deadline cancellation of a blocked event drain | Fixed: preserve draining only for the internal active-turn tool-budget signal. Deadline, caller and shutdown signals always cancel the event pump, regardless of a retained budget failure code. `ExternalCancellationBoundsBlockedToolBudgetRejectionPersistence` runs the actual runtime with repeating tools, blocks only the rejected ToolCompleted append after overflow, proves the internal signal does not cancel that append, then checks that each external cause cancels it, completes within bounded event/state waits and leaves one durable `tool_budget_exceeded` failure without completion. Existing actual-runtime budget behavior still persists the rejection normally. |
+| R25: production environment-secret resolver lacks behavioral tests | Fixed: eight production-resolver cases cover successful named lookup, missing/empty values, empty/whitespace/invalid/non-ASCII/oversized names, null input and cancellation. Tests use a unique fixture environment-variable name, only a controlled non-secret value, and restore its prior value in `finally`. Unavailable-value errors do not disclose the variable name. No real credentials or simulated resolver substitute is used. |
+
+There is no schema, public API signature, dependency pin, routing or capability
+change. Architecture and testing docs describe the failure-drain semantics and
+scenario mappings. The focused native integration run passed 12 cases:
+three combined cancellation/drain scenarios, the existing actual-runtime
+budget scenario and eight resolver cases. Final native commands passed:
+`tools/validate.sh build` (zero warnings/errors), `unit` (87/87),
+`integration` (113/113), `coverage`, `architecture` (6/6), `sdk-contracts`
+(23/23 and pinned runtime harness), `aspire-e2e` (3/3), `browser-e2e`
+(1/1 plus deliberate failure probe), and `docs`. Application measured 98.0%
+lines (916/935), 94.2% branches (276/293); Infrastructure measured 92.0%
+lines (2248/2443), 74.7% branches (528/707); changed executable lines
+measured 95.0% (1145/1205). Critical-module thresholds and negative
+validation fixtures passed unchanged.
+
+The initial collector attempt stalled before starting tests; generated test
+outputs contained 1354, 3003 and 574 numbered duplicate files in the Unit,
+Integration and SDK-contract output directories respectively. After stopping
+that owned validation process, only those three verified untracked
+`bin/Release/net10.0` directories were recreated; unchanged validation then
+passed. No source, durable data, dependency cache or validation gate was
+removed or weakened. Independent exact-commit review and new-revision Linux
+CI remain pending at this recording point. Earlier runtime/process limitations
+remain; no finding is accepted as a residual risk by the owner.
