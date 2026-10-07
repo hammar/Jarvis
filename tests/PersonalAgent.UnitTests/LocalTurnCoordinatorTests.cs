@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
+using System.Reflection;
 using System.Text.Json;
 using PersonalAgent.Application;
 using PersonalAgent.Application.TurnCoordination;
@@ -473,7 +474,7 @@ public sealed class LocalTurnCoordinatorTests
                 var witness = await scope.Coordinator.SubmitAsync(
                     Request(requestId: "deferred-witness"), CancellationToken.None);
                 await engine.WaitForTurnStartedAsync(witness.Turn.Id);
-                // Later unrelated execution proves earlier blocked work has left the channel.
+                // Unrelated execution proves blocked work does not consume execution workers.
             }
 
             var submission = await scope.Coordinator.SubmitAsync(
@@ -506,6 +507,134 @@ public sealed class LocalTurnCoordinatorTests
         {
             await engine.WaitForTurnStartedAsync(replacement.Turn.Id);
         }
+    }
+
+    [Fact]
+    [Trait("Category", "Unit")]
+    public async Task RepeatedPendingCancellationReclaimsRequestResourcesWhileAllWorkersRemainOccupied()
+    {
+        var store = new InMemoryConversationStore();
+        var engine = new ControlledEngine(store, block: true);
+        await using var scope = CreateCoordinator(store, engine);
+        await scope.Coordinator.StartAsync(CancellationToken.None);
+        for (var index = 0; index < 4; index++)
+        {
+            var turn = await scope.Coordinator.SubmitAsync(Request(requestId: $"active-{index}"), CancellationToken.None);
+            await engine.WaitForTurnStartedAsync(turn.Turn.Id);
+        }
+
+        var retained = new List<WeakReference>();
+        for (var index = 0; index < 100; index++)
+        {
+            retained.Add(await SubmitCancelAndCaptureAsync(scope.Coordinator, index));
+        }
+
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        do
+        {
+            deadline.Token.ThrowIfCancellationRequested();
+            await Task.Yield();
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+        }
+        while (retained.Any(reference => reference.IsAlive));
+
+        Assert.Equal(4, engine.ExecutionCount);
+        Assert.True(scope.Coordinator.IsReady);
+        var pending = new List<TurnId>();
+        for (var index = 0; index < 20; index++)
+        {
+            pending.Add((await scope.Coordinator.SubmitAsync(
+                Request(requestId: $"still-pending-{index}"), CancellationToken.None)).Turn.Id);
+        }
+
+        await Assert.ThrowsAsync<TurnQueueFullException>(async () =>
+            await scope.Coordinator.SubmitAsync(Request(requestId: "overflow"), CancellationToken.None));
+        foreach (var turn in pending)
+        {
+            await scope.Coordinator.CancelAsync(turn, CancellationToken.None);
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static async Task<WeakReference> SubmitCancelAndCaptureAsync(ILocalTurnCoordinator coordinator, int index)
+    {
+        var turn = await coordinator.SubmitAsync(
+            Request(requestId: $"cancel-{index}", text: new string('x', 1000)), CancellationToken.None);
+        var pending = (System.Collections.IDictionary)typeof(LocalTurnCoordinator)
+            .GetField("queued", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(coordinator)!;
+        var item = pending[turn.Turn.Id]!;
+        var reference = new WeakReference(item);
+        var monitor = (TaskCompletionSource)item.GetType().GetProperty("DeadlineMonitor")!.GetValue(item)!;
+        await coordinator.CancelAsync(turn.Turn.Id, CancellationToken.None);
+        await monitor.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        return reference;
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    [Trait("Category", "Unit")]
+    public async Task ActiveEngineOnlyReceivesWinningCauseWhileCancellationPublicationIsPaused(bool deadlineFirst)
+    {
+        var store = new InMemoryConversationStore();
+        var engine = new ControlledEngine(store, persistCancellationOutcome: true);
+        await using var scope = CreateCoordinator(store, engine);
+        await scope.Coordinator.StartAsync(CancellationToken.None);
+        var turn = await scope.Coordinator.SubmitAsync(
+            Request(deadline: TimeSpan.FromMilliseconds(300)), CancellationToken.None);
+        await engine.WaitForTurnStartedAsync(turn.Turn.Id);
+        using var release = new ManualResetEventSlim();
+        var publicationPaused = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        // LIFO callback order pauses delivery before the engine's winning-signal observer.
+        using var pause = (deadlineFirst ? engine.EngineDeadlineToken : engine.EngineOwnerToken).Register(() =>
+        {
+            publicationPaused.TrySetResult();
+            if (!release.Wait(TimeSpan.FromSeconds(5)))
+            {
+                throw new TimeoutException("Cancellation publication was not released.");
+            }
+        });
+        Task? cancelling = null;
+        try
+        {
+            if (!deadlineFirst)
+            {
+                cancelling = Task.Run(async () =>
+                    await scope.Coordinator.CancelAsync(turn.Turn.Id, CancellationToken.None));
+            }
+
+            await publicationPaused.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            if (deadlineFirst)
+            {
+                await scope.Coordinator.CancelAsync(turn.Turn.Id, CancellationToken.None);
+            }
+            else
+            {
+                var work = (System.Collections.IDictionary)typeof(LocalTurnCoordinator)
+                    .GetField("active", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(scope.Coordinator)!;
+                var item = work[turn.Turn.Id]!.GetType().GetProperty("Item")!.GetValue(work[turn.Turn.Id])!;
+                // Exercise the losing deadline signal while the owner callback holds publication.
+                item.GetType().GetMethod("ExpireDeadline")!.Invoke(item, null);
+            }
+
+            Assert.False(engine.CancellationOutcome.Task.IsCompleted);
+        }
+        finally
+        {
+            release.Set();
+            engine.ContinueCancellation.TrySetResult();
+        }
+
+        if (cancelling is not null)
+        {
+            await cancelling.WaitAsync(TimeSpan.FromSeconds(2));
+        }
+
+        await WaitForTerminalAsync(store, turn.Turn.Id);
+        Assert.Equal(deadlineFirst ? TurnStatus.Interrupted : TurnStatus.Cancelled,
+            (await store.GetTurnAsync(turn.Turn.Id, CancellationToken.None))!.Status);
+        Assert.Equal(deadlineFirst ? 0 : 1, engine.CancelCallCount);
     }
 
     [Fact]
@@ -1109,9 +1238,16 @@ public sealed class LocalTurnCoordinatorTests
         bool returnWithoutOutcome = false,
         bool stopFails = false,
         bool honorDeadline = false,
-        bool hideOutcomeRead = false) : IAgentEngine
+        bool hideOutcomeRead = false,
+        bool persistCancellationOutcome = false) : IAgentEngine
     {
         private int executionCount;
+        private int cancelCallCount;
+        public int CancelCallCount => Volatile.Read(ref cancelCallCount);
+        public TaskCompletionSource<TurnStatus> CancellationOutcome { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource ContinueCancellation { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public CancellationToken EngineOwnerToken { get; private set; }
+        public CancellationToken EngineDeadlineToken { get; private set; }
         private readonly ConcurrentDictionary<TurnId, TaskCompletionSource> startedTurns = new();
         private readonly ConcurrentDictionary<TurnId, TaskCompletionSource> releaseTurns = new();
         public int ExecutionCount => Volatile.Read(ref executionCount);
@@ -1152,6 +1288,28 @@ public sealed class LocalTurnCoordinatorTests
                 turn.Version,
                 Now,
                 cancellationToken);
+
+            if (persistCancellationOutcome)
+            {
+                EngineOwnerToken = cancellationToken;
+                EngineDeadlineToken = request.DeadlineCancellationToken;
+                using var owner = cancellationToken.Register(() => CancellationOutcome.TrySetResult(TurnStatus.Cancelled));
+                using var deadline = request.DeadlineCancellationToken.Register(() => CancellationOutcome.TrySetResult(TurnStatus.Interrupted));
+                using var shutdown = request.HostShutdownToken.Register(() => CancellationOutcome.TrySetResult(TurnStatus.Interrupted));
+                startedTurns.GetOrAdd(request.TurnId, static _ => new(TaskCreationOptions.RunContinuationsAsynchronously))
+                    .TrySetResult();
+                var outcome = await CancellationOutcome.Task;
+                await ContinueCancellation.Task;
+                var cancelledTurn = (await store.GetTurnAsync(request.TurnId, CancellationToken.None))!;
+                AgentEvent terminal = outcome == TurnStatus.Cancelled
+                    ? new TurnCancelled(request.TurnId, Now)
+                    : new TurnInterrupted(request.TurnId, Now, "interactive_deadline_exceeded");
+                await store.UpdateTurnStatusAndAppendEventAsync(
+                    request.TurnId, outcome, cancelledTurn.Version, Now, terminal.GetType().Name,
+                    JsonSerializer.Serialize(terminal, terminal.GetType()), Now, CancellationToken.None);
+                yield return terminal;
+                yield break;
+            }
 
             if (block)
             {
@@ -1207,8 +1365,16 @@ public sealed class LocalTurnCoordinatorTests
             yield return completed;
         }
 
-        public ValueTask CancelAsync(TurnId turnId, CancellationToken cancellationToken) =>
-            ValueTask.CompletedTask;
+        public ValueTask CancelAsync(TurnId turnId, CancellationToken cancellationToken)
+        {
+            Interlocked.Increment(ref cancelCallCount);
+            if (persistCancellationOutcome)
+            {
+                CancellationOutcome.TrySetResult(TurnStatus.Cancelled);
+            }
+
+            return ValueTask.CompletedTask;
+        }
 
         public ValueTask StopAsync(TurnId turnId, CancellationToken cancellationToken) =>
             cancellationToken.IsCancellationRequested

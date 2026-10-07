@@ -64,6 +64,12 @@ endpoint URL. The AppHost does not resolve or print secret values. macOS uses
 native Ollama as an external endpoint; no Apple GPU/container assumption is
 made.
 
+Bare loopback Ollama origins (with no path or `/`) are normalized to the
+OpenAI-compatible `/v1` API base. Explicit API paths, such as `/v1` or a
+custom proxy prefix, are preserved. Controlled integration tests execute the
+actual Copilot runtime through production Local/Hybrid composition against
+strict completion paths; startup-only checks are not inference evidence.
+
 The M1 local coordinator uses a 120-second end-to-end interactive turn
 deadline by default, starting at durable acceptance and including queue wait,
 routing, context construction, and inference. The engine receives only the

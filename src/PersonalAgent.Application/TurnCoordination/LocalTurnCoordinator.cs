@@ -23,12 +23,11 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
     private readonly IClock clock;
     private readonly LocalTurnCoordinatorOptions options;
     private readonly string hostInstructions;
-    private readonly Channel<WorkItem> queue;
+    private readonly Channel<byte> queue;
     private readonly SemaphoreSlim queueSlots;
     private readonly ConcurrentDictionary<TurnId, WorkItem> queued = new();
     private readonly ConcurrentDictionary<TurnId, ActiveWork> active = new();
     private readonly ConcurrentDictionary<TurnId, Task> deadlineMonitors = new();
-    private readonly Dictionary<ConversationId, PriorityQueue<WorkItem, long>> deferredByConversation = [];
     private readonly SemaphoreSlim submissionGate = new(1, 1);
     private readonly object lifecycleLock = new();
     private CancellationTokenSource? shutdown;
@@ -66,11 +65,13 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
         this.options.Validate();
         ArgumentException.ThrowIfNullOrWhiteSpace(hostInstructions);
         this.hostInstructions = hostInstructions;
-        queue = Channel.CreateUnbounded<WorkItem>(new UnboundedChannelOptions
+        // Notifications carry no request data and coalesce while execution workers are occupied.
+        queue = Channel.CreateBounded<byte>(new BoundedChannelOptions(options.MaximumActiveTurns)
         {
             SingleReader = false,
             SingleWriter = false,
-            AllowSynchronousContinuations = false
+            AllowSynchronousContinuations = false,
+            FullMode = BoundedChannelFullMode.DropWrite
         });
         queueSlots = new SemaphoreSlim(options.MaximumQueuedTurns, options.MaximumQueuedTurns);
     }
@@ -129,7 +130,7 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
             activeWork = active.Values.Where(work => work.InEngine).ToArray();
             stopping = true;
             shutdown!.Cancel();
-            RequeueDeferredTurns();
+            WakeWorkers();
             queue.Writer.TryComplete();
             workerTasks = workers;
             deadlineTasks = deadlineMonitors.Values.ToArray();
@@ -143,6 +144,7 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
         try
         {
             await Task.WhenAll(activeWork
+                .Where(work => work.Item.CancellationCause == CancellationCause.Shutdown)
                 .Select(work => engine.StopAsync(work.Item.TurnId, stopDeadline.Token).AsTask()));
         }
         catch (OperationCanceledException) when (shutdownDeadline.IsCancellationRequested)
@@ -274,12 +276,12 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
                 {
                     stoppedDuringSubmission = stopping;
                     acceptedForQueue = !stoppedDuringSubmission
-                        && queued.TryAdd(work.TurnId, work)
-                        && queue.Writer.TryWrite(work);
+                        && queued.TryAdd(work.TurnId, work);
                     if (acceptedForQueue)
                     {
                         deadlineMonitors[work.TurnId] = work.DeadlineMonitor.Task;
                         monitorStoppingToken = shutdown!.Token;
+                        WakeWorkers();
                     }
 
                     if (!acceptedForQueue)
@@ -344,26 +346,32 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
         cancellationToken.ThrowIfCancellationRequested();
         ActiveWork? running;
         WorkItem? waiting;
+        bool ownerWon;
         lock (lifecycleLock)
         {
             active.TryGetValue(turnId, out running);
             waiting = running is null && queued.TryGetValue(turnId, out var pending)
                 ? pending
                 : null;
-            running?.Item.CancelOwner();
-            waiting?.CancelOwner();
+            ownerWon = (running?.Item ?? waiting)?.CancelOwner() ?? false;
         }
 
         if (running is not null)
         {
-            await engine.CancelAsync(turnId, cancellationToken);
+            if (ownerWon)
+            {
+                await engine.CancelAsync(turnId, cancellationToken);
+            }
             return;
         }
 
         if (waiting is not null)
         {
             await ResolveCancellationAsync(waiting);
-            ReleasePendingReservation(waiting);
+            if (ReleasePendingReservation(waiting))
+            {
+                await waiting.DeadlineMonitor.Task;
+            }
         }
     }
 
@@ -399,85 +407,63 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
 
     private async Task WorkerAsync(CancellationToken hostStopping)
     {
-        await foreach (var item in queue.Reader.ReadAllAsync())
+        await foreach (var notification in queue.Reader.ReadAllAsync())
         {
-            var work = new ActiveWork(item);
-            bool wasQueued;
-            bool deferred;
-            lock (lifecycleLock)
+            while (true)
             {
-                wasQueued = queued.ContainsKey(item.TurnId);
-                deferred = wasQueued
-                    && !stopping
-                    && !item.Cancellation.IsCancellationRequested
-                    && (active.Values.Any(activeWork =>
-                        activeWork.Item.ConversationId == item.ConversationId)
-                        || queued.Values.Any(pending =>
-                            pending.ConversationId == item.ConversationId
-                            && pending.QueueOrder < item.QueueOrder));
-                if (deferred)
-                {
-                    if (!deferredByConversation.TryGetValue(item.ConversationId, out var waiting))
-                    {
-                        waiting = new PriorityQueue<WorkItem, long>();
-                        deferredByConversation.Add(item.ConversationId, waiting);
-                    }
-
-                    waiting.Enqueue(item, item.QueueOrder);
-                }
-                else if (wasQueued)
-                {
-                    queued.TryRemove(item.TurnId, out _);
-                    queueSlots.Release();
-                    active[item.TurnId] = work;
-                }
-            }
-
-            if (deferred)
-            {
-                continue;
-            }
-
-            try
-            {
-                if (!wasQueued)
-                {
-                    continue;
-                }
-
-                if (item.RemainingDeadline <= TimeSpan.Zero)
-                {
-                    item.ExpireDeadline();
-                }
-
-                if (item.ExecutionCancellation.IsCancellationRequested)
-                {
-                    await ResolveCancellationAsync(item);
-                }
-                else
-                {
-                    await ExecuteTurnAsync(work, hostStopping);
-                }
-            }
-            finally
-            {
+                WorkItem? item;
+                ActiveWork work;
                 lock (lifecycleLock)
                 {
-                    active.TryRemove(item.TurnId, out _);
-                    if (!stopping)
+                    item = queued.Values
+                        .Where(pending => !active.Values.Any(running =>
+                            running.Item.ConversationId == pending.ConversationId))
+                        .MinBy(pending => pending.QueueOrder);
+                    if (item is null)
                     {
-                        RequeueNextDeferredTurn(item.ConversationId);
+                        break;
                     }
+
+                    queued.TryRemove(item.TurnId, out _);
+                    queueSlots.Release();
+                    work = new ActiveWork(item);
+                    active[item.TurnId] = work;
+                    WakeWorkers();
                 }
 
-                item.StopDeadlineMonitor();
                 try
                 {
-                    await item.DeadlineMonitor.Task;
+                    if (item.RemainingDeadline <= TimeSpan.Zero)
+                    {
+                        item.ExpireDeadline();
+                    }
+
+                    if (item.ExecutionCancellation.IsCancellationRequested)
+                    {
+                        await ResolveCancellationAsync(item);
+                    }
+                    else
+                    {
+                        await ExecuteTurnAsync(work, hostStopping);
+                    }
                 }
                 finally
                 {
-                    item.Dispose();
+                    lock (lifecycleLock)
+                    {
+                        active.TryRemove(item.TurnId, out _);
+                        WakeWorkers();
+                    }
+
+                    item.StopDeadlineMonitor();
+                    try
+                    {
+                        await item.DeadlineMonitor.Task;
+                    }
+                    finally
+                    {
+                        item.Dispose();
+                    }
                 }
             }
         }
@@ -580,7 +566,7 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
                 remainingDeadline,
                 MaximumToolCalls: 0,
                 RouteReasonCode: route.ReasonCode,
-                HostShutdownToken: hostStopping,
+                HostShutdownToken: item.ShutdownCancellation.Token,
                 DeadlineCancellationToken: item.DeadlineCancellation.Token);
             await foreach (var _ in engine.RunTurnAsync(engineRequest, cancellationToken))
             {
@@ -596,7 +582,7 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
                     "engine_ended_without_terminal_outcome");
             }
         }
-        catch (OperationCanceledException) when (routingCancellation.IsCancellationRequested)
+        catch (OperationCanceledException) when (item.CancellationCause != CancellationCause.None)
         {
             await ResolveCancellationAsync(item);
         }
@@ -613,23 +599,11 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
         }
     }
 
-    private void RequeueNextDeferredTurn(ConversationId conversationId)
+    private void WakeWorkers()
     {
-        if (!deferredByConversation.TryGetValue(conversationId, out var waiting) || waiting.Count == 0)
+        for (var index = 0; index < options.MaximumActiveTurns; index++)
         {
-            return;
-        }
-
-        var next = waiting.Dequeue();
-
-        if (waiting.Count == 0)
-        {
-            deferredByConversation.Remove(conversationId);
-        }
-
-        if (!queue.Writer.TryWrite(next))
-        {
-            throw new InvalidOperationException("A deferred local turn could not be returned to the scheduler.");
+            queue.Writer.TryWrite(0);
         }
     }
 
@@ -638,6 +612,12 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
         try
         {
             await ExpireQueuedTurnAsync(item, hostStopping);
+            if (item.ReclaimByMonitor)
+            {
+                item.Dispose();
+                queueSlots.Release();
+                WakeWorkers();
+            }
             item.DeadlineMonitor.TrySetResult();
         }
         catch (Exception exception)
@@ -705,53 +685,19 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
                 _ => "interactive_deadline_exceeded"
             });
 
-    private void ReleasePendingReservation(WorkItem item)
+    private bool ReleasePendingReservation(WorkItem item)
     {
         lock (lifecycleLock)
         {
             if (queued.TryRemove(item.TurnId, out _))
             {
-                queueSlots.Release();
+                item.ReclaimByMonitor = true;
                 item.StopDeadlineMonitor();
-                // Stale channel entries only reclaim resources; deferred entries need the same cleanup path.
-                if (RemoveDeferredTurn(item) && !queue.Writer.TryWrite(item))
-                {
-                    throw new InvalidOperationException("Terminal queued work could not be returned for cleanup.");
-                }
+                return true;
             }
-        }
-    }
 
-    private bool RemoveDeferredTurn(WorkItem item)
-    {
-        if (!deferredByConversation.TryGetValue(item.ConversationId, out var waiting)
-            || !waiting.Remove(item, out _, out _))
-        {
             return false;
         }
-
-        if (waiting.Count == 0)
-        {
-            deferredByConversation.Remove(item.ConversationId);
-        }
-
-        return true;
-    }
-
-    private void RequeueDeferredTurns()
-    {
-        foreach (var waiting in deferredByConversation.Values)
-        {
-            while (waiting.TryDequeue(out var item, out _))
-            {
-                if (!queue.Writer.TryWrite(item))
-                {
-                    throw new InvalidOperationException("A deferred local turn could not be returned during shutdown.");
-                }
-            }
-        }
-
-        deferredByConversation.Clear();
     }
 
     private async Task TryResolveTerminalAsync(
@@ -894,7 +840,11 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
         long queueOrder)
     {
         private readonly long acceptedTimestamp = Stopwatch.GetTimestamp();
+        private readonly object cancellationLock = new();
         private int cancellationCause;
+        private bool publishingCancellation;
+        private bool disposeRequested;
+        private bool disposed;
         private CancellationTokenRegistration deadlineRegistration;
         private CancellationTokenRegistration shutdownRegistration;
         private readonly CancellationTokenSource deadlineTimer = new();
@@ -908,7 +858,9 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
         public long QueueOrder { get; } = queueOrder;
         public CancellationTokenSource Cancellation { get; } = new();
         public CancellationTokenSource DeadlineCancellation { get; } = new();
+        public CancellationTokenSource ShutdownCancellation { get; } = new();
         public CancellationTokenSource ExecutionCancellation { get; } = new();
+        public bool ReclaimByMonitor { get; set; }
         public CancellationCause CancellationCause => (CancellationCause)Volatile.Read(ref cancellationCause);
         public CancellationTokenSource DeadlineMonitorCancellation { get; } = new();
         public TaskCompletionSource DeadlineMonitor { get; } =
@@ -920,32 +872,87 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
             deadlineTimer.CancelAfter(Deadline);
         }
 
-        public void CancelOwner()
-        {
-            SignalCancellation(CancellationCause.Owner);
-            Cancellation.Cancel();
-        }
+        public bool CancelOwner() => SignalCancellation(CancellationCause.Owner);
 
         public void ExpireDeadline()
         {
             SignalCancellation(CancellationCause.Deadline);
-            DeadlineCancellation.Cancel();
         }
 
-        private void SignalCancellation(CancellationCause cause)
+        private bool SignalCancellation(CancellationCause cause)
         {
-            Interlocked.CompareExchange(ref cancellationCause, (int)cause, (int)CancellationCause.None);
-            ExecutionCancellation.Cancel();
+            lock (cancellationLock)
+            {
+                if (disposed || cancellationCause != (int)CancellationCause.None)
+                {
+                    return false;
+                }
+
+                Volatile.Write(ref cancellationCause, (int)cause);
+                publishingCancellation = true;
+            }
+
+            try
+            {
+                // Only the winner may signal the engine, before waking routing/context cleanup.
+                (cause switch
+                {
+                    CancellationCause.Owner => Cancellation,
+                    CancellationCause.Deadline => DeadlineCancellation,
+                    _ => ShutdownCancellation
+                }).Cancel();
+                ExecutionCancellation.Cancel();
+            }
+            finally
+            {
+                bool reclaim;
+                lock (cancellationLock)
+                {
+                    publishingCancellation = false;
+                    reclaim = disposeRequested;
+                    disposed = reclaim;
+                }
+
+                if (reclaim)
+                {
+                    DisposeSources();
+                }
+            }
+
+            return true;
         }
 
         public void StopDeadlineMonitor() => DeadlineMonitorCancellation.Cancel();
         public void Dispose()
+        {
+            lock (cancellationLock)
+            {
+                if (disposed)
+                {
+                    return;
+                }
+
+                if (publishingCancellation)
+                {
+                    // Cancellation callbacks can synchronously finish a worker or its monitor.
+                    disposeRequested = true;
+                    return;
+                }
+
+                disposed = true;
+            }
+
+            DisposeSources();
+        }
+
+        private void DisposeSources()
         {
             deadlineRegistration.Dispose();
             shutdownRegistration.Dispose();
             deadlineTimer.Dispose();
             Cancellation.Dispose();
             DeadlineCancellation.Dispose();
+            ShutdownCancellation.Dispose();
             ExecutionCancellation.Dispose();
             DeadlineMonitorCancellation.Dispose();
         }

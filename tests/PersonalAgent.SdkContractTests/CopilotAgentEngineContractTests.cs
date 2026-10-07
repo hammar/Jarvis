@@ -10,6 +10,7 @@ using Xunit;
 namespace PersonalAgent.SdkContractTests;
 
 [Trait("Category", "Integration")]
+[Collection("Copilot runtime process isolation")]
 public sealed class CopilotAgentEngineContractTests
 {
     private static readonly DateTimeOffset Now = new(2026, 10, 5, 12, 0, 0, TimeSpan.Zero);

@@ -100,6 +100,27 @@ public sealed class LocalTurnCoordinatorTests
         Assert.Equal(["Future question 39", "Earlier answer appended late"],
             (await store.ReadRecentAsync(conversation, 2, CancellationToken.None)).Select(message => message.Content));
 
+        await using var connection = await database.OpenConnectionAsync();
+        await using var plan = connection.CreateCommand();
+        var sql = (string)typeof(SqliteConversationStore)
+            .GetField("RecentHistorySql", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!
+            .GetRawConstantValue()!;
+        plan.CommandText = "EXPLAIN QUERY PLAN " + sql;
+        plan.Parameters.AddWithValue("$conversation_id", conversation.Value.ToString("D"));
+        plan.Parameters.AddWithValue("$maximum", 2);
+        var details = new List<string>();
+        await using (var reader = await plan.ExecuteReaderAsync())
+        {
+            while (await reader.ReadAsync())
+            {
+                details.Add(reader.GetString(3));
+            }
+        }
+
+        Assert.Contains(details, detail => detail.Contains("USING INDEX sqlite_autoindex_messages", StringComparison.Ordinal));
+        // Only the bounded outer page may sort; the indexed inner read must apply LIMIT first.
+        Assert.Single(details, detail => detail.Contains("USE TEMP B-TREE FOR ORDER BY", StringComparison.Ordinal));
+
         ValueTask<SubmittedConversationTurn> SubmitStoredAsync(string id, string text) =>
             store.SubmitTurnAsync(
                 new ConversationTurnSubmission(TurnId.New(), conversation, id, new string('A', 64), Guid.NewGuid(), text, Now),

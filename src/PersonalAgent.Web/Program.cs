@@ -166,7 +166,7 @@ static CopilotProviderOptions? ReadLocalProvider(Microsoft.Extensions.Configurat
     var secretReference = configuration["JARVIS_OLLAMA_SECRET_REFERENCE"];
     return new CopilotProviderOptions(
         model,
-        endpoint,
+        endpoint.AbsolutePath == "/" ? new UriBuilder(endpoint) { Path = "/v1" }.Uri : endpoint,
         ApiKeyReference: string.IsNullOrWhiteSpace(secretReference)
             ? null
             : new SecretReference(secretReference));

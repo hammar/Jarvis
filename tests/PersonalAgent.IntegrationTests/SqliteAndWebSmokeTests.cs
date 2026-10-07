@@ -7,12 +7,16 @@ using Microsoft.Extensions.Hosting;
 using PersonalAgent.Application;
 using PersonalAgent.Application.Context;
 using PersonalAgent.Application.Routing;
+using PersonalAgent.Application.TurnCoordination;
+using PersonalAgent.Domain;
+using PersonalAgent.Infrastructure.AgentEngine.Copilot;
 using PersonalAgent.Infrastructure.Persistence;
 using PersonalAgent.TestSupport;
 using Xunit;
 
 namespace PersonalAgent.IntegrationTests;
 
+[Collection("Copilot runtime process isolation")]
 public sealed class SqliteAndWebSmokeTests
 {
     [Fact]
@@ -89,6 +93,50 @@ public sealed class SqliteAndWebSmokeTests
 
         Assert.IsType<LocalOnlyModelRouter>(factory.Services.GetRequiredService<IModelRouter>());
         Assert.IsType<ConversationContextBuilder>(factory.Services.GetRequiredService<IContextBuilder>());
+    }
+
+    [Theory]
+    [InlineData("Local", "", "/v1")]
+    [InlineData("Hybrid", "/", "/v1")]
+    [InlineData("Local", "/v1", "/v1")]
+    [InlineData("Hybrid", "/custom/api/", "/custom/api")]
+    [Trait("Category", "Integration")]
+    public async Task LocalProviderCompositionExecutesActualRuntimeAgainstStrictApiPath(
+        string profile, string configuredPath, string expectedApiPath)
+    {
+        using var data = IsolatedDirectory.Create();
+        await using var provider = await FakeOpenAiProvider.StartAsync();
+        provider.ExpectedApiPath = expectedApiPath;
+        var origin = new Uri(provider.BaseUrl).GetLeftPart(UriPartial.Authority);
+        await using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(web =>
+        {
+            web.UseSetting("JARVIS_PROFILE", profile);
+            web.UseSetting("JARVIS_DATA_DIR", data.Path);
+            web.UseSetting("JARVIS_OLLAMA_BASE_URL", origin + configuredPath);
+            web.UseSetting("JARVIS_OLLAMA_MODEL", "fixture-model");
+        });
+        var options = factory.Services.GetRequiredService<CopilotAgentEngineOptions>();
+        Assert.Equal(expectedApiPath, options.LocalProvider!.BaseUrl.AbsolutePath.TrimEnd('/'));
+        var coordinator = factory.Services.GetRequiredService<ILocalTurnCoordinator>();
+        var store = factory.Services.GetRequiredService<IConversationStore>();
+        var turn = await coordinator.SubmitAsync(new LocalTurnRequest(
+            ConversationId.New(), "strict-endpoint", "Hello", RoutingTaskKind.TextConversation,
+            TimeSpan.FromSeconds(10)), CancellationToken.None);
+
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        ConversationTurn? outcome;
+        do
+        {
+            deadline.Token.ThrowIfCancellationRequested();
+            outcome = await store.GetTurnAsync(turn.Turn.Id, deadline.Token);
+            await Task.Yield();
+        }
+        while (outcome?.Status is not (TurnStatus.Completed or TurnStatus.Cancelled or TurnStatus.Interrupted or TurnStatus.Failed));
+
+        Assert.Equal(TurnStatus.Completed, outcome.Status);
+        Assert.Equal($"{expectedApiPath}/chat/completions", Assert.Single(provider.Requests).Path);
+        Assert.Single(await store.ReadRecentAsync(turn.Turn.ConversationId, 10, CancellationToken.None),
+            message => message.Role == "assistant");
     }
 
     [Theory]

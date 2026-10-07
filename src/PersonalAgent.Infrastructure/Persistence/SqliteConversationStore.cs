@@ -8,6 +8,17 @@ namespace PersonalAgent.Infrastructure.Persistence;
 /// <summary>Persists conversation messages and assigns a durable per-conversation sequence.</summary>
 public sealed class SqliteConversationStore : IConversationStore, IAtomicTurnOutcomeStore
 {
+    private const string RecentHistorySql = """
+        SELECT message_id, conversation_id, role, content, created_at_utc
+        FROM (
+            SELECT message_id, conversation_id, role, content, created_at_utc, sequence
+            FROM messages
+            WHERE conversation_id = $conversation_id
+            ORDER BY sequence DESC
+            LIMIT $maximum
+        )
+        ORDER BY sequence;
+        """;
     private readonly SqliteDatabase database;
     private readonly IClock clock;
 
@@ -112,17 +123,16 @@ public sealed class SqliteConversationStore : IConversationStore, IAtomicTurnOut
         }
 
         await using var command = connection.CreateCommand();
-        command.CommandText = """
+        command.CommandText = boundarySequence is null ? RecentHistorySql : """
             SELECT message_id, conversation_id, role, content, created_at_utc
             FROM (
                 SELECT m.message_id, m.conversation_id, m.role, m.content, m.created_at_utc, m.sequence,
-                    CASE WHEN $boundary IS NULL THEN m.sequence
-                         ELSE COALESCE(task.sequence, m.sequence) END AS history_order
+                    COALESCE(task.sequence, m.sequence) AS history_order
                 FROM messages m
                 LEFT JOIN messages task ON task.turn_id = m.turn_id AND task.role = 'user'
                     AND task.conversation_id = m.conversation_id
                 WHERE m.conversation_id = $conversation_id
-                    AND ($boundary IS NULL OR COALESCE(task.sequence, m.sequence) < $boundary)
+                    AND COALESCE(task.sequence, m.sequence) < $boundary
                 ORDER BY history_order DESC, m.sequence DESC
                 LIMIT $maximum
             )

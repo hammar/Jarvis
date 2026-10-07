@@ -90,9 +90,11 @@ each conversation, and allows at most 20 queued submissions. Queue overflow is
 explicit. Same-conversation waiters remain queued and do not occupy execution
 workers or release their queue slots; a different conversation can use an
 available worker.
-Same-conversation work retains acceptance order across both deferred and
-channel-resident entries. Persisting cancellation or expiry releases a pending
-reservation immediately; stale entries are drained only for resource cleanup.
+Same-conversation work retains acceptance order in a removable pending set.
+The bounded notification channel carries only wake-up bytes, never requests.
+Persisting cancellation or expiry removes pending work, and its deadline
+monitor disposes resources before releasing the reservation, independently of
+execution workers. Owner cancellation waits for that cleanup.
 The default interactive turn deadline is 120 seconds from
 durable acceptance, including queue wait, routing, context construction, and
 inference; the engine receives only the remaining budget and a separate
@@ -100,9 +102,12 @@ deadline-cancellation token so timeout remains distinct from owner cancellation.
 Trusted host configuration may bound a provider/model override. User cancellation is
 `Cancelled`; host shutdown, deadline expiry, process failure, or uncertain
 cleanup is `Interrupted`.
-The coordinator records the first cancellation cause before signalling
-routing/context execution, so delayed context cleanup cannot reclassify a
-deadline as owner cancellation. Failed or cancelled workers/deadline monitors
+The coordinator selects one winning cancellation cause; only that cause may
+signal the engine, including direct engine cancellation/shutdown. It publishes
+the winning engine signal before waking routing/context cleanup and defers
+resource disposal during reentrant cancellation publication. Delayed cleanup
+or a concurrent losing signal cannot reclassify the outcome.
+Failed or cancelled workers/deadline monitors
 make readiness unhealthy and reject new submissions before durable creation.
 Clarification decisions are persisted
 as terminal `TurnClarificationRequired` events with their safe owner-facing

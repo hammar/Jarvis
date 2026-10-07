@@ -273,3 +273,37 @@ regression successfully; it did not re-run the full suite or Linux checks.
 No live credentials
 or physical writes were used; the previously disclosed M1-02 surface limits
 remain unchanged.
+
+## PR review follow-up: R14-R17
+
+The review of `4fb04da` added four **Previously missed** findings, retained
+alongside the complete R1-R13 ledger above. R14-R16 are medium; R17 is high.
+All CI checks on `4fb04da` passed before these changes. This revision has no
+public-contract or schema change and does not expand M1-02's product scope.
+
+| Finding | Disposition and regression evidence |
+| --- | --- |
+| R14: cause selection and active-engine publication can race | Fixed: one winner selects its engine token, losing owner/deadline/shutdown signals are suppressed, and direct engine cancel/stop is dispatched only for its corresponding winning cause. Winning engine publication precedes routing/context cleanup. Disposal defers while publication is in progress to handle synchronous engine completion. `ActiveEngineOnlyReceivesWinningCauseWhileCancellationPublicationIsPaused` pauses winning-signal delivery before the active engine's observer in both orders and verifies no losing signal or losing direct cancel becomes terminal. |
+| R15: cancelled requests accumulate in an unbounded channel while workers are occupied | Fixed: remove the request-bearing channel and deferred queue; keep only the bounded pending set and at most four coalesced wake-up bytes. Workers select the oldest eligible pending item. Terminal pending work is removed and reclaimed by its deadline monitor before its slot is released; owner cancellation awaits cleanup. `RepeatedPendingCancellationReclaimsRequestResourcesWhileAllWorkersRemainOccupied` performs 100 cancel/resubmit cycles, verifies work items are collectible without freeing execution workers, and then verifies the 20-pending limit still rejects overflow. Existing FIFO, starvation, shutdown and cancellation/expiry capacity regressions remain passing. This supersedes R8/R10's channel/deferred mechanics, not their behavioral guarantees. |
+| R16: CASE ordering forces whole-conversation sorting for ordinary history reads | Fixed: boundary-free reads use the original conversation/sequence-indexed SQL; only boundary reads use turn-aware ordering. The real SQLite context regression examines the exact production boundary-free query plan, asserting indexed search and only one outer bounded-page sort, while retaining both ordering behaviors. |
+| R17: bare local Ollama origins miss the `/v1` API prefix | Fixed: Web maps an empty/root path to `/v1` and preserves explicit API prefixes. Four `LocalProviderCompositionExecutesActualRuntimeAgainstStrictApiPath` cases execute the actual pinned Copilot runtime through production Local/Hybrid DI against a strict controlled endpoint, asserting completion, one stored answer and the exact request path for bare, root, `/v1` and custom-prefix configuration. |
+
+The removable scheduler is a cohesive replacement for the request-retaining
+channel, not an unrelated refactor. Runtime tests share a named process-isolation
+collection because the crash contract identifies its own child using the set
+of newly launched Copilot processes. The first full integration run exposed
+multiple new child processes when the new production-composition runtime tests
+ran concurrently with that contract. The affected classes now serialize within
+one xUnit collection; no test, assertion, gate or global parallelization policy
+is disabled. All other test collections retain their existing parallelism.
+
+Native validation commands passed: `tools/validate.sh build`, `unit` (67/67),
+`integration` (96/96), `coverage`, `architecture` (6/6), `sdk-contracts` (19/19
+and pinned runtime harness), `aspire-e2e` (3/3), `browser-e2e` (1/1 and deliberate
+failure probe), and `docs`. Application coverage is 98.0% lines (871/889),
+93.5% branches (261/279); Infrastructure is 91.2% lines (2221/2434), 73.4%
+branches (519/707); changed executable lines are 93.4% (1074/1150).
+Critical-module thresholds and negative gate fixtures passed unchanged.
+Independent review and Linux CI against this new revision are pending. Earlier
+CI evidence applies to `4fb04da`, not this revision. No live provider credentials,
+cloud disclosure, household data or physical writes were used.
