@@ -449,8 +449,13 @@ public sealed class LocalTurnCoordinatorTests
         var item = work.GetType().GetProperty("Item")!.GetValue(work)!;
         var ownerCancellation = (CancellationTokenSource)item.GetType()
             .GetProperty("Cancellation")!.GetValue(item)!;
+        var deadlineMonitorCancellation = (CancellationTokenSource)item.GetType()
+            .GetProperty("DeadlineMonitorCancellation")!.GetValue(item)!;
         using var release = new ManualResetEventSlim();
         var publicationHeld = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var workerCleanupStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var cleanupRegistration = deadlineMonitorCancellation.Token.Register(
+            () => workerCleanupStarted.TrySetResult());
         using var holdPublication = ownerCancellation.Token.Register(() =>
         {
             publicationHeld.TrySetResult();
@@ -470,6 +475,7 @@ public sealed class LocalTurnCoordinatorTests
             provider.ContinueInference.TrySetResult();
             await provider.StreamingResponseWritten.Task.WaitAsync(TimeSpan.FromSeconds(5));
             await WaitForTerminalAsync(store, accepted.Turn.Id);
+            await workerCleanupStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
             Assert.Equal(TurnStatus.Cancelled, (await store.GetTurnAsync(accepted.Turn.Id, CancellationToken.None))!.Status);
             Assert.Contains(accepted.Turn.Id, active.Keys.Cast<TurnId>());
 

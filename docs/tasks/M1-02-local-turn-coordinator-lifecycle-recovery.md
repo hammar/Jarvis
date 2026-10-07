@@ -755,3 +755,14 @@ timeout after all 116 tests passed but emitted no report; the gate correctly
 failed for the missing report. A clean rerun produced the report and passed
 coverage. R1-R34 dispositions remain retained. Independent review of the R35
 correction and new-HEAD CI remain pending.
+
+The independent review then identified a race in the first R35 regression:
+durable terminal persistence alone did not prove the worker had entered its
+cleanup block before the retry. R36 (medium, test synchronization) is fixed by
+registering a bounded barrier on `DeadlineMonitorCancellation`; the test now
+waits for `StopDeadlineMonitor` before asserting the retained active entry and
+starting the retry. This distinguishes the corrected ordering from the prior
+implementation, which removed active tracking before signaling that barrier.
+The revised focused actual-runtime regression passed (1/1); production code is
+unchanged from the fully validated R35 commit. Independent confirmation of the
+revised barrier and CI on the eventual pushed head remain pending.
