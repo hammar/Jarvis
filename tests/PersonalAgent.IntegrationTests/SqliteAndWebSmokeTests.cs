@@ -129,7 +129,7 @@ public sealed class SqliteAndWebSmokeTests
         {
             deadline.Token.ThrowIfCancellationRequested();
             outcome = await store.GetTurnAsync(turn.Turn.Id, deadline.Token);
-            await Task.Yield();
+            await Task.Delay(TimeSpan.FromMilliseconds(10), deadline.Token);
         }
         while (outcome?.Status is not (TurnStatus.Completed or TurnStatus.Cancelled or TurnStatus.Interrupted or TurnStatus.Failed));
 

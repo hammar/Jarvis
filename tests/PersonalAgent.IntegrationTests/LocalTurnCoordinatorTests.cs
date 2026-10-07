@@ -288,7 +288,7 @@ public sealed class LocalTurnCoordinatorTests
             .Any(item => item.EventType == nameof(RouteSelected)))
         {
             wait.Token.ThrowIfCancellationRequested();
-            await Task.Yield();
+            await Task.Delay(TimeSpan.FromMilliseconds(10), wait.Token);
         }
 
         var active = (System.Collections.IDictionary)typeof(LocalTurnCoordinator)
@@ -444,7 +444,7 @@ public sealed class LocalTurnCoordinatorTests
                 return;
             }
 
-            await Task.Yield();
+            await Task.Delay(TimeSpan.FromMilliseconds(10), deadline.Token);
         }
     }
 

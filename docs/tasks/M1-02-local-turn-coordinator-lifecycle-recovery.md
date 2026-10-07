@@ -664,3 +664,21 @@ publication scheduling and before awaiting any owned cleanup. This is a
 documentation correction, not a timeout/behavior change. R27/R28 are fixed;
 new-HEAD CI remains pending. No finding is accepted as a residual risk by the
 owner.
+
+## PR review follow-up: R29-R31
+
+The review of `1d4c692` raised three inline concerns; each was evaluated
+against bounded admission invariants and the test/runtime boundary:
+
+| Finding | Disposition |
+| --- | --- |
+| R29 (medium): one submission gate serializes different conversations | Not applicable as a correctness/performance blocker for this acceptance. It protects the preflight duplicate lookup, bounded slot reservation and durable transaction as one idempotent admission sequence. SQLite writes are already serialized; removing the gate without replacing that sequence can make concurrent same-key requests race into queue-full before the existing request is visible, or consume capacity inconsistently. A bounded keyed/striped gate is a possible measured optimization, but adds synchronization policy without evidence of a throughput bottleneck or an acceptance requirement for parallel submission. Keep the gate; do not claim cross-conversation parallel submit. |
+| R30 (medium): private-state reflection in callback-barrier integration tests | Not applicable to runtime behavior; retain the deliberately narrow test technique. These tests need to pause a cancellation callback on the actual work item's selected token to force the selected-cause/publication interleaving while exercising SQLite and the production adapter. Durable state or provider barriers cannot hold that host callback. A production diagnostics interface/test hook would expand production control surface for test-only orchestration. Reflection is confined to tests and missing members fail the test rather than silently bypassing the assertion. |
+| R31 (medium): `Task.Yield` loops busy-poll SQLite in integration tests | Fixed: the production-composition and host-cause integration polling loops now use cancellation-bounded 10 ms delays between durable reads. No production polling or timing behavior changed. |
+
+`tools/validate.sh integration` passed 113/113 and `tools/validate.sh docs`
+passed after R31; `git diff --check` passed. New-revision CI is pending. R1-R28
+dispositions remain unchanged. R29's potential throughput optimization is
+explicitly deferred pending a measured need; it is not represented as a
+performance guarantee. The reflection barrier remains a test-maintenance
+tradeoff, not a product residual risk or production diagnostic capability.
