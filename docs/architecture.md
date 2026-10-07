@@ -118,6 +118,10 @@ Shutdown closes acceptance and the queue before awaiting publication; its
 15-second budget starts before selection/publication, and the caller token
 also bounds every wait. Held callbacks never block readiness or cause premature
 resource disposal; they may finish cleanup after a reported timeout/cancellation.
+Shutdown closes admission and selects accepted turns' causes under the same
+lifecycle lock before scheduling cleanup; context completion cannot observe
+stopping without a selected cause. Selection preserves an earlier owner or
+deadline winner and never runs cancellation callbacks synchronously.
 Concurrent and repeated shutdown callers await the same owned operation rather
 than treating "stopping" as successful completion. Each caller may cancel its
 wait; the shared 15-second budget, completed result, timeout or failure remains

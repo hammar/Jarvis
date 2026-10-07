@@ -149,8 +149,22 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
             if (shutdownOperation is null)
             {
                 stopping = true;
+                var activeWork = active.Values.Where(work => work.InEngine).ToArray();
+                var accepted = queued.Values.Concat(active.Values.Select(work => work.Item)).ToArray();
+                // Close admission and select causes atomically, before workers can classify shutdown.
+                foreach (var item in accepted)
+                {
+                    item.StopForShutdown();
+                }
+
+                var publications = accepted.Select(item => item.CancellationPublication).ToArray();
+                WakeWorkers();
+                queue.Writer.TryComplete();
+                var workerTasks = workers;
+                var deadlineTasks = deadlineMonitors.Values.ToArray();
                 // The operation owns its budget; individual callers cancel only their wait.
-                shutdownOperation = Task.Run(StopCoreAsync);
+                shutdownOperation = Task.Run(() => StopCoreAsync(
+                    activeWork, publications, workerTasks, deadlineTasks));
             }
             operation = shutdownOperation;
         }
@@ -158,30 +172,11 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
         await operation.WaitAsync(cancellationToken);
     }
 
-    private async Task StopCoreAsync()
+    private async Task StopCoreAsync(
+        ActiveWork[] activeWork, Task[] publications, Task[] workerTasks, Task[] deadlineTasks)
     {
         using var shutdownDeadline = new CancellationTokenSource(ShutdownTimeout);
         var stopToken = shutdownDeadline.Token;
-        ActiveWork[] activeWork;
-        Task[] workerTasks;
-        Task[] deadlineTasks;
-        Task[] publications;
-        lock (lifecycleLock)
-        {
-            activeWork = active.Values.Where(work => work.InEngine).ToArray();
-            var accepted = queued.Values.Concat(active.Values.Select(work => work.Item)).ToArray();
-            foreach (var item in accepted)
-            {
-                item.StopForShutdown();
-            }
-
-            publications = accepted.Select(item => item.CancellationPublication).ToArray();
-            WakeWorkers();
-            queue.Writer.TryComplete();
-            workerTasks = workers;
-            deadlineTasks = deadlineMonitors.Values.ToArray();
-        }
-
         var stopFailures = new List<Exception>();
         try
         {

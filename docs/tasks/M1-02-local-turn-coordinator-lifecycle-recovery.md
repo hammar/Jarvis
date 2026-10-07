@@ -619,3 +619,31 @@ execution. Full native gates remain implementer evidence; final Linux CI,
 exhaustive interleavings, live Ollama and launched-Web recovery remain
 unverified by this review. Final-HEAD CI is pending. No finding is accepted
 as a residual risk by the owner.
+
+## PR review follow-up: R27
+
+Review of `558a494` raised high **Previously missed** R27: shutdown closes
+admission before the scheduled operation selects causes, so context completion
+can persist a generic `OperationCanceledException` interruption instead of
+`host_shutdown`. Fixed by closing admission, snapshotting owned work and
+selecting causes atomically under the lifecycle lock before scheduling bounded
+cleanup. Callback publication remains asynchronous; earlier owner/deadline
+winners remain unchanged. The pre-selection engine snapshot preserves direct
+stop ownership even if publication completes a worker before cleanup starts.
+
+Three barrier-controlled unit cases hold the lifecycle lock across the real
+stop call and context release, assert cause selection at admission closure,
+then verify zero inference, exactly one terminal event and the correct shutdown,
+owner or deadline outcome. Architecture and testing docs describe the invariant.
+No API/schema/dependency change; R1-R26 dispositions and prior limitations
+remain unchanged. Ten focused shutdown cases passed. All native commands
+passed: `tools/validate.sh build` (zero warnings/errors), `unit` (90/90),
+`integration` (113/113), `coverage`, `architecture` (6/6), `sdk-contracts`
+(23/23 and pinned runtime harness), `aspire-e2e` (3/3), `browser-e2e`
+(1/1 plus deliberate failure probe), and `docs`. Application measured 98.4%
+lines (918/933), 94.9% branches (278/293); Infrastructure measured 92.0%
+lines (2248/2443), 74.7% branches (528/707); changed executable lines
+measured 95.3% (1147/1203). Critical thresholds and negative fixtures passed
+unchanged. No generated-output cleanup was needed this run. All required CI
+passed prior HEAD `558a494`; exact-commit independent review and new-HEAD CI
+remain pending.

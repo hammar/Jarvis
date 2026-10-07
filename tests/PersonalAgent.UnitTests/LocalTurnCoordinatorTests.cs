@@ -1058,6 +1058,70 @@ public sealed class LocalTurnCoordinatorTests
         Assert.Equal(TurnStatus.Interrupted, (await store.GetTurnAsync(submitted.Turn.Id, CancellationToken.None))!.Status);
     }
 
+    [Theory]
+    [InlineData(CancellationCause.None)]
+    [InlineData(CancellationCause.Owner)]
+    [InlineData(CancellationCause.Deadline)]
+    [Trait("Category", "Unit")]
+    public async Task ShutdownAdmissionClosureSelectsCauseBeforeContextReturns(CancellationCause earlierCause)
+    {
+        var store = new InMemoryConversationStore();
+        var context = new ControlledContextBuilder(block: true, ignoreCancellation: true);
+        var engine = new ControlledEngine(store);
+        await using var scope = CreateCoordinator(store, engine, contextBuilder: context);
+        await scope.Coordinator.StartAsync(CancellationToken.None);
+        var submitted = await scope.Coordinator.SubmitAsync(
+            Request(deadline: earlierCause == CancellationCause.Deadline ? TimeSpan.FromMilliseconds(300) : null),
+            CancellationToken.None);
+        await context.Started.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        if (earlierCause == CancellationCause.Owner)
+        {
+            await scope.Coordinator.CancelAsync(submitted.Turn.Id, CancellationToken.None);
+        }
+        if (earlierCause != CancellationCause.None)
+        {
+            await context.CancellationObserved.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        }
+
+        var lifecycleLock = typeof(LocalTurnCoordinator)
+            .GetField("lifecycleLock", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(scope.Coordinator)!;
+        Task stopping;
+        try
+        {
+            lock (lifecycleLock)
+            {
+                var active = (System.Collections.IDictionary)typeof(LocalTurnCoordinator)
+                    .GetField("active", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(scope.Coordinator)!;
+                var work = active[submitted.Turn.Id]!;
+                var item = work.GetType().GetProperty("Item")!.GetValue(work)!;
+                stopping = scope.Coordinator.StopAsync(CancellationToken.None);
+                // Keep the worker's post-context guard behind the admission boundary.
+                context.Continue.TrySetResult();
+                Assert.False(scope.Coordinator.IsReady);
+                Assert.Equal(earlierCause == CancellationCause.None ? CancellationCause.Shutdown : earlierCause,
+                    (CancellationCause)item.GetType().GetProperty("CancellationCause")!.GetValue(item)!);
+            }
+        }
+        finally
+        {
+            context.Continue.TrySetResult();
+            await scope.Coordinator.StopAsync(CancellationToken.None);
+        }
+        await stopping;
+
+        Assert.Equal(0, engine.ExecutionCount);
+        Assert.Equal(earlierCause == CancellationCause.Owner ? TurnStatus.Cancelled : TurnStatus.Interrupted,
+            (await store.GetTurnAsync(submitted.Turn.Id, CancellationToken.None))!.Status);
+        var terminal = Assert.Single(
+            await scope.Coordinator.ReadEventsAfterAsync(submitted.Turn.Id, 0, 20, CancellationToken.None),
+            item => item.EventType is nameof(TurnCancelled) or nameof(TurnInterrupted));
+        if (earlierCause != CancellationCause.Owner)
+        {
+            Assert.Equal(earlierCause == CancellationCause.Deadline ? "interactive_deadline_exceeded" : "host_shutdown",
+                JsonSerializer.Deserialize<TurnInterrupted>(terminal.PayloadJson)!.ReasonCode);
+        }
+    }
+
     [Fact]
     [Trait("Category", "Unit")]
     public async Task ShutdownDuringAtomicSubmissionPersistsInterruption()
