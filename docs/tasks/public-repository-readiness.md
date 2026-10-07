@@ -108,6 +108,7 @@ the verified scope. No issue/PR attachment links were detected by the scan.
 | PUB-03 | Private vulnerability reporting is not verified active. | `SECURITY.md` provides a detail-free fallback. Enable and verify private reporting when available after publication. |
 | PUB-04 | Ten unavailable log archives and two initially active runs limited the first snapshot. | Two completed runs and the new artifact were subsequently scanned, with no credential-pattern matches. All ten HTTP 404 runs have zero jobs according to the jobs API; not applicable as evidence of an unreviewed executed job. Unavailable output is not claimed to have passed. Refresh again immediately before publication. |
 | PUB-05 | Repository-wide action allowlisting/SHA enforcement is permissive. | Preventive observation, not an observed exploit. Current workflow pins and read-only permissions retained; no account gate changed without owner approval. |
+| PUB-R1 | The validation status described the initial no-push/no-PR handoff as current after the owner requested a PR. | Fixed by explicitly separating the initial audit handoff from the subsequent branch push and draft PR creation below; documentation links and whitespace checks pass. |
 
 ## Tests, documentation and completion criteria
 
@@ -136,8 +137,18 @@ checks or supporting reasoning. The initial security-review agent likewise
 returned only a no-vulnerabilities verdict. Neither unsupported verdict is
 treated as substantive review evidence; disclosure evidence above comes
 from the recorded direct audit. Detailed independent review remains pending
-before a PR can be presented as ready. No PR was opened and no commits were
-pushed by this task.
+before a PR can be presented as ready. At the initial audit handoff, no PR had
+been opened and no commits had been pushed.
+
+The owner subsequently requested PR creation. The branch was pushed and
+[draft PR #36](https://github.com/hammar/Jarvis/pull/36) was opened on
+2026-10-07 UTC. GitHub CI run `37580647407` passed all nine required checks
+against `dea3d206c26b56fe8da35976bdf03c81704da394`, including runtime suites
+not run locally for this documentation-only change. Independent Copilot
+review against that revision identified PUB-R1 (the stale handoff wording);
+the finding and its disposition are retained above. The documentation
+correction requires fresh CI/review evidence before readiness is claimed.
+Repository visibility and security settings remain unchanged by this task.
 
 ## Owner-controlled publication steps
 
