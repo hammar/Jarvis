@@ -185,9 +185,15 @@ public sealed class CopilotAgentEngine : IAgentEngine
         }
 
         CopilotTurnSignal GetCancellationSignal() =>
-            (CopilotTurnSignal)Volatile.Read(ref cancellationSignal);
+            request.ReadCancellationCause?.Invoke() switch
+            {
+                CancellationCause.Owner => CopilotTurnSignal.Cancelled,
+                CancellationCause.Shutdown => CopilotTurnSignal.HostShutdown,
+                CancellationCause.Deadline => CopilotTurnSignal.DeadlineExceeded,
+                _ => (CopilotTurnSignal)Volatile.Read(ref cancellationSignal)
+            };
         bool IsCancellationRequested() =>
-            Volatile.Read(ref cancellationSignal) != (int)CopilotTurnSignal.Completed;
+            GetCancellationSignal() != CopilotTurnSignal.Completed;
 
         // Cancellation sources already signaled during observer setup are ambiguous; system interruption wins.
         using var callerCancellation = callerToken.Register(() => RecordCancellation(CopilotTurnSignal.Cancelled));

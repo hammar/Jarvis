@@ -220,6 +220,100 @@ public sealed class LocalTurnCoordinatorTests
 
     [Fact]
     [Trait("Category", "Unit")]
+    public async Task ConcurrentStartupReservesRecoveryAndMaintainsFourWorkers()
+    {
+        var store = new InMemoryConversationStore { BlockNextRecovery = true };
+        var engine = new ControlledEngine(store, block: true);
+        await using var scope = CreateCoordinator(store, engine);
+        var starting = scope.Coordinator.StartAsync(CancellationToken.None);
+        try
+        {
+            await store.RecoveryStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.False(scope.Coordinator.IsReady);
+            await Assert.ThrowsAsync<InvalidOperationException>(() => scope.Coordinator.StartAsync(CancellationToken.None));
+            await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+                await scope.Coordinator.SubmitAsync(Request(), CancellationToken.None));
+            Assert.Equal(1, store.RecoveryReads);
+        }
+        finally
+        {
+            store.ContinueRecovery.TrySetResult();
+        }
+
+        await starting.WaitAsync(TimeSpan.FromSeconds(2));
+        var requests = new List<TurnId>();
+        for (var index = 0; index < 4; index++)
+        {
+            var accepted = await scope.Coordinator.SubmitAsync(Request(requestId: $"startup-{index}"), CancellationToken.None);
+            requests.Add(accepted.Turn.Id);
+            await engine.WaitForTurnStartedAsync(accepted.Turn.Id);
+        }
+        var pending = await scope.Coordinator.SubmitAsync(Request(requestId: "fifth"), CancellationToken.None);
+        await scope.Coordinator.CancelAsync(pending.Turn.Id, CancellationToken.None);
+        Assert.Equal(4, engine.ExecutionCount);
+        await scope.Coordinator.StopAsync(CancellationToken.None);
+        foreach (var id in requests)
+        {
+            Assert.Equal(TurnStatus.Interrupted, (await store.GetTurnAsync(id, CancellationToken.None))!.Status);
+        }
+        Assert.Equal(1, store.RecoveryReads);
+        var workers = (Task[])typeof(LocalTurnCoordinator)
+            .GetField("workers", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(scope.Coordinator)!;
+        Assert.Equal(4, workers.Length);
+        Assert.All(workers, worker => Assert.True(worker.IsCompletedSuccessfully));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("Category", "Unit")]
+    public async Task FailedOrCancelledRecoveryReleasesStartupReservation(bool cancel)
+    {
+        var store = new InMemoryConversationStore { BlockNextRecovery = true, FailNextRecovery = !cancel };
+        await using var scope = CreateCoordinator(store, new ControlledEngine(store));
+        using var caller = new CancellationTokenSource();
+        var starting = scope.Coordinator.StartAsync(caller.Token);
+        await store.RecoveryStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        if (cancel)
+        {
+            caller.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => starting);
+        }
+        else
+        {
+            store.ContinueRecovery.TrySetResult();
+            await Assert.ThrowsAsync<IOException>(() => starting);
+        }
+        Assert.False(scope.Coordinator.IsReady);
+        await scope.Coordinator.StartAsync(CancellationToken.None);
+        Assert.True(scope.Coordinator.IsReady);
+    }
+
+    [Fact]
+    [Trait("Category", "Unit")]
+    public async Task StopDuringRecoveryPreventsWorkerLaunchAndAdmission()
+    {
+        var store = new InMemoryConversationStore { BlockNextRecovery = true };
+        await using var scope = CreateCoordinator(store, new ControlledEngine(store));
+        var starting = scope.Coordinator.StartAsync(CancellationToken.None);
+        try
+        {
+            await store.RecoveryStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            await scope.Coordinator.StopAsync(CancellationToken.None);
+        }
+        finally
+        {
+            store.ContinueRecovery.TrySetResult();
+        }
+        await Assert.ThrowsAsync<InvalidOperationException>(() => starting);
+        Assert.False(scope.Coordinator.IsReady);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => scope.Coordinator.StartAsync(CancellationToken.None));
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await scope.Coordinator.SubmitAsync(Request(), CancellationToken.None));
+    }
+
+    [Fact]
+    [Trait("Category", "Unit")]
     public async Task RestartRecoveryInterruptsTurnsAndDoesNotReplay()
     {
         var store = new InMemoryConversationStore();
@@ -1758,6 +1852,11 @@ public sealed class LocalTurnCoordinatorTests
         private TurnId? watchedTurnRead;
         private TaskCompletionSource? watchedTurnReadCompletion;
         public bool CompleteWhenCancellationRaces { get; init; }
+        public bool BlockNextRecovery { get; set; }
+        public bool FailNextRecovery { get; set; }
+        public int RecoveryReads { get; private set; }
+        public TaskCompletionSource RecoveryStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource ContinueRecovery { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public bool ConflictNextCancellationOutcome { get; set; }
         public int CancellationOutcomeConflictsRemaining { get; set; }
         public bool CompleteCancellationOnRetryConflict { get; set; }
@@ -1962,10 +2061,22 @@ public sealed class LocalTurnCoordinatorTests
             }
         }
 
-        public ValueTask<IReadOnlyList<ConversationTurn>> ReadNonterminalTurnsAsync(
+        public async ValueTask<IReadOnlyList<ConversationTurn>> ReadNonterminalTurnsAsync(
             int maximumTurns,
             CancellationToken cancellationToken)
         {
+            RecoveryReads++;
+            if (BlockNextRecovery)
+            {
+                BlockNextRecovery = false;
+                RecoveryStarted.TrySetResult();
+                await ContinueRecovery.Task.WaitAsync(cancellationToken);
+            }
+            if (FailNextRecovery)
+            {
+                FailNextRecovery = false;
+                throw new IOException("Controlled recovery failure.");
+            }
             cancellationToken.ThrowIfCancellationRequested();
             lock (sync)
             {
@@ -1973,7 +2084,7 @@ public sealed class LocalTurnCoordinatorTests
                     .Where(turn => turn.Status is not (TurnStatus.Completed or TurnStatus.Failed or TurnStatus.Cancelled or TurnStatus.Interrupted))
                     .Take(maximumTurns)
                     .ToArray();
-                return ValueTask.FromResult(result);
+                return result;
             }
         }
 

@@ -34,6 +34,7 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
     private Task[] workers = [];
     private long nextQueueOrder;
     private bool started;
+    private bool starting;
     private bool stopping;
 
     /// <summary>Creates the host-owned local turn coordinator.</summary>
@@ -96,21 +97,36 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
     {
         lock (lifecycleLock)
         {
-            if (started || stopping)
+            if (started || starting || stopping)
             {
                 throw new InvalidOperationException("The local turn coordinator can only be started once.");
             }
+            starting = true;
         }
 
-        await RecoverInterruptedTurnsAsync(cancellationToken);
-        lock (lifecycleLock)
+        try
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            shutdown = new CancellationTokenSource();
-            started = true;
-            workers = Enumerable.Range(0, options.MaximumActiveTurns)
-                .Select(_ => WorkerAsync(shutdown.Token))
-                .ToArray();
+            await RecoverInterruptedTurnsAsync(cancellationToken);
+            lock (lifecycleLock)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (stopping)
+                {
+                    throw new InvalidOperationException("The local turn coordinator was stopped during startup.");
+                }
+                shutdown = new CancellationTokenSource();
+                started = true;
+                workers = Enumerable.Range(0, options.MaximumActiveTurns)
+                    .Select(_ => WorkerAsync(shutdown.Token))
+                    .ToArray();
+            }
+        }
+        finally
+        {
+            lock (lifecycleLock)
+            {
+                starting = false;
+            }
         }
     }
 
@@ -129,6 +145,10 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
         {
             if (!started || stopping)
             {
+                if (starting)
+                {
+                    stopping = true;
+                }
                 return;
             }
 
@@ -597,7 +617,8 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
                 RouteReasonCode: route.ReasonCode,
                 HostShutdownToken: item.ShutdownCancellation.Token,
                 DeadlineCancellationToken: item.DeadlineCancellation.Token,
-                ResolveDeadlineCancellation: item.ResolveEngineDeadline);
+                ResolveDeadlineCancellation: item.ResolveEngineDeadline,
+                ReadCancellationCause: () => item.CancellationCause);
             await foreach (var _ in engine.RunTurnAsync(engineRequest, cancellationToken))
             {
             }

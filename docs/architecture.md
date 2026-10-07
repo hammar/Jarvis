@@ -123,6 +123,11 @@ pending work. Delayed cleanup
 or a concurrent losing signal cannot reclassify the outcome.
 The adapter's own finite timeout participates in the same host arbiter through
 `AgentTurnRequest.ResolveDeadlineCancellation`, rather than bypassing it.
+Terminal selection also consults `AgentTurnRequest.ReadCancellationCause`,
+a non-mutating view of the selected cause. Successful inference cannot persist
+completion or a final assistant answer when owner cancellation or shutdown
+was selected but callback delivery remains held. Reading None does not
+select a deadline or change standalone engine behavior.
 Standalone engine requests without this delegate retain engine-owned timeout
 classification and enforcement.
 Failed or cancelled workers/deadline monitors
@@ -132,6 +137,10 @@ as terminal `TurnClarificationRequired` events with their safe owner-facing
 message; unsupported routes persist a safe limitation message. Final assistant
 content, terminal state, and terminal event commit atomically. Startup marks
 every persisted nonterminal turn interrupted instead of replaying inference.
+Startup reserves recovery and worker creation before awaiting storage;
+overlapping starts are rejected without launching another worker set.
+Failed/cancelled recovery releases the reservation for retry. Shutdown during
+recovery prevents later worker creation and admission.
 Readiness checks SQLite reachability and the applied schema version separately
 from local provider configuration; model connectivity is not probed.
 

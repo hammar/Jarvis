@@ -462,3 +462,43 @@ dispositions remain recorded above. R21's fix is supported by the explicit
 selected-cause checks and seven implementer-executed barrier regressions,
 not by treating the brief re-review response as test evidence. Linux CI
 against the pushed revision remains pending.
+
+## PR review follow-up: R22-R23
+
+The review of `93bd2ee` adds two high **Previously missed** findings.
+All earlier R1-R21 dispositions remain in the cumulative ledger above.
+Required CI passed on `93bd2ee`; it is not validation of this revision.
+
+| Finding | Disposition and regression evidence |
+| --- | --- |
+| R22: successful inference can persist completion while a selected shutdown callback is held before the adapter observer | Fixed: optional trusted `AgentTurnRequest.ReadCancellationCause` exposes the selected host cause without mutating it. Adapter cancellation/terminal selection consults this accessor, including its final success recheck, without invoking the deadline-selecting arbiter. `SuccessfulActualRuntimeResponsePreservesSelectedCauseBeforePublication` exercises both owner and shutdown against real SQLite, coordinator, production adapter and actual pinned runtime. The controlled HTTP endpoint pauses a successful response until the selected cause's callback is held; completion must become one Cancelled/Interrupted outcome, with no completed event or final assistant message. Shutdown explicitly asserts reason `host_shutdown`. |
+| R23: overlapping startup can recover twice and overwrite tracking for duplicate worker sets | Fixed: reserve startup under the lifecycle lock before awaiting recovery; concurrent/repeated starts reject. Release the reservation on failure/cancellation; shutdown during recovery prevents subsequent worker launch/admission. `ConcurrentStartupReservesRecoveryAndMaintainsFourWorkers` uses a recovery barrier, rejects overlapping startup/admission, proves one recovery read, four owned workers/active executions, no fifth inference and completed tracked shutdown. The failed/cancelled-recovery theory verifies retry; `StopDuringRecoveryPreventsWorkerLaunchAndAdmission` verifies the stop/start race. |
+
+This adds one optional Application-only delegate to the engine request; there
+is no schema, SDK pin or product-scope change. Startup rejection is consistent
+with the existing once-only contract; recovery failures remain surfaced rather
+than becoming success. Architecture, testing and contract XML document both
+semantics. The fixture's pause is a controlled HTTP test-only barrier, not a
+live profile or model input switch. These actual-runtime tests join the named
+process-isolation collection so they cannot corrupt the crash contract's
+child-process discovery; unrelated collections still run in parallel.
+
+Four focused startup cases and four production held-publication integration
+cases passed natively, including two actual-runtime successful responses and
+the two existing host-deadline cases. Final native gates passed:
+`tools/validate.sh build` (zero warnings/errors), `unit` (87/87),
+`integration` (102/102), `coverage`, `architecture` (6/6), `sdk-contracts`
+(20/20 and pinned runtime harness), `aspire-e2e` (3/3), `browser-e2e`
+(1/1 plus deliberate failure probe), and `docs`. Application measured 98.0%
+lines (916/935), 93.9% branches (279/297); Infrastructure measured 91.6%
+lines (2238/2442), 73.9% branches (524/709); changed executable lines measured
+94.3% (1135/1204). Critical-module thresholds and negative gate fixtures
+passed unchanged. Build/integration/coverage were repeated after adding the
+uncancelled case below; the final report discovers all 102 integration cases.
+Exact-commit independent review and Linux CI remain pending at this
+recording point. No live
+credentials, cloud disclosure, household data or physical writes were used.
+No finding is accepted as a residual risk by the owner.
+The final actual-runtime theory also includes an uncancelled response, proving
+that reading None remains non-mutating and preserves normal completion with
+one stored assistant answer.

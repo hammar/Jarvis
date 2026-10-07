@@ -81,6 +81,8 @@ public enum CancellationCause
 /// <param name="ResolveDeadlineCancellation">Optional trusted, thread-safe host arbiter invoked when the engine's own finite deadline expires.
 /// It selects or returns the first cause, never None, and publishes the corresponding host signal.
 /// Without an arbiter, the engine owns its standalone deadline classification.</param>
+/// <param name="ReadCancellationCause">Optional trusted, thread-safe, non-mutating accessor for the host's selected
+/// cancellation cause, including None. Terminal selection consults it even when callback publication is delayed.</param>
 public sealed record AgentTurnRequest(
     TurnId TurnId,
     ProviderKind Provider,
@@ -92,7 +94,8 @@ public sealed record AgentTurnRequest(
     string RouteReasonCode = "explicit_host_provider",
     CancellationToken HostShutdownToken = default,
     CancellationToken DeadlineCancellationToken = default,
-    Func<CancellationCause>? ResolveDeadlineCancellation = null);
+    Func<CancellationCause>? ResolveDeadlineCancellation = null,
+    Func<CancellationCause>? ReadCancellationCause = null);
 
 /// <summary>Reports a terminal engine outcome without treating interruption as success.</summary>
 /// <param name="Status">Terminal application turn status.</param>
@@ -220,6 +223,8 @@ public interface ILocalTurnCoordinator
     /// <summary>Starts accepting and executing queued work after interrupted-turn recovery completes.</summary>
     /// <param name="cancellationToken">Token that cancels startup recovery.</param>
     /// <returns>A task that completes when recovery and worker startup finish.</returns>
+    /// <exception cref="InvalidOperationException">Startup is already in progress or completed, or shutdown
+    /// prevents startup. Failed or cancelled recovery releases its reservation unless shutdown was requested.</exception>
     Task StartAsync(CancellationToken cancellationToken);
 
     /// <summary>Stops acceptance, interrupts queued work, and boundedly stops active inference.</summary>

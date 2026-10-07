@@ -27,12 +27,14 @@ internal sealed class FakeOpenAiProvider : IAsyncDisposable
     public bool RepeatTool { get; set; }
     public bool FailInference { get; set; }
     public bool StallInference { get; set; }
+    public bool PauseInference { get; set; }
     public string? StreamingContent { get; set; }
     public int StreamingDeltaCount { get; set; }
     public string? RedirectUrl { get; set; }
     public string? ExpectedApiPath { get; set; }
     public string? ExpectedToolResult { get; set; } = "fixture-result:fixture-key";
     public TaskCompletionSource InferenceStalled { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public TaskCompletionSource ContinueInference { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     public TaskCompletionSource StreamingResponseWritten { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     public static Task<FakeOpenAiProvider> StartAsync()
@@ -130,6 +132,20 @@ internal sealed class FakeOpenAiProvider : IAsyncDisposable
             await context.Response.OutputStream.WriteAsync(error);
             context.Response.Close();
             return;
+        }
+
+        if (PauseInference)
+        {
+            InferenceStalled.TrySetResult();
+            try
+            {
+                await ContinueInference.Task.WaitAsync(_shutdown.Token);
+            }
+            catch (OperationCanceledException) when (_shutdown.IsCancellationRequested)
+            {
+                context.Response.Close();
+                return;
+            }
         }
 
         if (StallInference)

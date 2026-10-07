@@ -12,6 +12,7 @@ using Xunit;
 
 namespace PersonalAgent.IntegrationTests;
 
+[Collection("Copilot runtime process isolation")]
 public sealed class LocalTurnCoordinatorTests
 {
     private static readonly DateTimeOffset Now = new(2026, 10, 6, 12, 0, 0, TimeSpan.Zero);
@@ -336,6 +337,87 @@ public sealed class LocalTurnCoordinatorTests
         Assert.Single(events, item => item.EventType == (hostShutdown ? nameof(TurnInterrupted) : nameof(TurnCancelled)));
         Assert.DoesNotContain(events, item => item.EventType == (hostShutdown ? nameof(TurnCancelled) : nameof(TurnInterrupted)));
         Assert.Equal(0, provider.RequestCount);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("Category", "Integration")]
+    public async Task SuccessfulActualRuntimeResponsePreservesSelectedCauseBeforePublication(bool? hostShutdown)
+    {
+        using var directory = IsolatedDirectory.Create();
+        var clock = new MutableClock(Now);
+        var database = new SqliteDatabase(Path.Combine(directory.Path, "jarvis.db"));
+        await database.InitializeAsync();
+        var store = new SqliteConversationStore(database, clock);
+        await using var provider = await FakeOpenAiProvider.StartAsync();
+        provider.PauseInference = true;
+        var engine = new CopilotAgentEngine(store, new RejectingToolDispatcher(), clock,
+            new CopilotAgentEngineOptions(Path.Combine(directory.Path, "runtime"),
+                new CopilotProviderOptions("fixture-model", new Uri(provider.BaseUrl)), null));
+        await using var coordinator = new CoordinatorScope(CreateCoordinator(store, engine, clock));
+        await coordinator.Coordinator.StartAsync(CancellationToken.None);
+        var conversation = ConversationId.New();
+        var accepted = await coordinator.Coordinator.SubmitAsync(new LocalTurnRequest(
+            conversation, "completion-before-publication", "Hello", RoutingTaskKind.TextConversation),
+            CancellationToken.None);
+        await provider.InferenceStalled.Task.WaitAsync(TimeSpan.FromSeconds(20));
+        if (hostShutdown is null)
+        {
+            provider.ContinueInference.TrySetResult();
+            await WaitForTerminalAsync(store, accepted.Turn.Id);
+            Assert.Equal(TurnStatus.Completed, (await store.GetTurnAsync(accepted.Turn.Id, CancellationToken.None))!.Status);
+            Assert.Single(await store.ReadRecentAsync(conversation, 10, CancellationToken.None),
+                message => message.Role == "assistant");
+            Assert.Equal(1, provider.RequestCount);
+            await coordinator.Coordinator.StopAsync(CancellationToken.None);
+            return;
+        }
+        var active = (System.Collections.IDictionary)typeof(LocalTurnCoordinator)
+            .GetField("active", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .GetValue(coordinator.Coordinator)!;
+        var work = active[accepted.Turn.Id]!;
+        var item = work.GetType().GetProperty("Item")!.GetValue(work)!;
+        var source = (CancellationTokenSource)item.GetType()
+            .GetProperty(hostShutdown.Value ? "ShutdownCancellation" : "Cancellation")!.GetValue(item)!;
+        using var release = new ManualResetEventSlim();
+        var publicationPaused = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var pause = source.Token.Register(() =>
+        {
+            publicationPaused.TrySetResult();
+            release.Wait();
+        });
+        var cancelling = hostShutdown.Value
+            ? coordinator.Coordinator.StopAsync(CancellationToken.None)
+            : coordinator.Coordinator.CancelAsync(accepted.Turn.Id, CancellationToken.None).AsTask();
+        try
+        {
+            await publicationPaused.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            provider.ContinueInference.TrySetResult();
+            await provider.StreamingResponseWritten.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await WaitForTerminalAsync(store, accepted.Turn.Id);
+            Assert.False(cancelling.IsCompleted);
+            Assert.Equal(hostShutdown.Value ? TurnStatus.Interrupted : TurnStatus.Cancelled,
+                (await store.GetTurnAsync(accepted.Turn.Id, CancellationToken.None))!.Status);
+            var events = await store.ReadTurnEventsAfterAsync(accepted.Turn.Id, 0, 100, CancellationToken.None);
+            var terminal = Assert.Single(events,
+                item => item.EventType is nameof(TurnInterrupted) or nameof(TurnCancelled));
+            if (hostShutdown.Value)
+            {
+                Assert.Equal("host_shutdown", JsonSerializer.Deserialize<TurnInterrupted>(terminal.PayloadJson)!.ReasonCode);
+            }
+            Assert.DoesNotContain(events, item => item.EventType == nameof(TurnCompleted));
+            Assert.DoesNotContain(await store.ReadRecentAsync(conversation, 10, CancellationToken.None),
+                message => message.Role == "assistant");
+            Assert.Equal(1, provider.RequestCount);
+        }
+        finally
+        {
+            provider.ContinueInference.TrySetResult();
+            release.Set();
+        }
+        await cancelling.WaitAsync(TimeSpan.FromSeconds(5));
     }
 
     private sealed class BlockingSecretResolver : ISecretResolver
