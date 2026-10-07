@@ -5,6 +5,29 @@ Ollama, approved Home Assistant tools, and the GitHub Copilot SDK behind an
 application-owned adapter. The host owns privacy policy, approvals, durable
 state and execution; model output is untrusted.
 
+## Experimental personal project
+
+Jarvis is a personal experiment in specification-driven agentic software
+development. Implementation and independent review are performed by AI agents,
+with owner decisions based on specifications, automated evidence and disclosed
+limitations. This process does not guarantee correctness or security.
+
+The project is incomplete and intended for controlled experimentation, not
+safety-critical use. Planned capabilities are not necessarily implemented.
+No support, release schedule or compatibility commitment is provided. Do not
+expose the application or development dashboard to the public internet.
+
+Unsolicited external pull requests are not accepted; see the
+[contribution policy](CONTRIBUTING.md). This repository is source-visible,
+not open source: no general license to use, modify or redistribute the
+first-party code or documentation is granted. GitHub's terms still permit
+viewing and forking public repositories. See the [rights notice](RIGHTS.md).
+The software is provided "as is," without warranty to the extent permitted
+by applicable law.
+
+Report security concerns using the [security reporting policy](SECURITY.md),
+not by publishing sensitive details in an issue.
+
 ## Delivery milestones
 
 Complete milestones in order: M0 SDK Validation, M1 Local Chat, M2 Home
