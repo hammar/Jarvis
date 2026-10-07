@@ -87,7 +87,8 @@ public sealed class SqliteConversationStore : IConversationStore, IAtomicTurnOut
     public async ValueTask<IReadOnlyList<ConversationMessage>> ReadRecentAsync(
         ConversationId conversationId,
         int maximumMessages,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Guid? currentTaskMessageId = null)
     {
         if (maximumMessages is < 1 or > 1000)
         {
@@ -95,20 +96,41 @@ public sealed class SqliteConversationStore : IConversationStore, IAtomicTurnOut
         }
 
         await using var connection = await database.OpenConnectionAsync(cancellationToken);
+        long? boundarySequence = null;
+        if (currentTaskMessageId is { } messageId)
+        {
+            await using var boundary = connection.CreateCommand();
+            boundary.CommandText = """
+                SELECT sequence FROM messages
+                WHERE message_id = $message AND conversation_id = $conversation AND role = 'user';
+                """;
+            boundary.Parameters.AddWithValue("$message", SqliteValue.Guid(messageId));
+            boundary.Parameters.AddWithValue("$conversation", SqliteValue.Guid(conversationId.Value));
+            var value = await boundary.ExecuteScalarAsync(cancellationToken)
+                ?? throw new InvalidOperationException("The current task message does not exist in the conversation.");
+            boundarySequence = Convert.ToInt64(value, System.Globalization.CultureInfo.InvariantCulture);
+        }
+
         await using var command = connection.CreateCommand();
         command.CommandText = """
             SELECT message_id, conversation_id, role, content, created_at_utc
             FROM (
-                SELECT message_id, conversation_id, role, content, created_at_utc, sequence
-                FROM messages
-                WHERE conversation_id = $conversation_id
-                ORDER BY sequence DESC
+                SELECT m.message_id, m.conversation_id, m.role, m.content, m.created_at_utc, m.sequence,
+                    CASE WHEN $boundary IS NULL THEN m.sequence
+                         ELSE COALESCE(task.sequence, m.sequence) END AS history_order
+                FROM messages m
+                LEFT JOIN messages task ON task.turn_id = m.turn_id AND task.role = 'user'
+                    AND task.conversation_id = m.conversation_id
+                WHERE m.conversation_id = $conversation_id
+                    AND ($boundary IS NULL OR COALESCE(task.sequence, m.sequence) < $boundary)
+                ORDER BY history_order DESC, m.sequence DESC
                 LIMIT $maximum
             )
-            ORDER BY sequence;
+            ORDER BY history_order, sequence;
             """;
         command.Parameters.AddWithValue("$conversation_id", SqliteValue.Guid(conversationId.Value));
         command.Parameters.AddWithValue("$maximum", maximumMessages);
+        command.Parameters.AddWithValue("$boundary", boundarySequence is { } sequence ? sequence : DBNull.Value);
 
         var messages = new List<ConversationMessage>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);

@@ -66,6 +66,11 @@ untrusted, provenance-labelled `LocalOnly` data, and adds the current task as
 the final item. System-role and tool-role messages are not treated as host
 instructions. It reads one extra history row to indicate when additional
 older history was truncated, without loading an unbounded transcript. Its
+turn-aware read is bounded by the current accepted user-message ID: later
+submissions cannot enter or displace earlier context. Completed answers belong
+to their originating turn, even when appended after the current submission;
+history is ordered by turn acceptance and then by message order within the turn.
+Its
 `MinimumOmittedHistoryMessages` is a known lower bound, not the full count;
 `HasMoreHistory` separately reports when the sentinel proves older rows exist.
 Its
@@ -84,13 +89,22 @@ The coordinator caps execution at four turns globally, serializes turns for
 each conversation, and allows at most 20 queued submissions. Queue overflow is
 explicit. Same-conversation waiters remain queued and do not occupy execution
 workers or release their queue slots; a different conversation can use an
-available worker. The default interactive turn deadline is 120 seconds from
+available worker.
+Same-conversation work retains acceptance order across both deferred and
+channel-resident entries. Persisting cancellation or expiry releases a pending
+reservation immediately; stale entries are drained only for resource cleanup.
+The default interactive turn deadline is 120 seconds from
 durable acceptance, including queue wait, routing, context construction, and
 inference; the engine receives only the remaining budget and a separate
 deadline-cancellation token so timeout remains distinct from owner cancellation.
 Trusted host configuration may bound a provider/model override. User cancellation is
 `Cancelled`; host shutdown, deadline expiry, process failure, or uncertain
-cleanup is `Interrupted`. Clarification decisions are persisted
+cleanup is `Interrupted`.
+The coordinator records the first cancellation cause before signalling
+routing/context execution, so delayed context cleanup cannot reclassify a
+deadline as owner cancellation. Failed or cancelled workers/deadline monitors
+make readiness unhealthy and reject new submissions before durable creation.
+Clarification decisions are persisted
 as terminal `TurnClarificationRequired` events with their safe owner-facing
 message; unsupported routes persist a safe limitation message. Final assistant
 content, terminal state, and terminal event commit atomically. Startup marks

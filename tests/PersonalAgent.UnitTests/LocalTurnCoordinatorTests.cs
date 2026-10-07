@@ -416,6 +416,100 @@ public sealed class LocalTurnCoordinatorTests
 
     [Fact]
     [Trait("Category", "Unit")]
+    public async Task DeferredTurnPrecedesNewerChannelTurnWhenAllOtherWorkersAreBusy()
+    {
+        var store = new InMemoryConversationStore();
+        var engine = new ControlledEngine(store, block: true);
+        await using var scope = CreateCoordinator(store, engine);
+        await scope.Coordinator.StartAsync(CancellationToken.None);
+        var conversation = ConversationId.New();
+        var first = await scope.Coordinator.SubmitAsync(Request(conversation, "first"), CancellationToken.None);
+        await engine.WaitForTurnStartedAsync(first.Turn.Id);
+        var second = await scope.Coordinator.SubmitAsync(Request(conversation, "second"), CancellationToken.None);
+        for (var index = 0; index < 3; index++)
+        {
+            var other = await scope.Coordinator.SubmitAsync(Request(requestId: $"other-{index}"), CancellationToken.None);
+            await engine.WaitForTurnStartedAsync(other.Turn.Id);
+        }
+
+        var third = await scope.Coordinator.SubmitAsync(Request(conversation, "third"), CancellationToken.None);
+        engine.ReleaseTurn(first.Turn.Id);
+        await engine.WaitForTurnStartedAsync(second.Turn.Id);
+        Assert.Equal(5, engine.ExecutionCount);
+        engine.ReleaseTurn(second.Turn.Id);
+        await engine.WaitForTurnStartedAsync(third.Turn.Id);
+        Assert.Equal(6, engine.ExecutionCount);
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    [Trait("Category", "Unit")]
+    public async Task TerminalPendingTurnsImmediatelyReleaseCapacity(bool channelResident, bool expire)
+    {
+        var store = new InMemoryConversationStore();
+        var engine = new ControlledEngine(store, block: true);
+        await using var scope = CreateCoordinator(store, engine);
+        await scope.Coordinator.StartAsync(CancellationToken.None);
+        var conversation = ConversationId.New();
+        var first = await scope.Coordinator.SubmitAsync(Request(conversation, "active"), CancellationToken.None);
+        await engine.WaitForTurnStartedAsync(first.Turn.Id);
+        if (channelResident)
+        {
+            for (var index = 0; index < 3; index++)
+            {
+                var other = await scope.Coordinator.SubmitAsync(Request(requestId: $"other-{index}"), CancellationToken.None);
+                await engine.WaitForTurnStartedAsync(other.Turn.Id);
+            }
+        }
+
+        var pending = new List<TurnId>();
+        for (var index = 0; index < 20; index++)
+        {
+            if (!channelResident && index == 19)
+            {
+                var witness = await scope.Coordinator.SubmitAsync(
+                    Request(requestId: "deferred-witness"), CancellationToken.None);
+                await engine.WaitForTurnStartedAsync(witness.Turn.Id);
+                // Later unrelated execution proves earlier blocked work has left the channel.
+            }
+
+            var submission = await scope.Coordinator.SubmitAsync(
+                Request(conversation, $"pending-{index}", deadline: expire ? TimeSpan.FromMilliseconds(200) : null),
+                CancellationToken.None);
+            pending.Add(submission.Turn.Id);
+        }
+
+        if (!channelResident)
+        {
+            await Assert.ThrowsAsync<TurnQueueFullException>(async () =>
+                await scope.Coordinator.SubmitAsync(Request(requestId: "overflow"), CancellationToken.None));
+        }
+
+        foreach (var turn in pending)
+        {
+            if (expire)
+            {
+                await WaitForTerminalAsync(store, turn);
+            }
+            else
+            {
+                await scope.Coordinator.CancelAsync(turn, CancellationToken.None);
+            }
+        }
+
+        var replacement = await scope.Coordinator.SubmitAsync(Request(requestId: "replacement"), CancellationToken.None);
+        Assert.False(replacement.IsDuplicate);
+        if (!channelResident)
+        {
+            await engine.WaitForTurnStartedAsync(replacement.Turn.Id);
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Unit")]
     public async Task QueuedTurnThatExceedsItsAcceptedDeadlineIsInterruptedWithoutExecution()
     {
         var store = new InMemoryConversationStore();
@@ -469,9 +563,7 @@ public sealed class LocalTurnCoordinatorTests
         Assert.Equal(TurnStatus.Interrupted, (await store.GetTurnAsync(expired.Turn.Id, CancellationToken.None))!.Status);
         Assert.Equal(4, engine.ExecutionCount);
 
-        var drained = store.WatchNextRead(expired.Turn.Id);
         engine.ReleaseTurn(active[0].Turn.Id);
-        await drained.Task.WaitAsync(TimeSpan.FromSeconds(2));
         await WaitForTerminalAsync(store, active[0].Turn.Id);
         await scope.Coordinator.StopAsync(CancellationToken.None);
 
@@ -504,8 +596,71 @@ public sealed class LocalTurnCoordinatorTests
         }
 
         Assert.Equal(TurnStatus.Received, (await store.GetTurnAsync(expired.Turn.Id, CancellationToken.None))!.Status);
+        var messageCount = store.Messages.Count;
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await scope.Coordinator.SubmitAsync(Request(requestId: "after-monitor-failure"), CancellationToken.None));
+        Assert.Equal(messageCount, store.Messages.Count);
         await Assert.ThrowsAsync<IOException>(() => scope.Coordinator.StopAsync(CancellationToken.None));
         Assert.Equal(TurnStatus.Interrupted, (await store.GetTurnAsync(active.Turn.Id, CancellationToken.None))!.Status);
+    }
+
+    [Fact]
+    [Trait("Category", "Unit")]
+    public async Task TerminalPersistenceTimeoutCancelsWorkerAndRejectsFurtherSubmissions()
+    {
+        var store = new InMemoryConversationStore { TimeoutNextTerminalOutcome = true };
+        var engine = new ControlledEngine(store, fail: true);
+        await using var scope = CreateCoordinator(store, engine);
+        await scope.Coordinator.StartAsync(CancellationToken.None);
+        await scope.Coordinator.SubmitAsync(Request(), CancellationToken.None);
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+        while (scope.Coordinator.IsReady)
+        {
+            deadline.Token.ThrowIfCancellationRequested();
+            await Task.Yield();
+        }
+
+        var messageCount = store.Messages.Count;
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await scope.Coordinator.SubmitAsync(Request(requestId: "after-worker-timeout"), CancellationToken.None));
+        Assert.Equal(messageCount, store.Messages.Count);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => scope.Coordinator.StopAsync(CancellationToken.None));
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    [Trait("Category", "Unit")]
+    public async Task DelayedContextPreservesFirstDeadlineOrOwnerCancellation(bool deadlineFirst)
+    {
+        var store = new InMemoryConversationStore();
+        var context = new ControlledContextBuilder(block: true, ignoreCancellation: true);
+        var engine = new ControlledEngine(store);
+        await using var scope = CreateCoordinator(store, engine, contextBuilder: context);
+        await scope.Coordinator.StartAsync(CancellationToken.None);
+        var turn = await scope.Coordinator.SubmitAsync(
+            Request(deadline: TimeSpan.FromMilliseconds(300)), CancellationToken.None);
+        await context.Started.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        if (deadlineFirst)
+        {
+            await context.CancellationObserved.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            await scope.Coordinator.CancelAsync(turn.Turn.Id, CancellationToken.None);
+        }
+        else
+        {
+            await scope.Coordinator.CancelAsync(turn.Turn.Id, CancellationToken.None);
+            await context.CancellationObserved.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            var deadlineWitness = await scope.Coordinator.SubmitAsync(
+                Request(turn.Turn.ConversationId, "deadline-witness", deadline: TimeSpan.FromMilliseconds(300)),
+                CancellationToken.None);
+            await WaitForTerminalAsync(store, deadlineWitness.Turn.Id);
+        }
+
+        context.Continue.TrySetResult();
+        await WaitForTerminalAsync(store, turn.Turn.Id);
+        Assert.Equal(deadlineFirst ? TurnStatus.Interrupted : TurnStatus.Cancelled,
+            (await store.GetTurnAsync(turn.Turn.Id, CancellationToken.None))!.Status);
+        Assert.Equal(0, engine.ExecutionCount);
     }
 
     [Fact]
@@ -1078,6 +1233,7 @@ public sealed class LocalTurnCoordinatorTests
         public bool CompleteCancellationOnRetryConflict { get; set; }
         public bool LeaveNextTerminalOutcomeUnchanged { get; set; }
         public bool FailNextTerminalOutcome { get; set; }
+        public bool TimeoutNextTerminalOutcome { get; set; }
         public bool CompleteNextTurnOnRead { get; set; }
         public bool HideNextTurnRead { get; set; }
         public bool HideExistingRequests { get; set; }
@@ -1123,7 +1279,8 @@ public sealed class LocalTurnCoordinatorTests
         public ValueTask<IReadOnlyList<ConversationMessage>> ReadRecentAsync(
             ConversationId conversationId,
             int maximumMessages,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            Guid? currentTaskMessageId = null)
         {
             cancellationToken.ThrowIfCancellationRequested();
             lock (sync)
@@ -1363,6 +1520,12 @@ public sealed class LocalTurnCoordinatorTests
             ConversationMessage? finalAssistantMessage = null)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            if (TimeoutNextTerminalOutcome)
+            {
+                TimeoutNextTerminalOutcome = false;
+                return new ValueTask<PersistedTurnEvent>(WaitForTerminalPersistenceTimeoutAsync(cancellationToken));
+            }
+
             lock (sync)
             {
                 if (FailNextTerminalOutcome)
@@ -1425,6 +1588,12 @@ public sealed class LocalTurnCoordinatorTests
 
                 return ValueTask.FromResult(AppendEvent(turnId, eventType, payloadJson, occurredAtUtc));
             }
+        }
+
+        private static async Task<PersistedTurnEvent> WaitForTerminalPersistenceTimeoutAsync(CancellationToken token)
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, token);
+            throw new InvalidOperationException("Persistence was expected to time out.");
         }
 
         private ConversationTurn UpdateTurn(

@@ -163,7 +163,8 @@ shutdown/restart recovery through the launched Web process is also not covered
 by the current Aspire tests. The existing unit, integration, SDK-contract, and
 Aspire layers exercise their respective narrower behaviors. R6 is fixed and
 independently re-reviewed on the current worktree; no finding has been accepted
-as a residual risk by the owner. No review commit or PR exists.
+as a residual risk by the owner. The initial implementation is committed as
+`e81bf294ed15f3cbb8317f6999038efecc4b713d` in PR #35.
 
 **R7 (medium, previously missed): cancellation publication ordering.**
 Separate linked cancellation sources could wake execution/event persistence
@@ -228,8 +229,42 @@ Domain 100% lines with branches N/A. Changed executable lines measured
 92.9% (1040/1119). The critical-module and gate self-tests passed.
 
 No live Ollama/cloud credentials or household/device writes were used. The
-worktree is uncommitted. The remaining unexercised behavior is the complete
+initial implementation is published in PR #35. The remaining unexercised behavior is the complete
 Simulator coordinator turn through Web and process-level shutdown/restart
 recovery through the launched Web process; those paths have no public chat API
 in M1-02 and are outside its implemented surface. No manual or live E2E
 evidence is required for the implemented acceptance criteria.
+
+## PR review follow-up: R8-R13
+
+All six medium findings were labelled **Previously missed** by the PR reviewer;
+they extend, rather than replace, the R1-R7 ledger above. The follow-up changes
+retain the existing schema and add an optional turn boundary to
+`IConversationStore.ReadRecentAsync`; callers without a boundary retain ordinary
+append-order history. All implementation and forwarding adapters are updated.
+
+| Finding | Disposition and regression evidence |
+| --- | --- |
+| R8: promoted deferred work can be overtaken by newer channel work | Fixed: a newer same-conversation item defers while any older queued item remains. `DeferredTurnPrecedesNewerChannelTurnWhenAllOtherWorkersAreBusy` exercises the mixed channel/deferred case with three other workers occupied. |
+| R9: later accepted user messages enter earlier context and displace valid history | Fixed: SQLite filters by predecessor turn acceptance before bounded selection, including predecessor answers appended after current acceptance. `ContextExcludesLaterSubmissionsButIncludesLateAnswerFromPrecedingTurn` uses the real builder/store with 40 later submissions, validates missing/foreign boundaries and preserves unbounded-boundary append ordering. |
+| R10: cancelled/expired pending work retains queue reservations | Fixed: terminal persistence removes the pending reservation exactly once, stops monitoring, and drains stale channel/deferred entries only for disposal. `TerminalPendingTurnsImmediatelyReleaseCapacity` covers cancellation and expiry in both queue locations, with unrelated execution proving deferral. |
+| R11: delayed routing/context cancellation reclassifies the original cause | Fixed: the first cause is recorded before signalling execution; owner/deadline signals are published through application-owned sources. `DelayedContextPreservesFirstDeadlineOrOwnerCancellation` covers both signal orders while context cleanup is held, using a queued deadline witness rather than an arbitrary delay. |
+| R12: unhealthy coordination still admits durable submissions | Fixed: admission checks actual worker/monitor readiness before creating a turn. Both persistence-failure health regressions assert that a distinct request is rejected without another stored message. |
+| R13: cancelled workers remain invisible to readiness | Fixed: unexpected worker completion, including cancellation, fails readiness. `TerminalPersistenceTimeoutCancelsWorkerAndRejectsFurtherSubmissions` exercises the real five-second terminal-write timeout and verifies readiness, admission and shutdown failure. |
+
+Native macOS follow-up commands passed: `tools/validate.sh build`, `unit`
+(64/64), `integration` (92/92), `coverage`, `architecture` (6/6),
+`sdk-contracts` (19/19 plus pinned runtime compatibility harness), `aspire-e2e`
+(3/3), `browser-e2e` (1/1 plus deliberate failure probe), and `docs`.
+The final SQLite boundary assertions also passed in a focused integration run.
+Combined Application coverage is 97.7% lines (861/881), 93.7% branches
+(284/303); Infrastructure is 91.3% lines (2222/2435), 73.3% branches (517/705).
+Changed executable lines are 93.2% (1064/1142); all critical-module thresholds
+and negative gate fixtures passed unchanged.
+
+`origin/main` was fetched before this follow-up; no new base commits required
+integration. Linux follow-up checks will run against the pushed revision in CI;
+the earlier Linux results above apply to the initial implementation, not this
+revision. Independent review of the follow-up is pending. No live credentials
+or physical writes were used; the previously disclosed M1-02 surface limits
+remain unchanged.

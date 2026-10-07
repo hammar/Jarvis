@@ -383,7 +383,8 @@ public sealed class RoutingAndContextTests
         public ValueTask<IReadOnlyList<ConversationMessage>> ReadRecentAsync(
             ConversationId conversationId,
             int maximumMessages,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            Guid? currentTaskMessageId = null)
         {
             ReadCount++;
             RequestedMaximum = maximumMessages;

@@ -84,8 +84,8 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
             {
                 return started
                     && !stopping
-                    && workers.All(worker => !worker.IsFaulted)
-                    && deadlineMonitors.Values.All(monitor => !monitor.IsFaulted);
+                    && workers.All(worker => !worker.IsCompleted)
+                    && deadlineMonitors.Values.All(monitor => !monitor.IsFaulted && !monitor.IsCanceled);
             }
         }
     }
@@ -181,7 +181,11 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
         }
         catch (Exception exception)
         {
-            stopFailures.Add(exception);
+            // A worker can propagate the same deadline-monitor failure already observed above.
+            if (!stopFailures.Contains(exception))
+            {
+                stopFailures.Add(exception);
+            }
         }
 
         if (stopFailures.Count == 1)
@@ -212,7 +216,7 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
         {
             lock (lifecycleLock)
             {
-                if (!started || stopping)
+                if (!IsReady)
                 {
                     throw new InvalidOperationException("The local turn coordinator is not accepting work.");
                 }
@@ -262,7 +266,7 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
                     deadline,
                     submitted.UserMessageId,
                     Interlocked.Increment(ref nextQueueOrder));
-                work.ArmDeadline();
+                work.ArmDeadline(shutdown!.Token);
                 var acceptedForQueue = false;
                 var stoppedDuringSubmission = false;
                 CancellationToken monitorStoppingToken = default;
@@ -346,8 +350,8 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
             waiting = running is null && queued.TryGetValue(turnId, out var pending)
                 ? pending
                 : null;
-            running?.Item.Cancellation.Cancel();
-            waiting?.Cancellation.Cancel();
+            running?.Item.CancelOwner();
+            waiting?.CancelOwner();
         }
 
         if (running is not null)
@@ -358,10 +362,8 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
 
         if (waiting is not null)
         {
-            await TryResolveTerminalWithinBoundAsync(
-                turnId,
-                TurnStatus.Cancelled,
-                "owner_cancelled");
+            await ResolveCancellationAsync(waiting);
+            ReleasePendingReservation(waiting);
         }
     }
 
@@ -408,8 +410,11 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
                 deferred = wasQueued
                     && !stopping
                     && !item.Cancellation.IsCancellationRequested
-                    && active.Values.Any(activeWork =>
-                        activeWork.Item.ConversationId == item.ConversationId);
+                    && (active.Values.Any(activeWork =>
+                        activeWork.Item.ConversationId == item.ConversationId)
+                        || queued.Values.Any(pending =>
+                            pending.ConversationId == item.ConversationId
+                            && pending.QueueOrder < item.QueueOrder));
                 if (deferred)
                 {
                     if (!deferredByConversation.TryGetValue(item.ConversationId, out var waiting))
@@ -440,27 +445,14 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
                     continue;
                 }
 
-                if (item.Cancellation.IsCancellationRequested)
+                if (item.RemainingDeadline <= TimeSpan.Zero)
                 {
-                    await TryResolveTerminalWithinBoundAsync(
-                        item.TurnId,
-                        TurnStatus.Cancelled,
-                        "owner_cancelled");
+                    item.ExpireDeadline();
                 }
-                else if (hostStopping.IsCancellationRequested)
+
+                if (item.ExecutionCancellation.IsCancellationRequested)
                 {
-                    await TryResolveTerminalWithinBoundAsync(
-                        item.TurnId,
-                        TurnStatus.Interrupted,
-                        "host_shutdown");
-                }
-                else if (item.DeadlineCancellation.IsCancellationRequested || item.RemainingDeadline <= TimeSpan.Zero)
-                {
-                    item.DeadlineCancellation.Cancel();
-                    await TryResolveTerminalWithinBoundAsync(
-                        item.TurnId,
-                        TurnStatus.Interrupted,
-                        "interactive_deadline_exceeded");
+                    await ResolveCancellationAsync(item);
                 }
                 else
                 {
@@ -498,13 +490,10 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
         var remainingDeadline = item.RemainingDeadline;
         if (remainingDeadline <= TimeSpan.Zero)
         {
-            item.DeadlineCancellation.Cancel();
+            item.ExpireDeadline();
         }
 
-        using var routingCancellation = CancellationTokenSource.CreateLinkedTokenSource(
-            cancellationToken,
-            hostStopping,
-            item.DeadlineCancellation.Token);
+        var routingCancellation = item.ExecutionCancellation;
         try
         {
             var turn = await conversations.GetTurnAsync(item.TurnId, routingCancellation.Token)
@@ -575,7 +564,7 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
                 remainingDeadline = item.RemainingDeadline;
                 if (remainingDeadline <= TimeSpan.Zero)
                 {
-                    item.DeadlineCancellation.Cancel();
+                    item.ExpireDeadline();
                 }
 
                 routingCancellation.Token.ThrowIfCancellationRequested();
@@ -607,26 +596,9 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
                     "engine_ended_without_terminal_outcome");
             }
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        catch (OperationCanceledException) when (routingCancellation.IsCancellationRequested)
         {
-            await TryResolveTerminalWithinBoundAsync(
-                item.TurnId,
-                TurnStatus.Cancelled,
-                "owner_cancelled");
-        }
-        catch (OperationCanceledException) when (hostStopping.IsCancellationRequested)
-        {
-            await TryResolveTerminalWithinBoundAsync(
-                item.TurnId,
-                TurnStatus.Interrupted,
-                "host_shutdown");
-        }
-        catch (OperationCanceledException) when (item.DeadlineCancellation.IsCancellationRequested)
-        {
-            await TryResolveTerminalWithinBoundAsync(
-                item.TurnId,
-                TurnStatus.Interrupted,
-                "interactive_deadline_exceeded");
+            await ResolveCancellationAsync(item);
         }
         catch (Exception exception)
         {
@@ -709,7 +681,6 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
             return;
         }
 
-        bool removedDeferredWork;
         lock (lifecycleLock)
         {
             if (active.ContainsKey(item.TurnId) || !queued.ContainsKey(item.TurnId))
@@ -717,26 +688,36 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
                 return;
             }
 
-            removedDeferredWork = RemoveDeferredTurn(item);
-            if (removedDeferredWork)
-            {
-                queued.TryRemove(item.TurnId, out _);
-                queueSlots.Release();
-            }
         }
 
-        try
-        {
-            await TryResolveTerminalWithinBoundAsync(
-                item.TurnId,
-                TurnStatus.Interrupted,
-                "interactive_deadline_exceeded");
-        }
-        finally
-        {
-            if (removedDeferredWork)
+        await ResolveCancellationAsync(item);
+        ReleasePendingReservation(item);
+    }
+
+    private Task ResolveCancellationAsync(WorkItem item) =>
+        TryResolveTerminalWithinBoundAsync(
+            item.TurnId,
+            item.CancellationCause == CancellationCause.Owner ? TurnStatus.Cancelled : TurnStatus.Interrupted,
+            item.CancellationCause switch
             {
-                item.Dispose();
+                CancellationCause.Owner => "owner_cancelled",
+                CancellationCause.Shutdown => "host_shutdown",
+                _ => "interactive_deadline_exceeded"
+            });
+
+    private void ReleasePendingReservation(WorkItem item)
+    {
+        lock (lifecycleLock)
+        {
+            if (queued.TryRemove(item.TurnId, out _))
+            {
+                queueSlots.Release();
+                item.StopDeadlineMonitor();
+                // Stale channel entries only reclaim resources; deferred entries need the same cleanup path.
+                if (RemoveDeferredTurn(item) && !queue.Writer.TryWrite(item))
+                {
+                    throw new InvalidOperationException("Terminal queued work could not be returned for cleanup.");
+                }
             }
         }
     }
@@ -913,6 +894,10 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
         long queueOrder)
     {
         private readonly long acceptedTimestamp = Stopwatch.GetTimestamp();
+        private int cancellationCause;
+        private CancellationTokenRegistration deadlineRegistration;
+        private CancellationTokenRegistration shutdownRegistration;
+        private readonly CancellationTokenSource deadlineTimer = new();
 
         public TurnId TurnId { get; } = turnId;
         public ConversationId ConversationId { get; } = conversationId;
@@ -923,22 +908,50 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
         public long QueueOrder { get; } = queueOrder;
         public CancellationTokenSource Cancellation { get; } = new();
         public CancellationTokenSource DeadlineCancellation { get; } = new();
+        public CancellationTokenSource ExecutionCancellation { get; } = new();
+        public CancellationCause CancellationCause => (CancellationCause)Volatile.Read(ref cancellationCause);
         public CancellationTokenSource DeadlineMonitorCancellation { get; } = new();
         public TaskCompletionSource DeadlineMonitor { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
-        public void ArmDeadline()
+        public void ArmDeadline(CancellationToken hostStopping)
         {
-            DeadlineCancellation.CancelAfter(Deadline);
+            shutdownRegistration = hostStopping.Register(() => SignalCancellation(CancellationCause.Shutdown));
+            deadlineRegistration = deadlineTimer.Token.Register(ExpireDeadline);
+            deadlineTimer.CancelAfter(Deadline);
+        }
+
+        public void CancelOwner()
+        {
+            SignalCancellation(CancellationCause.Owner);
+            Cancellation.Cancel();
+        }
+
+        public void ExpireDeadline()
+        {
+            SignalCancellation(CancellationCause.Deadline);
+            DeadlineCancellation.Cancel();
+        }
+
+        private void SignalCancellation(CancellationCause cause)
+        {
+            Interlocked.CompareExchange(ref cancellationCause, (int)cause, (int)CancellationCause.None);
+            ExecutionCancellation.Cancel();
         }
 
         public void StopDeadlineMonitor() => DeadlineMonitorCancellation.Cancel();
         public void Dispose()
         {
+            deadlineRegistration.Dispose();
+            shutdownRegistration.Dispose();
+            deadlineTimer.Dispose();
             Cancellation.Dispose();
             DeadlineCancellation.Dispose();
+            ExecutionCancellation.Dispose();
             DeadlineMonitorCancellation.Dispose();
         }
     }
+
+    private enum CancellationCause { None, Owner, Shutdown, Deadline }
 
     private sealed class ActiveWork(WorkItem item)
     {

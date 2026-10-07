@@ -56,6 +56,58 @@ public sealed class LocalTurnCoordinatorTests
 
     [Fact]
     [Trait("Category", "Integration")]
+    public async Task ContextExcludesLaterSubmissionsButIncludesLateAnswerFromPrecedingTurn()
+    {
+        using var directory = IsolatedDirectory.Create();
+        var clock = new MutableClock(Now);
+        var database = new SqliteDatabase(Path.Combine(directory.Path, "jarvis.db"));
+        await database.InitializeAsync();
+        var store = new SqliteConversationStore(database, clock);
+        var conversation = ConversationId.New();
+        var preceding = await SubmitStoredAsync("preceding", "Earlier question");
+        var current = await SubmitStoredAsync("current", "Current question");
+        for (var index = 0; index < 40; index++)
+        {
+            await SubmitStoredAsync($"later-{index}", $"Future question {index}");
+        }
+
+        var completed = new TurnCompleted(preceding.Turn.Id, Now);
+        await store.UpdateTurnStatusAndAppendEventAsync(
+            preceding.Turn.Id,
+            TurnStatus.Completed,
+            preceding.Turn.Version,
+            Now,
+            nameof(TurnCompleted),
+            JsonSerializer.Serialize(completed),
+            Now,
+            CancellationToken.None,
+            new ConversationMessage(Guid.NewGuid(), conversation, "assistant", "Earlier answer appended late", Now));
+        var builder = new ConversationContextBuilder(store);
+        var context = await builder.BuildAsync(
+            new ContextBuildRequest(conversation, ProviderKind.Local, "Current question", "Local instructions",
+                [], current.UserMessageId),
+            CancellationToken.None);
+
+        Assert.Equal(["Earlier question", "Earlier answer appended late", "Current question"],
+            context.Items.Select(item => item.Text));
+        Assert.False(context.Estimate.HasMoreHistory);
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await store.ReadRecentAsync(conversation, 10, CancellationToken.None, Guid.NewGuid()));
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await store.ReadRecentAsync(ConversationId.New(), 10, CancellationToken.None, current.UserMessageId));
+        Assert.Equal("Earlier answer appended late",
+            Assert.Single(await store.ReadRecentAsync(conversation, 1, CancellationToken.None, current.UserMessageId)).Content);
+        Assert.Equal(["Future question 39", "Earlier answer appended late"],
+            (await store.ReadRecentAsync(conversation, 2, CancellationToken.None)).Select(message => message.Content));
+
+        ValueTask<SubmittedConversationTurn> SubmitStoredAsync(string id, string text) =>
+            store.SubmitTurnAsync(
+                new ConversationTurnSubmission(TurnId.New(), conversation, id, new string('A', 64), Guid.NewGuid(), text, Now),
+                CancellationToken.None);
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
     public async Task StartupInterruptsRecoveredTurnWithoutCallingInferenceAgain()
     {
         using var directory = IsolatedDirectory.Create();

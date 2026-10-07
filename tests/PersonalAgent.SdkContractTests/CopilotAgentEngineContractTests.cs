@@ -794,8 +794,9 @@ public sealed class CopilotAgentEngineContractTests
         public ValueTask<IReadOnlyList<ConversationMessage>> ReadRecentAsync(
             ConversationId conversationId,
             int maximumMessages,
-            CancellationToken cancellationToken) =>
-            inner.ReadRecentAsync(conversationId, maximumMessages, cancellationToken);
+            CancellationToken cancellationToken,
+            Guid? currentTaskMessageId = null) =>
+            inner.ReadRecentAsync(conversationId, maximumMessages, cancellationToken, currentTaskMessageId);
 
         public ValueTask<SubmittedConversationTurn> SubmitTurnAsync(
             ConversationTurnSubmission submission,

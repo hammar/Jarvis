@@ -603,11 +603,13 @@ public interface IConversationStore
     /// <param name="conversationId">Conversation to read.</param>
     /// <param name="maximumMessages">Maximum messages to return.</param>
     /// <param name="cancellationToken">Token that cancels the read.</param>
-    /// <returns>Messages in chronological order.</returns>
+    /// <param name="currentTaskMessageId">Optional persisted user-message boundary. Only preceding turns and their answers are included; later submissions cannot enter context.</param>
+    /// <returns>Messages in conversation order, grouped by turn when a task boundary is supplied.</returns>
     ValueTask<IReadOnlyList<ConversationMessage>> ReadRecentAsync(
         ConversationId conversationId,
         int maximumMessages,
-        CancellationToken cancellationToken);
+        CancellationToken cancellationToken,
+        Guid? currentTaskMessageId = null);
 
     /// <summary>Persists a user message, received turn, event, and idempotency key atomically.</summary>
     /// <param name="submission">Validated bounded input and its stable request identity.</param>
