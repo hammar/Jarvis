@@ -95,6 +95,8 @@ The bounded notification channel carries only wake-up bytes, never requests.
 Persisting cancellation or expiry removes pending work, and its deadline
 monitor disposes resources before releasing the reservation, independently of
 execution workers. Owner cancellation waits for that cleanup.
+Its supplied token bounds that wait without undoing the selected cancellation
+or stranding cleanup. Pending terminal persistence has one owner: its monitor.
 The default interactive turn deadline is 120 seconds from
 durable acceptance, including queue wait, routing, context construction, and
 inference; the engine receives only the remaining budget and a separate
@@ -105,7 +107,15 @@ cleanup is `Interrupted`.
 The coordinator selects one winning cancellation cause; only that cause may
 signal the engine, including direct engine cancellation/shutdown. It publishes
 the winning engine signal before waking routing/context cleanup and defers
-resource disposal during reentrant cancellation publication. Delayed cleanup
+resource disposal during reentrant cancellation publication. Cause selection
+does not invoke callbacks: publication runs asynchronously outside the lifecycle
+lock, and its task remains owned by the work item, worker and monitor.
+Shutdown closes acceptance and the queue before awaiting publication; its
+15-second budget starts before selection/publication, and the caller token
+also bounds every wait. Held callbacks never block readiness or cause premature
+resource disposal; they may finish cleanup after a reported timeout/cancellation.
+Callback failures remain explicit and fail readiness rather than stranding
+pending work. Delayed cleanup
 or a concurrent losing signal cannot reclassify the outcome.
 The adapter's own finite timeout participates in the same host arbiter through
 `AgentTurnRequest.ResolveDeadlineCancellation`, rather than bypassing it.

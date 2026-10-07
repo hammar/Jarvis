@@ -355,3 +355,66 @@ callback interleavings. The held-shutdown test checks durable interruption and
 terminal-event uniqueness, not its reason code. Linux CI against the new
 revision remains pending. No finding is accepted as a residual risk by the
 owner; no live credentials or physical writes were used.
+
+## PR review follow-up: R19-R20
+
+The review of `16ab471` adds two high **Previously missed** findings,
+retained alongside R1-R18 rather than replacing any earlier disposition.
+Both concern arbitrary synchronous cancellation callbacks running under
+the coordinator lifecycle lock. Required CI on that earlier revision passed;
+it is not validation of this follow-up.
+
+| Finding | Disposition and regression evidence |
+| --- | --- |
+| R19: shutdown callback publication holds the lifecycle lock before its timeout starts | Fixed: start the production 15-second budget before selecting shutdown; select causes and close admission/queue under the lock, then await tracked asynchronous publication and direct engine stops outside it. `HeldPublicationDoesNotBlockReadinessAndShutdownOrCallerBounds` holds a callback across the actual timeout, verifies responsive readiness and rejection of new submissions, then releases it and verifies truthful terminal state and completed workers. Its caller-cancelled shutdown case verifies that caller cancellation bounds the wait too. |
+| R20: owner cancellation holds the lifecycle lock and ignores the caller's wait bound | Fixed: select the winner under the lock without invoking callbacks; await its publication outside the lock with the caller token. Active and pending cases in the same theory verify bounded caller return, responsive readiness and resources remaining usable until callback release. Pending terminal persistence/reclamation belongs exclusively to the monitor, so abandoning a caller wait cannot strand accepted work. |
+
+Publication is owned by a retained task. Winning engine callbacks precede
+execution cleanup signals; losing causes still cannot publish or dispatch
+direct engine cancellation. Callback errors still wake execution and are
+surfaced, including both errors when engine and execution callbacks fail.
+Workers and monitors await publication before disposal; monitor reclamation
+runs in `finally`. `PublicationCallbackFailuresSurfaceWithoutStrandingPendingCleanup`
+exercises one and two callback failures, explicit unhealthy readiness,
+terminal persistence, pending removal and shutdown error propagation.
+`WorkerClaimDuringPendingCancellationPersistenceReclaimsExactlyOnce` holds
+the monitor's terminal write while a worker claims the cancelled request,
+checks a single terminal event without inference or direct engine cancel,
+and verifies that exactly 20 pending slots remain available afterward.
+
+`MissingAcceptedTurnReadSurfacesInterruptionWithoutCallingEngine` verifies
+explicit interruption on a missing accepted record; the concurrent-completion
+case verifies no inference and idempotent cancellation of completed/unknown
+turns. Terminal-event waits avoid consuming test-store read mutations.
+The repeated compare-and-swap conflict regression now checks the retained
+monitor failure and unhealthy readiness; simultaneous persistence owners no
+longer consume those fixture conflicts. Caller-cancelled shutdown intentionally
+returns promptly while owned persistence continues, rather than waiting for
+cleanup before reporting cancellation.
+
+There is no public API signature or schema change. Contract XML, architecture,
+operations and testing documentation describe the bounded wait and retained
+cleanup semantics. This cohesive lifecycle fix adds about 400 handwritten
+lines, primarily failure-path/concurrency tests; it does not expand scope.
+
+Final native macOS commands passed: `tools/validate.sh build` (zero
+warnings/errors), `unit` (76/76), `integration` (99/99), `coverage`,
+`architecture` (6/6), `sdk-contracts` (20/20 and pinned runtime harness),
+`aspire-e2e` (3/3), `browser-e2e` (1/1 and deliberate failure probe), and
+`docs`. Application measured 97.2% lines (978/1006), 93.1% branches (269/289);
+Infrastructure measured 91.5% lines (2234/2442), 73.6% branches (522/709);
+changed executable lines measured 94.0% (1134/1207). All critical-module
+thresholds and negative gate fixtures passed unchanged. Initial intermediate
+coverage runs correctly rejected 88.4% and 89.9% coordinator branch coverage;
+the additional observable failure/race cases above passed the unchanged gate.
+The real SQLite/production-adapter held-owner/shutdown regressions also
+passed with the asynchronous publication implementation; they stall before
+SDK startup and are not live inference evidence.
+
+Independent review of the exact follow-up commit remains pending at this
+recording point. Linux validation of this revision remains pending CI; prior
+green CI applies only to `16ab471`. No credentials, cloud disclosure,
+household data or physical writes were used. Timeout or caller cancellation
+does not prove callback/worker cleanup has finished: stalled callbacks retain
+their owned resources until they return, and bounded failure is reported
+explicitly. No finding is accepted as a residual risk by the owner.

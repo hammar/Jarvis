@@ -117,9 +117,14 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
     /// <inheritdoc />
     public async Task StopAsync(CancellationToken cancellationToken)
     {
+        using var shutdownDeadline = new CancellationTokenSource(ShutdownTimeout);
+        using var stopDeadline = CancellationTokenSource.CreateLinkedTokenSource(
+            cancellationToken,
+            shutdownDeadline.Token);
         ActiveWork[] activeWork;
         Task[] workerTasks;
         Task[] deadlineTasks;
+        Task[] publications;
         lock (lifecycleLock)
         {
             if (!started || stopping)
@@ -129,31 +134,36 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
 
             activeWork = active.Values.Where(work => work.InEngine).ToArray();
             stopping = true;
-            shutdown!.Cancel();
+            var accepted = queued.Values.Concat(active.Values.Select(work => work.Item)).ToArray();
+            foreach (var item in accepted)
+            {
+                item.StopForShutdown();
+            }
+
+            publications = accepted.Select(item => item.CancellationPublication).ToArray();
             WakeWorkers();
             queue.Writer.TryComplete();
             workerTasks = workers;
             deadlineTasks = deadlineMonitors.Values.ToArray();
         }
 
-        using var shutdownDeadline = new CancellationTokenSource(ShutdownTimeout);
-        using var stopDeadline = CancellationTokenSource.CreateLinkedTokenSource(
-            cancellationToken,
-            shutdownDeadline.Token);
         var stopFailures = new List<Exception>();
         try
         {
+            await shutdown!.CancelAsync().WaitAsync(stopDeadline.Token);
+            await Task.WhenAll(publications).WaitAsync(stopDeadline.Token);
             await Task.WhenAll(activeWork
                 .Where(work => work.Item.CancellationCause == CancellationCause.Shutdown)
-                .Select(work => engine.StopAsync(work.Item.TurnId, stopDeadline.Token).AsTask()));
+                .Select(work => engine.StopAsync(work.Item.TurnId, stopDeadline.Token).AsTask()))
+                .WaitAsync(stopDeadline.Token);
         }
         catch (OperationCanceledException) when (shutdownDeadline.IsCancellationRequested)
         {
-            stopFailures.Add(new TimeoutException("Local turn shutdown exceeded its bounded deadline."));
+            throw new TimeoutException("Local turn shutdown exceeded its bounded deadline.");
         }
-        catch (OperationCanceledException exception) when (cancellationToken.IsCancellationRequested)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            stopFailures.Add(exception);
+            throw;
         }
         catch (Exception exception)
         {
@@ -162,11 +172,15 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
 
         try
         {
-            await Task.WhenAll(deadlineTasks).WaitAsync(shutdownDeadline.Token);
+            await Task.WhenAll(deadlineTasks).WaitAsync(stopDeadline.Token);
         }
         catch (OperationCanceledException) when (shutdownDeadline.IsCancellationRequested)
         {
-            stopFailures.Add(new TimeoutException("Local turn shutdown exceeded its bounded deadline."));
+            throw new TimeoutException("Local turn shutdown exceeded its bounded deadline.");
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch (Exception exception)
         {
@@ -175,11 +189,15 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
 
         try
         {
-            await Task.WhenAll(workerTasks).WaitAsync(shutdownDeadline.Token);
+            await Task.WhenAll(workerTasks).WaitAsync(stopDeadline.Token);
         }
         catch (OperationCanceledException) when (shutdownDeadline.IsCancellationRequested)
         {
-            stopFailures.Add(new TimeoutException("Local turn shutdown exceeded its bounded deadline."));
+            throw new TimeoutException("Local turn shutdown exceeded its bounded deadline.");
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch (Exception exception)
         {
@@ -360,18 +378,17 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
         {
             if (ownerWon)
             {
-                await engine.CancelAsync(turnId, cancellationToken);
+                await running.Item.CancellationPublication.WaitAsync(cancellationToken);
+                await engine.CancelAsync(turnId, cancellationToken).AsTask().WaitAsync(cancellationToken);
             }
             return;
         }
 
         if (waiting is not null)
         {
-            await ResolveCancellationAsync(waiting);
-            if (ReleasePendingReservation(waiting))
-            {
-                await waiting.DeadlineMonitor.Task;
-            }
+            await waiting.CancellationPublication.WaitAsync(cancellationToken);
+            // The monitor owns pending terminal persistence and reclamation, even if this caller stops waiting.
+            await waiting.DeadlineMonitor.Task.WaitAsync(cancellationToken);
         }
     }
 
@@ -459,6 +476,7 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
                     try
                     {
                         await item.DeadlineMonitor.Task;
+                        await item.CancellationPublication;
                     }
                     finally
                     {
@@ -612,13 +630,21 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
     {
         try
         {
-            await ExpireQueuedTurnAsync(item, hostStopping);
-            if (item.ReclaimByMonitor)
+            try
             {
-                item.Dispose();
-                queueSlots.Release();
-                WakeWorkers();
+                await ExpireQueuedTurnAsync(item, hostStopping);
+                await item.CancellationPublication;
             }
+            finally
+            {
+                if (item.ReclaimByMonitor)
+                {
+                    item.Dispose();
+                    queueSlots.Release();
+                    WakeWorkers();
+                }
+            }
+
             item.DeadlineMonitor.TrySetResult();
         }
         catch (Exception exception)
@@ -637,7 +663,7 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
     private async Task ExpireQueuedTurnAsync(WorkItem item, CancellationToken hostStopping)
     {
         using var monitor = CancellationTokenSource.CreateLinkedTokenSource(
-            item.DeadlineCancellation.Token,
+            item.ExecutionCancellation.Token,
             hostStopping,
             item.DeadlineMonitorCancellation.Token);
         try
@@ -649,7 +675,7 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
         {
             return;
         }
-        catch (OperationCanceledException) when (item.DeadlineCancellation.IsCancellationRequested)
+        catch (OperationCanceledException) when (item.ExecutionCancellation.IsCancellationRequested)
         {
         }
         catch (OperationCanceledException)
@@ -846,6 +872,7 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
         private bool publishingCancellation;
         private bool disposeRequested;
         private bool disposed;
+        private Task cancellationPublication = Task.CompletedTask;
         private CancellationTokenRegistration deadlineRegistration;
         private CancellationTokenRegistration shutdownRegistration;
         private readonly CancellationTokenSource deadlineTimer = new();
@@ -863,6 +890,16 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
         public CancellationTokenSource ExecutionCancellation { get; } = new();
         public bool ReclaimByMonitor { get; set; }
         public CancellationCause CancellationCause => (CancellationCause)Volatile.Read(ref cancellationCause);
+        public Task CancellationPublication
+        {
+            get
+            {
+                lock (cancellationLock)
+                {
+                    return cancellationPublication;
+                }
+            }
+        }
         public CancellationTokenSource DeadlineMonitorCancellation { get; } = new();
         public TaskCompletionSource DeadlineMonitor { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -874,6 +911,7 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
         }
 
         public bool CancelOwner() => SignalCancellation(CancellationCause.Owner);
+        public void StopForShutdown() => SignalCancellation(CancellationCause.Shutdown);
 
         public void ExpireDeadline()
         {
@@ -897,18 +935,46 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
 
                 Volatile.Write(ref cancellationCause, (int)cause);
                 publishingCancellation = true;
+                cancellationPublication = Task.Run(() => PublishCancellationAsync(cause));
             }
 
+            return true;
+        }
+
+        private async Task PublishCancellationAsync(CancellationCause cause)
+        {
             try
             {
                 // Only the winner may signal the engine, before waking routing/context cleanup.
-                (cause switch
+                Exception? publicationFailure = null;
+                try
                 {
-                    CancellationCause.Owner => Cancellation,
-                    CancellationCause.Deadline => DeadlineCancellation,
-                    _ => ShutdownCancellation
-                }).Cancel();
-                ExecutionCancellation.Cancel();
+                    await (cause switch
+                    {
+                        CancellationCause.Owner => Cancellation,
+                        CancellationCause.Deadline => DeadlineCancellation,
+                        _ => ShutdownCancellation
+                    }).CancelAsync();
+                }
+                catch (Exception exception)
+                {
+                    publicationFailure = exception;
+                }
+
+                try
+                {
+                    await ExecutionCancellation.CancelAsync();
+                }
+                catch (Exception exception) when (publicationFailure is not null)
+                {
+                    throw new AggregateException("Cancellation publication failed in engine and execution callbacks.",
+                        publicationFailure, exception);
+                }
+
+                if (publicationFailure is not null)
+                {
+                    System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(publicationFailure).Throw();
+                }
             }
             finally
             {
@@ -925,8 +991,6 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
                     DisposeSources();
                 }
             }
-
-            return true;
         }
 
         public void StopDeadlineMonitor() => DeadlineMonitorCancellation.Cancel();

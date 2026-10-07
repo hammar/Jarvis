@@ -22,6 +22,14 @@ During graceful shutdown the coordinator stops accepting work, interrupts
 queued turns, and asks the engine to stop active turns within a bounded
 deadline. Persistence or shutdown timeout failures are surfaced and make
 readiness unavailable; shutdown never reports uncertain work as completed.
+The 15-second shutdown budget begins before asynchronous cancellation callback
+publication. Acceptance and the queue close first; held callbacks do not hold
+the lifecycle lock or block readiness. Timeout or caller cancellation ends the
+shutdown wait explicitly, not the owned cleanup tasks. Resources used by a
+held callback stay alive until it finishes; do not treat a returned timeout as
+proof that runtime cleanup completed. Owner cancellation likewise bounds its
+publication/cleanup wait with the supplied token while the selected cancellation
+and pending terminal persistence continue independently.
 `/health/ready` reports migration/policy/runtime readiness and local provider
 configuration separately from model connectivity, which is not probed.
 The database result is based on a live SQLite query and the expected migration
