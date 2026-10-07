@@ -495,8 +495,18 @@ lines (2238/2442), 73.9% branches (524/709); changed executable lines measured
 94.3% (1135/1204). Critical-module thresholds and negative gate fixtures
 passed unchanged. Build/integration/coverage were repeated after adding the
 uncancelled case below; the final report discovers all 102 integration cases.
-Exact-commit independent review and Linux CI remain pending at this
-recording point. No live
+Independent review of exact `7338cdbba5effc8bcbc79db9052c9f62fc9d0630`
+confirmed R22/R23 fixed for the reported interleavings, retained R1-R21
+dispositions and identified no new actionable finding. It independently passed
+four startup unit cases and nine integration/linked SDK-contract cases,
+including all three actual-runtime successful-response cases and
+standalone/host-arbitrated deadline/precedence cases; its exact-diff check
+passed and it made no tracked edits. It did not repeat full native
+gates/coverage/harness, Aspire/browser/docs or Linux CI. Exhaustive
+terminal-commit/cancellation interleavings, live Ollama and launched-Web
+shutdown/restart remain unexercised; no guarantee beyond the reported
+barrier cases is claimed. Linux CI against this revision remains pending.
+No live
 credentials, cloud disclosure, household data or physical writes were used.
 No finding is accepted as a residual risk by the owner.
 The final actual-runtime theory also includes an uncancelled response, proving
