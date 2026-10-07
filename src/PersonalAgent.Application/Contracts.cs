@@ -54,6 +54,19 @@ public enum RouteDisposition
 /// <param name="IsReadOnly">Whether the host classifies the operation as read-only.</param>
 public sealed record AgentToolDefinition(string Name, string InputSchema, bool IsReadOnly);
 
+/// <summary>Identifies the host-selected first cause of turn cancellation.</summary>
+public enum CancellationCause
+{
+    /// <summary>No cancellation has been selected.</summary>
+    None,
+    /// <summary>The owner cancelled the turn.</summary>
+    Owner,
+    /// <summary>The host is shutting down.</summary>
+    Shutdown,
+    /// <summary>The finite turn deadline expired.</summary>
+    Deadline
+}
+
 /// <summary>Contains explicit, bounded inputs for one engine turn.</summary>
 /// <param name="TurnId">Application-owned turn identifier.</param>
 /// <param name="Provider">Provider selected by host routing; never inferred by the engine.</param>
@@ -65,6 +78,9 @@ public sealed record AgentToolDefinition(string Name, string InputSchema, bool I
 /// <param name="RouteReasonCode">Stable host policy reason recorded with the route event.</param>
 /// <param name="HostShutdownToken">Token that requests truthful interruption during graceful host shutdown.</param>
 /// <param name="DeadlineCancellationToken">Token that requests truthful interruption when the accepted turn deadline expires.</param>
+/// <param name="ResolveDeadlineCancellation">Optional trusted, thread-safe host arbiter invoked when the engine's own finite deadline expires.
+/// It selects or returns the first cause, never None, and publishes the corresponding host signal.
+/// Without an arbiter, the engine owns its standalone deadline classification.</param>
 public sealed record AgentTurnRequest(
     TurnId TurnId,
     ProviderKind Provider,
@@ -75,7 +91,8 @@ public sealed record AgentTurnRequest(
     int MaximumToolCalls,
     string RouteReasonCode = "explicit_host_provider",
     CancellationToken HostShutdownToken = default,
-    CancellationToken DeadlineCancellationToken = default);
+    CancellationToken DeadlineCancellationToken = default,
+    Func<CancellationCause>? ResolveDeadlineCancellation = null);
 
 /// <summary>Reports a terminal engine outcome without treating interruption as success.</summary>
 /// <param name="Status">Terminal application turn status.</param>

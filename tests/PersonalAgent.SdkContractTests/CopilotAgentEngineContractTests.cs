@@ -366,9 +366,11 @@ public sealed class CopilotAgentEngineContractTests
         Assert.Equal(nameof(TurnInterrupted), Assert.Single(persisted).EventType);
     }
 
-    [Fact]
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     [Trait("Category", "SdkContract")]
-    public async Task DeadlineBoundsBlockedEventPersistenceWithoutMisclassifyingCancellation()
+    public async Task DeadlineBoundsBlockedEventPersistenceWithoutMisclassifyingCancellation(bool hostArbitration)
     {
         using var data = IsolatedDirectory.Create();
         using var databaseFile = IsolatedDatabaseFile.Create();
@@ -383,7 +385,10 @@ public sealed class CopilotAgentEngineContractTests
         var turnId = await CreateTurnAsync(store);
 
         var events = await CollectAsync(engine.RunTurnAsync(
-            CreateRequest(turnId, ProviderKind.Local, "event persistence deadline", deadline: TimeSpan.FromSeconds(2)),
+            CreateRequest(turnId, ProviderKind.Local, "event persistence deadline", deadline: TimeSpan.FromSeconds(2)) with
+            {
+                ResolveDeadlineCancellation = hostArbitration ? () => CancellationCause.Deadline : null
+            },
             CancellationToken.None)).WaitAsync(TimeSpan.FromSeconds(10));
 
         Assert.Equal("engine_deadline_exceeded", Assert.Single(events.OfType<TurnInterrupted>()).ReasonCode);

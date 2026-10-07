@@ -304,6 +304,44 @@ failure probe), and `docs`. Application coverage is 98.0% lines (871/889),
 93.5% branches (261/279); Infrastructure is 91.2% lines (2221/2434), 73.4%
 branches (519/707); changed executable lines are 93.4% (1074/1150).
 Critical-module thresholds and negative gate fixtures passed unchanged.
-Independent review and Linux CI against this new revision are pending. Earlier
+Independent review of `90b02099e6aabd19c80b2c07356e2c5f43b99655`
+confirmed the focused coordinator and production-path/query-plan tests, but
+identified R18 below. Linux CI against this new revision is pending. Earlier
 CI evidence applies to `4fb04da`, not this revision. No live provider credentials,
 cloud disclosure, household data or physical writes were used.
+
+## Independent review follow-up: R18
+
+**R18 (medium, Previously missed):** the production adapter's independent
+deadline bypasses the coordinator's selected cancellation cause. The reviewer
+reproduced an owner winner being durably persisted as `Interrupted` while a
+LIFO callback held owner-signal delivery across the adapter's timeout. Its
+reproduction stalled controlled secret resolution before SDK startup; it was
+production-adapter evidence, not actual SDK inference validation.
+
+Fixed by adding host-owned `CancellationCause` and the optional trusted
+`AgentTurnRequest.ResolveDeadlineCancellation` delegate. The coordinator's
+atomic winner selection also handles engine-local expiry; the adapter maps
+the resulting selected cause before cancelling execution. Its independent
+finite timer remains enabled, including for standalone requests without an
+arbiter. No SDK/provider types enter Application and no schema changes.
+
+`ProductionEngineDeadlineUsesFirstCauseWhileWinningSignalPublicationIsPaused`
+exercises the real coordinator, real SQLite and production adapter with both
+owner and shutdown winners, held across the adapter's timer by event-based
+callback barriers. It asserts durable classification and a single terminal
+event, with zero provider requests; the SDK is deliberately not launched.
+`DeadlineBoundsBlockedEventPersistenceWithoutMisclassifyingCancellation`
+now covers both standalone and host-arbitrated engine deadlines.
+
+Final native validation passed: `tools/validate.sh build`, `unit` (67/67),
+`integration` (99/99), `coverage`, `architecture` (6/6), `sdk-contracts`
+(20/20 plus pinned runtime harness), `aspire-e2e` (3/3), `browser-e2e`
+(1/1 and deliberate failure probe), and `docs`. Application measured 97.9%
+lines (874/893), 93.2% branches (260/279); Infrastructure measured 91.6%
+lines (2236/2442), 73.6% branches (522/709); changed executable lines are
+93.9% (1091/1162). All required thresholds and negative fixtures passed.
+An attempted simultaneous pair of focused builds briefly collided on shared
+generated reference assemblies; sequential reruns passed without deleting
+data or changing validation policy. Independent re-review of the narrower R18
+correction and Linux CI against the new revision remain pending.

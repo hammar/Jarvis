@@ -107,6 +107,10 @@ signal the engine, including direct engine cancellation/shutdown. It publishes
 the winning engine signal before waking routing/context cleanup and defers
 resource disposal during reentrant cancellation publication. Delayed cleanup
 or a concurrent losing signal cannot reclassify the outcome.
+The adapter's own finite timeout participates in the same host arbiter through
+`AgentTurnRequest.ResolveDeadlineCancellation`, rather than bypassing it.
+Standalone engine requests without this delegate retain engine-owned timeout
+classification and enforcement.
 Failed or cancelled workers/deadline monitors
 make readiness unhealthy and reject new submissions before durable creation.
 Clarification decisions are persisted

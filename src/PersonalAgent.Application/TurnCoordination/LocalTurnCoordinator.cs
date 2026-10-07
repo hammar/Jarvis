@@ -567,7 +567,8 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
                 MaximumToolCalls: 0,
                 RouteReasonCode: route.ReasonCode,
                 HostShutdownToken: item.ShutdownCancellation.Token,
-                DeadlineCancellationToken: item.DeadlineCancellation.Token);
+                DeadlineCancellationToken: item.DeadlineCancellation.Token,
+                ResolveDeadlineCancellation: item.ResolveEngineDeadline);
             await foreach (var _ in engine.RunTurnAsync(engineRequest, cancellationToken))
             {
             }
@@ -879,6 +880,12 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
             SignalCancellation(CancellationCause.Deadline);
         }
 
+        public CancellationCause ResolveEngineDeadline()
+        {
+            ExpireDeadline();
+            return CancellationCause;
+        }
+
         private bool SignalCancellation(CancellationCause cause)
         {
             lock (cancellationLock)
@@ -957,8 +964,6 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
             DeadlineMonitorCancellation.Dispose();
         }
     }
-
-    private enum CancellationCause { None, Owner, Shutdown, Deadline }
 
     private sealed class ActiveWork(WorkItem item)
     {

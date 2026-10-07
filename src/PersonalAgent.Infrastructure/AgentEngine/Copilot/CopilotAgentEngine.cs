@@ -200,7 +200,15 @@ public sealed class CopilotAgentEngine : IAgentEngine
         using var acceptedDeadlineCancellation = request.DeadlineCancellationToken.Register(
             () => RecordCancellation(CopilotTurnSignal.DeadlineExceeded));
         using var engineDeadlineCancellation = deadline.Token.Register(
-            () => RecordCancellation(CopilotTurnSignal.DeadlineExceeded));
+            () => RecordCancellation(request.ResolveDeadlineCancellation is { } resolve
+                ? resolve() switch
+                {
+                    CancellationCause.Owner => CopilotTurnSignal.Cancelled,
+                    CancellationCause.Shutdown => CopilotTurnSignal.HostShutdown,
+                    CancellationCause.Deadline => CopilotTurnSignal.DeadlineExceeded,
+                    _ => throw new InvalidOperationException("The host deadline arbiter must select a cancellation cause.")
+                }
+                : CopilotTurnSignal.DeadlineExceeded));
         lock (cancellationSync)
         {
             var hostShutdownMask = 1 << (int)CopilotTurnSignal.HostShutdown;
