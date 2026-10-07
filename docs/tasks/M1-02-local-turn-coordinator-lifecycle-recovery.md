@@ -555,3 +555,57 @@ CI against the new revision remains pending; exhaustive interleavings,
 live Ollama and launched-Web recovery were not verified by that review.
 Earlier runtime/process limitations
 remain; no finding is accepted as a residual risk by the owner.
+
+## Main integration after R24-R25
+
+Fetched `origin/main` on 2026-10-07 and merged
+`484c12e2459214bfd6fa75c992750f5157a69769` (PR #36) in
+`2a7a34ae314fe49510d655bdc0c552f044137c0d` to satisfy the up-to-date
+branch gate. The merge changes only `README.md`, `CONTRIBUTING.md`,
+`RIGHTS.md`, `SECURITY.md` and the separate publication task brief.
+It preserves the upstream source-visible notices without changing repository
+visibility, settings, permissions, runtime behavior, contracts, migrations,
+composition, dependencies or CI. There were no textual conflicts; the README
+addition is consistent with the experimental/limited-evidence handoff here.
+R1-R25 dispositions and exact implementation review evidence above remain
+unchanged. All post-integration native gates passed: build, unit (87/87),
+integration (113/113), coverage, architecture (6/6), SDK (23/23 and
+harness), Aspire (3/3), browser (1/1 plus failure probe), and docs.
+The initial collector stall was again resolved by recreating only the verified
+untracked test output directories with numbered duplicates (739 Unit, 598
+Integration and 220 SDK files); no gates or durable data changed.
+New-HEAD CI is pending; prior green CI applies to `8ffdc4c`, not this merge.
+
+## PR review follow-up: R26
+
+The latest review of `8ffdc4c` contains a medium **Previously missed**
+finding only in its top-level summary, despite zero unresolved inline
+threads. It extends, rather than replaces, the complete R1-R25 ledger.
+
+**R26:** repeated `StopAsync` returns success merely because shutdown has
+started, hiding unfinished cleanup, timeout or persistence failure. Fixed
+by retaining one shutdown operation with its own finite budget; first-call
+selection closes admission, while asynchronous orchestration continues
+independently of individual caller waits. Concurrent/repeated callers
+observe its retained result, timeout or failure without re-running engine
+stops or resetting the budget. A cancelled caller stops only its own wait.
+
+Extended callback-barrier cases prove that a concurrent stop stays pending
+while publication is held, another caller can cancel independently, and the
+actual timeout is reported by both first and repeated callers, even after
+worker cleanup subsequently finishes. The caller-cancelled case later awaits
+shared completion successfully. Engine/aggregate/pending-publication failure
+cases repeat shutdown and assert retained errors; engine-stop counts prove
+orchestration runs once. Fifteen focused native shutdown cases passed.
+Contract XML, architecture and testing docs describe this behavior; no
+schema/API signature or scope change. Final merged-base native gates passed:
+`tools/validate.sh build` (zero warnings/errors), `unit` (87/87),
+`integration` (113/113), `coverage`, `architecture` (6/6), `sdk-contracts`
+(23/23 and pinned runtime harness), `aspire-e2e` (3/3), `browser-e2e`
+(1/1 plus deliberate failure probe), and `docs`. Application measured 98.3%
+lines (918/934), 94.2% branches (276/293); Infrastructure measured 92.0%
+lines (2248/2443), 74.7% branches (528/707); changed executable lines
+measured 95.3% (1147/1204). Critical thresholds and negative fixtures passed
+unchanged. Independent exact review and final-HEAD CI remain pending at this
+recording point. No finding is accepted as
+a residual risk by the owner.

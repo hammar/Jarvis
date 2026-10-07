@@ -32,6 +32,7 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
     private readonly object lifecycleLock = new();
     private CancellationTokenSource? shutdown;
     private Task[] workers = [];
+    private Task? shutdownOperation;
     private long nextQueueOrder;
     private bool started;
     private bool starting;
@@ -133,17 +134,10 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
     /// <inheritdoc />
     public async Task StopAsync(CancellationToken cancellationToken)
     {
-        using var shutdownDeadline = new CancellationTokenSource(ShutdownTimeout);
-        using var stopDeadline = CancellationTokenSource.CreateLinkedTokenSource(
-            cancellationToken,
-            shutdownDeadline.Token);
-        ActiveWork[] activeWork;
-        Task[] workerTasks;
-        Task[] deadlineTasks;
-        Task[] publications;
+        Task operation;
         lock (lifecycleLock)
         {
-            if (!started || stopping)
+            if (!started)
             {
                 if (starting)
                 {
@@ -152,8 +146,29 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
                 return;
             }
 
+            if (shutdownOperation is null)
+            {
+                stopping = true;
+                // The operation owns its budget; individual callers cancel only their wait.
+                shutdownOperation = Task.Run(StopCoreAsync);
+            }
+            operation = shutdownOperation;
+        }
+
+        await operation.WaitAsync(cancellationToken);
+    }
+
+    private async Task StopCoreAsync()
+    {
+        using var shutdownDeadline = new CancellationTokenSource(ShutdownTimeout);
+        var stopToken = shutdownDeadline.Token;
+        ActiveWork[] activeWork;
+        Task[] workerTasks;
+        Task[] deadlineTasks;
+        Task[] publications;
+        lock (lifecycleLock)
+        {
             activeWork = active.Values.Where(work => work.InEngine).ToArray();
-            stopping = true;
             var accepted = queued.Values.Concat(active.Values.Select(work => work.Item)).ToArray();
             foreach (var item in accepted)
             {
@@ -170,20 +185,16 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
         var stopFailures = new List<Exception>();
         try
         {
-            await shutdown!.CancelAsync().WaitAsync(stopDeadline.Token);
-            await Task.WhenAll(publications).WaitAsync(stopDeadline.Token);
+            await shutdown!.CancelAsync().WaitAsync(stopToken);
+            await Task.WhenAll(publications).WaitAsync(stopToken);
             await Task.WhenAll(activeWork
                 .Where(work => work.Item.CancellationCause == CancellationCause.Shutdown)
-                .Select(work => engine.StopAsync(work.Item.TurnId, stopDeadline.Token).AsTask()))
-                .WaitAsync(stopDeadline.Token);
+                .Select(work => engine.StopAsync(work.Item.TurnId, stopToken).AsTask()))
+                .WaitAsync(stopToken);
         }
         catch (OperationCanceledException) when (shutdownDeadline.IsCancellationRequested)
         {
             throw new TimeoutException("Local turn shutdown exceeded its bounded deadline.");
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            throw;
         }
         catch (Exception exception)
         {
@@ -192,15 +203,11 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
 
         try
         {
-            await Task.WhenAll(deadlineTasks).WaitAsync(stopDeadline.Token);
+            await Task.WhenAll(deadlineTasks).WaitAsync(stopToken);
         }
         catch (OperationCanceledException) when (shutdownDeadline.IsCancellationRequested)
         {
             throw new TimeoutException("Local turn shutdown exceeded its bounded deadline.");
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            throw;
         }
         catch (Exception exception)
         {
@@ -209,15 +216,11 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
 
         try
         {
-            await Task.WhenAll(workerTasks).WaitAsync(stopDeadline.Token);
+            await Task.WhenAll(workerTasks).WaitAsync(stopToken);
         }
         catch (OperationCanceledException) when (shutdownDeadline.IsCancellationRequested)
         {
             throw new TimeoutException("Local turn shutdown exceeded its bounded deadline.");
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            throw;
         }
         catch (Exception exception)
         {

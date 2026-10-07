@@ -1090,6 +1090,9 @@ public sealed class LocalTurnCoordinatorTests
 
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
             scope.Coordinator.StopAsync(CancellationToken.None));
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            scope.Coordinator.StopAsync(CancellationToken.None));
+        Assert.Equal(1, engine.StopCallCount);
 
         Assert.Equal(TurnStatus.Interrupted, (await store.GetTurnAsync(submitted.Turn.Id, CancellationToken.None))!.Status);
     }
@@ -1111,6 +1114,8 @@ public sealed class LocalTurnCoordinatorTests
             scope.Coordinator.StopAsync(cancelled.Token));
 
         await WaitForTerminalAsync(store, submitted.Turn.Id);
+        await scope.Coordinator.StopAsync(CancellationToken.None);
+        Assert.Equal(1, engine.StopCallCount);
         Assert.Equal(TurnStatus.Interrupted, (await store.GetTurnAsync(submitted.Turn.Id, CancellationToken.None))!.Status);
     }
 
@@ -1129,6 +1134,10 @@ public sealed class LocalTurnCoordinatorTests
             scope.Coordinator.StopAsync(CancellationToken.None));
 
         Assert.Equal(2, failure.InnerExceptions.Count);
+        var repeated = await Assert.ThrowsAsync<AggregateException>(() =>
+            scope.Coordinator.StopAsync(CancellationToken.None));
+        Assert.Same(failure, repeated);
+        Assert.Equal(1, engine.StopCallCount);
     }
 
     [Fact]
@@ -1271,6 +1280,7 @@ public sealed class LocalTurnCoordinatorTests
         var operation = shutdown
             ? scope.Coordinator.StopAsync(caller.Token)
             : scope.Coordinator.CancelAsync(turn.Turn.Id, caller.Token).AsTask();
+        Task? repeatedStop = null;
         try
         {
             await paused.Task.WaitAsync(TimeSpan.FromSeconds(2));
@@ -1278,6 +1288,13 @@ public sealed class LocalTurnCoordinatorTests
                 await Task.Run(() => scope.Coordinator.IsReady).WaitAsync(TimeSpan.FromSeconds(2)));
             if (shutdown)
             {
+                repeatedStop = scope.Coordinator.StopAsync(CancellationToken.None);
+                Assert.False(repeatedStop.IsCompleted);
+                using var repeatedCaller = new CancellationTokenSource();
+                var cancelledWait = scope.Coordinator.StopAsync(repeatedCaller.Token);
+                repeatedCaller.Cancel();
+                await Assert.ThrowsAnyAsync<OperationCanceledException>(() => cancelledWait);
+                Assert.False(repeatedStop.IsCompleted);
                 await Assert.ThrowsAsync<InvalidOperationException>(async () =>
                     await scope.Coordinator.SubmitAsync(Request(requestId: "after-stop"), CancellationToken.None));
             }
@@ -1293,6 +1310,9 @@ public sealed class LocalTurnCoordinatorTests
                 // Exercise the production 15-second shutdown bound while the callback stays held.
                 await Assert.ThrowsAsync<TimeoutException>(async () =>
                     await operation.WaitAsync(TimeSpan.FromSeconds(18)));
+                await Assert.ThrowsAsync<TimeoutException>(async () =>
+                    await repeatedStop!.WaitAsync(TimeSpan.FromSeconds(2)));
+                await Assert.ThrowsAsync<TimeoutException>(() => scope.Coordinator.StopAsync(CancellationToken.None));
             }
 
             Assert.True(source.Token.IsCancellationRequested);
@@ -1319,6 +1339,16 @@ public sealed class LocalTurnCoordinatorTests
             var workers = (Task[])typeof(LocalTurnCoordinator)
                 .GetField("workers", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(scope.Coordinator)!;
             await Task.WhenAll(workers).WaitAsync(TimeSpan.FromSeconds(5));
+            if (cancelCaller)
+            {
+                await repeatedStop!.WaitAsync(TimeSpan.FromSeconds(5));
+                await scope.Coordinator.StopAsync(CancellationToken.None);
+                Assert.Equal(1, engine.StopCallCount);
+            }
+            else
+            {
+                await Assert.ThrowsAsync<TimeoutException>(() => scope.Coordinator.StopAsync(CancellationToken.None));
+            }
         }
     }
 
@@ -1363,6 +1393,7 @@ public sealed class LocalTurnCoordinatorTests
         Assert.False(scope.Coordinator.IsReady);
         Assert.False(queued.Contains(turn.Turn.Id));
         Assert.Equal(TurnStatus.Cancelled, (await store.GetTurnAsync(turn.Turn.Id, CancellationToken.None))!.Status);
+        await Assert.ThrowsAsync<AggregateException>(() => scope.Coordinator.StopAsync(CancellationToken.None));
         await Assert.ThrowsAsync<AggregateException>(() => scope.Coordinator.StopAsync(CancellationToken.None));
     }
 
@@ -1701,7 +1732,9 @@ public sealed class LocalTurnCoordinatorTests
     {
         private int executionCount;
         private int cancelCallCount;
+        private int stopCallCount;
         public int CancelCallCount => Volatile.Read(ref cancelCallCount);
+        public int StopCallCount => Volatile.Read(ref stopCallCount);
         public TaskCompletionSource<TurnStatus> CancellationOutcome { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource ContinueCancellation { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public CancellationToken EngineOwnerToken { get; private set; }
@@ -1834,12 +1867,15 @@ public sealed class LocalTurnCoordinatorTests
             return ValueTask.CompletedTask;
         }
 
-        public ValueTask StopAsync(TurnId turnId, CancellationToken cancellationToken) =>
-            cancellationToken.IsCancellationRequested
+        public ValueTask StopAsync(TurnId turnId, CancellationToken cancellationToken)
+        {
+            Interlocked.Increment(ref stopCallCount);
+            return cancellationToken.IsCancellationRequested
                 ? ValueTask.FromCanceled(cancellationToken)
                 : stopFails
                 ? ValueTask.FromException(new InvalidOperationException("engine stop failed"))
                 : ValueTask.CompletedTask;
+        }
     }
 
     private sealed class InMemoryConversationStore : IConversationStore, IAtomicTurnOutcomeStore

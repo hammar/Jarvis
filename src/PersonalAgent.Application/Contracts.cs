@@ -232,7 +232,9 @@ public interface ILocalTurnCoordinator
     /// <returns>A task that completes when shutdown processing finishes, or reports cancellation, timeout,
     /// publication, engine or persistence failure. The finite host budget starts before callback publication.
     /// Acceptance and the queue close even when shutdown cannot finish; held callbacks retain their resources
-    /// until publication completes, and interrupted-turn processing may continue after the wait ends.</returns>
+    /// until publication completes, and interrupted-turn processing may continue after the wait ends.
+    /// Concurrent or repeated callers observe one shared shutdown operation and its retained completion,
+    /// timeout or failure; cancelling a caller's wait does not cancel that operation or reset its budget.</returns>
     Task StopAsync(CancellationToken cancellationToken);
 
     /// <summary>Persists a request once and queues it unless it is a duplicate submission.</summary>
