@@ -486,12 +486,6 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
                 }
                 finally
                 {
-                    lock (lifecycleLock)
-                    {
-                        active.TryRemove(item.TurnId, out _);
-                        WakeWorkers();
-                    }
-
                     item.StopDeadlineMonitor();
                     try
                     {
@@ -500,6 +494,12 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
                     }
                     finally
                     {
+                        lock (lifecycleLock)
+                        {
+                            active.TryRemove(item.TurnId, out _);
+                            WakeWorkers();
+                        }
+
                         item.Dispose();
                     }
                 }

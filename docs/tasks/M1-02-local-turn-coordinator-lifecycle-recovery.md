@@ -706,7 +706,8 @@ and R34 (summary-only):
 | R34 (Previously missed): repeated coordinator owner cancellation returns while selected publication is still held after the first caller abandons its wait | Fixed: repeated cancellation observes the already-selected Owner cause under the lifecycle lock, then awaits its existing publication and invokes idempotent engine cancellation using its own caller token. Deadline/Shutdown winners still suppress direct owner-cancel handling. A held-publication unit regression cancels the first caller's wait, proves a retry remains pending, releases publication and checks one Cancelled event and one engine cancellation. |
 
 Focused verification passed: one owner-retry unit case and two actual-runtime
-SDK contract cases. Then all native gates passed on these changes:
+SDK contract cases. All native gates passed on R32-R34 before the subsequent
+R35 correction:
 `tools/validate.sh build` (Release/format/analyzers, zero warnings/errors),
 `unit` (91/91), `integration` (115/115), `coverage` and negative fixtures,
 `architecture` (6/6), `sdk-contracts` (25/25 plus pinned runtime harness),
@@ -717,3 +718,40 @@ SDK contract cases. Then all native gates passed on these changes:
 thresholds passed. No schema/dependency changes. R1-R31 dispositions remain
 retained. These are implementer results; independent exact-commit review and
 new-HEAD CI remain pending.
+
+## PR review follow-up: R35
+
+Independent review of `a7381b1` found R35 (medium, Previously missed): after
+the durable cancellation terminal event, the worker removed the active entry
+before awaiting `CancellationPublication`. A retry after the first caller
+abandoned its wait could therefore find no active or queued entry and return
+while publication was still held or destined to fail.
+
+Fixed by retaining the active entry until the worker has awaited deadline
+monitor completion and cancellation publication. The entry and owned work item
+are removed/disposed together in `finally`, including on explicit failure;
+the worker slot remains occupied while its cleanup is outstanding. Repeated
+owner cancellation can then await the same publication and issue idempotent
+engine cancellation. A real-SQLite/production-adapter/actual-runtime regression
+holds the owner callback, cancels the first caller's wait, completes successful
+provider inference and observes the durable Cancelled outcome while publication
+is still held. It asserts active tracking remains, a retry stays pending and no
+assistant answer is stored, then releases publication and verifies the retry
+completes.
+
+The independent reviewer confirmed R32/R33 fixed and the reported active
+retry covered by R34, but raised R35. Reviewer's exact-source focused checks for
+`a7381b1` were nine unit, eleven SDK, and five integration cases (25/25),
+including actual-runtime SQLite/provider coverage; no independent edits. The
+R35 regression then passed focused actual-runtime integration (1/1).
+All required native gates then passed on the R35 working tree: Release build
+(zero warnings/errors), unit 91/91, integration 116/116, architecture 6/6,
+SDK contracts 25/25 plus pinned runtime harness, Aspire E2E 3/3, browser E2E
+1/1 and its deliberate failure probe, docs, and coverage fixtures/thresholds.
+Coverage: Application 98.6% lines / 95.4% branches, Infrastructure 92.0% /
+75.0%, Web 98.6% / 77.5%, changed executable lines 95.5%. The first
+integration coverage invocation encountered a transient Coverlet PDB clone
+timeout after all 116 tests passed but emitted no report; the gate correctly
+failed for the missing report. A clean rerun produced the report and passed
+coverage. R1-R34 dispositions remain retained. Independent review of the R35
+correction and new-HEAD CI remain pending.

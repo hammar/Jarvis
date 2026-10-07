@@ -420,6 +420,77 @@ public sealed class LocalTurnCoordinatorTests
         await cancelling.WaitAsync(TimeSpan.FromSeconds(5));
     }
 
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task RepeatedOwnerCancellationWaitsAfterWorkerCompletesBeforePublication()
+    {
+        using var directory = IsolatedDirectory.Create();
+        var clock = new MutableClock(Now);
+        var database = new SqliteDatabase(Path.Combine(directory.Path, "jarvis.db"));
+        await database.InitializeAsync();
+        var store = new SqliteConversationStore(database, clock);
+        await using var provider = await FakeOpenAiProvider.StartAsync();
+        provider.PauseInference = true;
+        var engine = new CopilotAgentEngine(store, new RejectingToolDispatcher(), clock,
+            new CopilotAgentEngineOptions(Path.Combine(directory.Path, "runtime"),
+                new CopilotProviderOptions("fixture-model", new Uri(provider.BaseUrl)), null));
+        await using var coordinator = new CoordinatorScope(CreateCoordinator(store, engine, clock));
+        await coordinator.Coordinator.StartAsync(CancellationToken.None);
+        var conversation = ConversationId.New();
+        var accepted = await coordinator.Coordinator.SubmitAsync(new LocalTurnRequest(
+            conversation, "retry-held-owner-publication", "Hello", RoutingTaskKind.TextConversation),
+            CancellationToken.None);
+        await provider.InferenceStalled.Task.WaitAsync(TimeSpan.FromSeconds(20));
+
+        var active = (System.Collections.IDictionary)typeof(LocalTurnCoordinator)
+            .GetField("active", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .GetValue(coordinator.Coordinator)!;
+        var work = active[accepted.Turn.Id]!;
+        var item = work.GetType().GetProperty("Item")!.GetValue(work)!;
+        var ownerCancellation = (CancellationTokenSource)item.GetType()
+            .GetProperty("Cancellation")!.GetValue(item)!;
+        using var release = new ManualResetEventSlim();
+        var publicationHeld = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var holdPublication = ownerCancellation.Token.Register(() =>
+        {
+            publicationHeld.TrySetResult();
+            if (!release.Wait(TimeSpan.FromSeconds(30)))
+            {
+                throw new TimeoutException("Owner cancellation publication barrier was not released.");
+            }
+        });
+        using var firstCaller = new CancellationTokenSource();
+        var firstCancellation = coordinator.Coordinator.CancelAsync(accepted.Turn.Id, firstCaller.Token).AsTask();
+        try
+        {
+            await publicationHeld.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            firstCaller.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => firstCancellation);
+
+            provider.ContinueInference.TrySetResult();
+            await provider.StreamingResponseWritten.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await WaitForTerminalAsync(store, accepted.Turn.Id);
+            Assert.Equal(TurnStatus.Cancelled, (await store.GetTurnAsync(accepted.Turn.Id, CancellationToken.None))!.Status);
+            Assert.Contains(accepted.Turn.Id, active.Keys.Cast<TurnId>());
+
+            var retry = coordinator.Coordinator.CancelAsync(accepted.Turn.Id, CancellationToken.None).AsTask();
+            Assert.False(retry.IsCompleted);
+            Assert.DoesNotContain(
+                await store.ReadRecentAsync(conversation, 10, CancellationToken.None),
+                message => message.Role == "assistant");
+            Assert.Single(await store.ReadTurnEventsAfterAsync(
+                accepted.Turn.Id, 0, 100, CancellationToken.None),
+                item => item.EventType == nameof(TurnCancelled));
+            release.Set();
+            await retry.WaitAsync(TimeSpan.FromSeconds(10));
+        }
+        finally
+        {
+            provider.ContinueInference.TrySetResult();
+            release.Set();
+        }
+    }
+
     private sealed class BlockingSecretResolver : ISecretResolver
     {
         public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
