@@ -545,6 +545,13 @@ Integration and SDK-contract output directories respectively. After stopping
 that owned validation process, only those three verified untracked
 `bin/Release/net10.0` directories were recreated; unchanged validation then
 passed. No source, durable data, dependency cache or validation gate was
-removed or weakened. Independent exact-commit review and new-revision Linux
-CI remain pending at this recording point. Earlier runtime/process limitations
+removed or weakened. Independent review of exact
+`32923d9e6b98523df9e6f7bc1c42500cef7fa0cd` confirmed R24/R25 fixed,
+retained R1-R23 dispositions and identified no new finding. It independently
+passed 12 focused integration cases and nine adjacent SDK cases; diff
+hygiene passed and it left the tracked tree unchanged. Full native gates
+and coverage are implementer evidence, not independently repeated. Linux
+CI against the new revision remains pending; exhaustive interleavings,
+live Ollama and launched-Web recovery were not verified by that review.
+Earlier runtime/process limitations
 remain; no finding is accepted as a residual risk by the owner.
