@@ -606,6 +606,16 @@ schema/API signature or scope change. Final merged-base native gates passed:
 lines (918/934), 94.2% branches (276/293); Infrastructure measured 92.0%
 lines (2248/2443), 74.7% branches (528/707); changed executable lines
 measured 95.3% (1147/1204). Critical thresholds and negative fixtures passed
-unchanged. Independent exact review and final-HEAD CI remain pending at this
-recording point. No finding is accepted as
-a residual risk by the owner.
+unchanged. Independent review of exact implementation
+`5c222f7ce09db12a6a16a1a19174cbc8209799b8`, against merged parent
+`2a7a34ae314fe49510d655bdc0c552f044137c0d`, confirmed R26 fixed and
+retained all R1-R25 dispositions without an exhaustive re-review. It
+independently passed 19 focused tests twice, including rebuilding the exact
+source and exercising the actual 15-second timeout; diff hygiene passed and
+the tracked tree remained unchanged. The review found no new actionable
+finding. It checked shared ownership, admission closure, independent caller
+wait cancellation, retained timeout/aggregate identity and single engine-stop
+execution. Full native gates remain implementer evidence; final Linux CI,
+exhaustive interleavings, live Ollama and launched-Web recovery remain
+unverified by this review. Final-HEAD CI is pending. No finding is accepted
+as a residual risk by the owner.
