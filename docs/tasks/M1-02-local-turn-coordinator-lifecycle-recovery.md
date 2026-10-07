@@ -754,7 +754,7 @@ integration coverage invocation encountered a transient Coverlet PDB clone
 timeout after all 116 tests passed but emitted no report; the gate correctly
 failed for the missing report. A clean rerun produced the report and passed
 coverage. R1-R34 dispositions remain retained. Independent review of the R35
-correction and new-HEAD CI remain pending.
+correction and new-HEAD CI remained pending at `74691b5`.
 
 The independent review then identified a race in the first R35 regression:
 durable terminal persistence alone did not prove the worker had entered its
@@ -765,4 +765,11 @@ starting the retry. This distinguishes the corrected ordering from the prior
 implementation, which removed active tracking before signaling that barrier.
 The revised focused actual-runtime regression passed (1/1); production code is
 unchanged from the fully validated R35 commit. Independent confirmation of the
-revised barrier and CI on the eventual pushed head remain pending.
+revised barrier followed. Review of `feb9a41` confirmed the barrier occurs on
+the worker's cleanup `StopDeadlineMonitor` call, has no earlier cancellation
+path in this active-turn scenario, and the pre-fix removal-before-stop ordering
+would reliably fail the assertion. The reviewer made no changes and did not run
+a pre-fix mutation. The focused actual-runtime regression passed on the final
+commit (1/1). Native gates above were run against `74691b5`; `feb9a41` changes
+only this regression's synchronization and the review record. CI on the pushed
+head remains pending.
