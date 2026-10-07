@@ -19,6 +19,8 @@ if (profile is "Simulator" or "E2E")
 {
     web.WithEnvironment("JARVIS_CLOUD_ENABLED", "false")
         .WithEnvironment("JARVIS_OLLAMA_BASE_URL", string.Empty)
+        .WithEnvironment("JARVIS_OLLAMA_MODEL", string.Empty)
+        .WithEnvironment("JARVIS_OLLAMA_SECRET_REFERENCE", string.Empty)
         .WithEnvironment("JARVIS_CLOUD_BASE_URL", string.Empty)
         .WithEnvironment("JARVIS_CLOUD_SECRET_REFERENCE", string.Empty)
         .WithEnvironment("JARVIS_HOME_ASSISTANT_BASE_URL", string.Empty)
@@ -41,7 +43,19 @@ if (profile is "Simulator" or "E2E")
 else
 {
     var ollamaEndpoint = RequireEndpoint(builder.Configuration, "JARVIS_OLLAMA_BASE_URL");
-    web.WithEnvironment("JARVIS_OLLAMA_BASE_URL", ollamaEndpoint);
+    var ollamaModel = builder.Configuration["JARVIS_OLLAMA_MODEL"];
+    if (string.IsNullOrWhiteSpace(ollamaModel))
+    {
+        throw new InvalidOperationException("Local and Hybrid profiles require an explicit JARVIS_OLLAMA_MODEL.");
+    }
+
+    web.WithEnvironment("JARVIS_OLLAMA_BASE_URL", ollamaEndpoint)
+        .WithEnvironment("JARVIS_OLLAMA_MODEL", ollamaModel);
+    var localSecretReference = builder.Configuration["JARVIS_OLLAMA_SECRET_REFERENCE"];
+    if (!string.IsNullOrWhiteSpace(localSecretReference))
+    {
+        web.WithEnvironment("JARVIS_OLLAMA_SECRET_REFERENCE", localSecretReference);
+    }
     web.WithEnvironment("JARVIS_CLOUD_ENABLED", profile == "Hybrid" ? "true" : "false");
 
     if (profile == "Hybrid")

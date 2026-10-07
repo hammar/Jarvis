@@ -40,7 +40,9 @@ lines / 85% branches; combined unit+integration first-party runtime at 85% /
 state machine in `AgentEngine/Copilot/CopilotTurnStateMachine.cs` and active
 turn cancellation/runtime lifecycle in `AgentEngine/Copilot/CopilotActiveTurn.cs`,
 and M1 routing/context policy in `Application/Routing/LocalOnlyModelRouter.cs`
-and `Application/Context/ConversationContextBuilder.cs`, at 95% / 90%;
+and `Application/Context/ConversationContextBuilder.cs`, plus M1 bounded local
+turn lifecycle, queue, and recovery in
+`Application/TurnCoordination/LocalTurnCoordinator.cs`, at 95% / 90%;
 changed executable lines at 90%.
 The coverage validator requires each critical source file to exist at its
 exact owned path, so renaming it cannot silently remove the gate. A module with no coverable lines
@@ -131,7 +133,7 @@ authority.
 | --- | --- |
 | Strong application IDs are independent | `IdentifierContractTests` |
 | LocalOnly text cannot change the selected provider or invoke cloud | `RoutingAndContextTests.LocalOnlyRouterKeepsUntrustedEscalationTextOnTheSelectedLocalRoute`, `RoutingAndContextTests.LocalOnlyRouterRejectsCloudModesAndTasksWithoutDowngrading` |
-| Ambiguous, unsupported and invalid route categories fail explicitly | `RoutingAndContextTests.LocalOnlyRouterClarifiesAmbiguousAndEmptyTasksAndRejectsUnsupportedCategories` |
+| Ambiguous categories clarify through a durable owner-facing event; unsupported routes persist a safe limitation | `RoutingAndContextTests.LocalOnlyRouterClarifiesAmbiguousAndEmptyTasksAndRejectsUnsupportedCategories`, `LocalTurnCoordinatorTests.ClarifyingRoutePersistsPromptWithoutInvokingEngine`, `LocalTurnCoordinatorTests.ConflictingRequestIdentityIsRejectedAndRouteRejectionIsTerminal` |
 | Context is bounded, ordered, provenance-labelled and LocalOnly; omitted-history count is explicitly a lower bound when the bounded read detects older rows | `RoutingAndContextTests.ContextBuilderIncludesOrderedRecentHistoryAndLabelsEveryItemLocalOnly`, `ConversationContextBuilderTests.ContextBuilderUsesIsolatedSqliteHistoryAndPreservesOrderProvenanceAndPrivacyLabels` |
 | Unsupported roles, cross-conversation messages and oversized history are excluded | `RoutingAndContextTests.ContextBuilderExcludesUnsupportedRolesCrossConversationAndOversizedHistory` |
 | Prompt estimates include instructions, task, tool catalog, history, serialization and reserve | `RoutingAndContextTests.ContextEstimateIncludesInstructionsTaskToolsSerializationAndReserve` |
@@ -151,6 +153,14 @@ authority.
 | Shared data directories are rejected and database files are private | `SqlitePersistenceTests.DatabaseRejectsSharedDataDirectoryAndRestrictsDatabasePermissions` |
 | Windows data directories reject ACL access for other identities | `SqlitePersistenceTests.WindowsDatabaseRejectsDirectoriesGrantingAccessToOtherUsers` |
 | Turn state/version survive restart and nonterminal recovery reads are bounded | `SqlitePersistenceTests.NonterminalTurnStateAndVersionCanBeRecoveredAfterRestart` |
+| Durable request ID retries return the original turn and conflicting reuse fails after reopening SQLite | `SqlitePersistenceTests.TurnSubmissionIsAtomicAndDeduplicatedAcrossStoreReopen` |
+| Turn completion atomically stores one final assistant message and terminal event | `SqlitePersistenceTests.TerminalCompletionPersistsItsFinalAssistantMessageAtomicallyOnce`, `LocalTurnCoordinatorTests.CoordinatorPersistsOneCompletedAnswerAndReturnsDuplicateRequest` |
+| Coordinator restart interrupts recovered work without replaying inference | `LocalTurnCoordinatorTests.StartupInterruptsRecoveredTurnWithoutCallingInferenceAgain` |
+| The bounded scheduler runs four turns and rejects a 21st queued request without persisting it | `LocalTurnCoordinatorTests.CoordinatorRejectsTwentyFirstQueuedTurnWithoutPersistingIt` |
+| Same-conversation waiters remain inside the 20-item queue bound without starving unrelated conversations | `LocalTurnCoordinatorTests.SameConversationWaitersDoNotStarveOtherConversations`, `LocalTurnCoordinatorTests.SameConversationDeferredTurnsRemainInsideQueueLimit` |
+| The interactive deadline starts at durable acceptance, includes queue/context time, cancels active engine work without misclassifying it as owner cancellation, and prevents expired or stalled work from entering inference | `LocalTurnCoordinatorTests.QueuedTurnThatExceedsItsAcceptedDeadlineIsInterruptedWithoutExecution`, `LocalTurnCoordinatorTests.InteractiveDeadlineCancelsBlockedContextConstruction`, `LocalTurnCoordinatorTests.InteractiveDeadlineIsCheckedAfterUncooperativeContextBuilderReturns`, `LocalTurnCoordinatorTests.InteractiveDeadlineInterruptsActiveEngineTurn`, `CopilotAgentEngineContractTests.AcceptanceDeadlineCancellationPersistsInterruptedRatherThanCancelled`, `CopilotAgentEngineContractTests.DeadlineCancelsStalledProviderAndPersistsOneInterruptedOutcome` |
+| Ambiguous local requests persist an owner-facing clarification without invoking inference | `LocalTurnCoordinatorTests.AmbiguousLocalRequestPersistsClarificationWithoutInvokingTheEngine` |
+| SQLite readiness detects missing or outdated storage without creating a replacement database | `SqlitePersistenceTests.DatabaseReadinessChecksSchemaWithoutCreatingMissingDatabase`, `AspireSimulatorTests.ReadinessReportsDatabaseUnavailableAfterStartup` |
 | Existing default databases are preserved and ambiguous defaults fail closed | `SqlitePersistenceTests.DataDirectoryPreservesLegacyAppHostStateAndRejectsAmbiguousDefaults` |
 | Direct Web startup rejects unsupported profiles before persistence access | `SqliteAndWebSmokeTests.DirectHostRejectsUnsupportedProfilesBeforeOpeningStorage` |
 | Concurrent startup recovers a prepared restore once | `SqlitePersistenceTests.ConcurrentStartupSerializesPreparedRestoreRecovery` |
@@ -158,7 +168,7 @@ authority.
 | Expired conversations with unresolved turns survive retention | `SqlitePersistenceTests.RetentionUsesDefaultAndOverrideWindowsAndKeepsDurableState` |
 | Razor host works without external services | `SqliteAndWebSmokeTests.RazorHostServesTheConfiguredProfileWithoutExternalServices` |
 | Direct test-profile startup requires isolated data | `SqliteAndWebSmokeTests.TestProfileRequiresAnExplicitDataDirectory` |
-| Aspire launches Web and discovers deterministic fakes | `AspireSimulatorTests.SimulatorStartsWebAndDiscoversDeterministicManagedEndpoints` |
+| Aspire configures Web against its controlled OpenAI-compatible simulator and reports database loss after startup | `AspireSimulatorTests.SimulatorStartsWebAndDiscoversDeterministicManagedEndpoints`, `AspireSimulatorTests.ReadinessReportsDatabaseUnavailableAfterStartup` |
 | Local and Hybrid use explicit external endpoint configuration | `ExternalEndpointProfileTests.LocalAndHybridProfilesLaunchWithExplicitExternalEndpointReferences` |
 | Browser reaches actual AppHost Web resource | `BrowserSmokeTests.PlaywrightLoadsTheAspireSimulatorPage` |
 | SDK compatibility uses pinned actual runtime | T01 `--contracts` suite, `sdk-contracts-platform` on Linux/macOS |

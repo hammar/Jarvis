@@ -5,8 +5,14 @@ job, secret-reference, clock, and Home Assistant contracts. Depends only on
 Domain and contains no provider, ASP.NET Core, Aspire, or persistence types.
 
 The M1 `Routing/LocalOnlyModelRouter` applies deterministic local-only
-decisions, and `Context/ConversationContextBuilder` builds bounded,
-provenance-labelled context from `IConversationStore`. Context estimates count
+decisions, `Context/ConversationContextBuilder` builds bounded,
+provenance-labelled context from `IConversationStore`, and
+`TurnCoordination/LocalTurnCoordinator` owns accepted local-turn lifecycle,
+queue limits, cancellation, shutdown, and interrupted-turn recovery. The
+coordinator relies on Application-owned persistence/engine contracts and never
+depends on SQLite, Copilot SDK or ASP.NET Core. It uses SQLite as the durable
+authority through those contracts; queued model work is never replayed after a
+restart. Context estimates count
 instructions, task text, the serialized tool catalog, selected history and
 packet framing, then reserve 20% margin using a labelled estimate of four
 UTF-16 characters per token. These estimates are not provider tokenizer
@@ -21,6 +27,8 @@ is a known lower bound, not a total count: the builder reads only the latest
 row proves that additional older history exists.
 
 Entry points: `PersonalAgent.Application.Contracts`,
-`PersonalAgent.Application.Routing`, and `PersonalAgent.Application.Context`.
+`PersonalAgent.Application.TurnOutcomeContracts`,
+`PersonalAgent.Application.Routing`, `PersonalAgent.Application.Context`, and
+`PersonalAgent.Application.TurnCoordination`.
 Tests:
 `dotnet test tests/PersonalAgent.UnitTests`.

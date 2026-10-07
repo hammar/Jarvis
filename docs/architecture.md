@@ -75,6 +75,29 @@ tokenizer it reports a four-UTF-16-characters-per-token estimate plus a 20%
 reserve, not an exact count. These M1 policies do not implement cloud consent,
 memory retrieval or tool execution.
 
+`LocalTurnCoordinator` is the Application-owned lifecycle boundary for local
+turns. It transactionally accepts the request, user message, durable
+per-conversation request ID and initial event before queueing. SQLite is the
+authority for request deduplication and ordered event replay; the bounded
+in-memory queue is replaceable and never reconstructs model work after restart.
+The coordinator caps execution at four turns globally, serializes turns for
+each conversation, and allows at most 20 queued submissions. Queue overflow is
+explicit. Same-conversation waiters remain queued and do not occupy execution
+workers or release their queue slots; a different conversation can use an
+available worker. The default interactive turn deadline is 120 seconds from
+durable acceptance, including queue wait, routing, context construction, and
+inference; the engine receives only the remaining budget and a separate
+deadline-cancellation token so timeout remains distinct from owner cancellation.
+Trusted host configuration may bound a provider/model override. User cancellation is
+`Cancelled`; host shutdown, deadline expiry, process failure, or uncertain
+cleanup is `Interrupted`. Clarification decisions are persisted
+as terminal `TurnClarificationRequired` events with their safe owner-facing
+message; unsupported routes persist a safe limitation message. Final assistant
+content, terminal state, and terminal event commit atomically. Startup marks
+every persisted nonterminal turn interrupted instead of replaying inference.
+Readiness checks SQLite reachability and the applied schema version separately
+from local provider configuration; model connectivity is not probed.
+
 T04's `CopilotAgentEngine` creates a fresh SDK client/session and dedicated
 runtime/work directory for each turn. It uses empty SDK mode, explicit
 provider configuration, disabled logged-in-user discovery, a sanitized child
@@ -97,8 +120,9 @@ remains a trusted dependency under ADR 0001, not an OS-isolated process.
 
 AppHost owns only processes it launches. The Simulator/E2E profiles start Web
 and deterministic model/HA fixture processes with random managed endpoints.
-They explicitly clear external provider and Home Assistant endpoint/secret
-references for Web rather than forwarding developer credentials.
+Web uses the Aspire-discovered loopback model fixture as its local
+OpenAI-compatible provider and explicitly clears cloud and Home Assistant
+endpoint/secret references rather than forwarding developer credentials.
 Simulator data is persistent beneath the user's application data directory;
 E2E requires a unique, test-owned temporary directory. AppHost never stops or
 deletes external Ollama, Home Assistant, or real developer data. SQLite is a

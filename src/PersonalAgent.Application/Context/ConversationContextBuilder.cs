@@ -61,6 +61,11 @@ public sealed class ConversationContextBuilder : IContextBuilder
         {
             cancellationToken.ThrowIfCancellationRequested();
             var message = recent[index];
+            if (request.CurrentTaskMessageId == message.MessageId)
+            {
+                continue;
+            }
+
             if (!CanInclude(message, request.ConversationId))
             {
                 minimumOmittedHistoryMessages++;

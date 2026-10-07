@@ -18,7 +18,8 @@ public sealed class ExternalEndpointProfileTests
             "Local",
             new Dictionary<string, string>
             {
-                ["JARVIS_OLLAMA_BASE_URL"] = "http://127.0.0.1:11434"
+                ["JARVIS_OLLAMA_BASE_URL"] = "http://127.0.0.1:11434",
+                ["JARVIS_OLLAMA_MODEL"] = "test-local-model"
             });
 
         await VerifyProfileAsync(
@@ -26,6 +27,7 @@ public sealed class ExternalEndpointProfileTests
             new Dictionary<string, string>
             {
                 ["JARVIS_OLLAMA_BASE_URL"] = "http://127.0.0.1:11434",
+                ["JARVIS_OLLAMA_MODEL"] = "test-local-model",
                 ["JARVIS_CLOUD_BASE_URL"] = "https://cloud.example.invalid",
                 ["JARVIS_CLOUD_SECRET_REFERENCE"] = "test-only-cloud-secret-reference"
             });
@@ -39,6 +41,7 @@ public sealed class ExternalEndpointProfileTests
             ["JARVIS_PROFILE"] = Environment.GetEnvironmentVariable("JARVIS_PROFILE"),
             ["JARVIS_DATA_DIR"] = Environment.GetEnvironmentVariable("JARVIS_DATA_DIR"),
             ["JARVIS_OLLAMA_BASE_URL"] = Environment.GetEnvironmentVariable("JARVIS_OLLAMA_BASE_URL"),
+            ["JARVIS_OLLAMA_MODEL"] = Environment.GetEnvironmentVariable("JARVIS_OLLAMA_MODEL"),
             ["JARVIS_CLOUD_BASE_URL"] = Environment.GetEnvironmentVariable("JARVIS_CLOUD_BASE_URL"),
             ["JARVIS_CLOUD_SECRET_REFERENCE"] = Environment.GetEnvironmentVariable("JARVIS_CLOUD_SECRET_REFERENCE")
         };
@@ -50,6 +53,7 @@ public sealed class ExternalEndpointProfileTests
             foreach (var setting in new[]
                      {
                          "JARVIS_OLLAMA_BASE_URL",
+                         "JARVIS_OLLAMA_MODEL",
                          "JARVIS_CLOUD_BASE_URL",
                          "JARVIS_CLOUD_SECRET_REFERENCE"
                      })

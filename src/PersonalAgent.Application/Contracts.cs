@@ -62,6 +62,9 @@ public sealed record AgentToolDefinition(string Name, string InputSchema, bool I
 /// <param name="Tools">The exact host-registered tool catalog for this turn.</param>
 /// <param name="Deadline">Maximum elapsed turn time enforced by the application host.</param>
 /// <param name="MaximumToolCalls">Maximum number of tool calls allowed during this turn.</param>
+/// <param name="RouteReasonCode">Stable host policy reason recorded with the route event.</param>
+/// <param name="HostShutdownToken">Token that requests truthful interruption during graceful host shutdown.</param>
+/// <param name="DeadlineCancellationToken">Token that requests truthful interruption when the accepted turn deadline expires.</param>
 public sealed record AgentTurnRequest(
     TurnId TurnId,
     ProviderKind Provider,
@@ -69,7 +72,10 @@ public sealed record AgentTurnRequest(
     ContextPacket Context,
     IReadOnlyList<AgentToolDefinition> Tools,
     TimeSpan Deadline,
-    int MaximumToolCalls);
+    int MaximumToolCalls,
+    string RouteReasonCode = "explicit_host_provider",
+    CancellationToken HostShutdownToken = default,
+    CancellationToken DeadlineCancellationToken = default);
 
 /// <summary>Reports a terminal engine outcome without treating interruption as success.</summary>
 /// <param name="Status">Terminal application turn status.</param>
@@ -82,7 +88,7 @@ public interface IAgentEngine
 {
     /// <summary>Runs the requested turn and yields events until a terminal event or cancellation.</summary>
     /// <param name="request">Host-authorized provider, context, tools, and turn limits.</param>
-    /// <param name="cancellationToken">Token that stops this turn and its cooperative callbacks.</param>
+    /// <param name="cancellationToken">Caller cancellation token; deadline and host shutdown cancellation have separate provenance on <paramref name="request"/>.</param>
     /// <returns>Events in the order observed by the host.</returns>
     IAsyncEnumerable<AgentEvent> RunTurnAsync(AgentTurnRequest request, CancellationToken cancellationToken);
 
@@ -91,6 +97,13 @@ public interface IAgentEngine
     /// <param name="cancellationToken">Token that bounds the cancellation request.</param>
     /// <returns>A task that completes when the cancellation request is processed.</returns>
     ValueTask CancelAsync(TurnId turnId, CancellationToken cancellationToken);
+
+    /// <summary>Stops an active turn because the application host is shutting down.</summary>
+    /// <remarks>The engine must persist an interrupted outcome rather than treating shutdown as user cancellation.</remarks>
+    /// <param name="turnId">Application-owned turn to stop.</param>
+    /// <param name="cancellationToken">Token that bounds the stop request.</param>
+    /// <returns>A task that completes when the bounded stop request is processed.</returns>
+    ValueTask StopAsync(TurnId turnId, CancellationToken cancellationToken);
 }
 
 /// <summary>Describes an item selected for an inspectable context packet.</summary>
@@ -146,12 +159,139 @@ public sealed record ContextPacket(
 /// <param name="TaskText">Current user task, treated as untrusted text.</param>
 /// <param name="HostInstructions">Host-authored instructions, never derived from model output.</param>
 /// <param name="Tools">Exact host-registered tool definitions for the turn.</param>
+/// <param name="CurrentTaskMessageId">Optional persisted user message excluded from history to avoid duplicate prompt inclusion.</param>
 public sealed record ContextBuildRequest(
     ConversationId ConversationId,
     ProviderKind Provider,
     string TaskText,
     string HostInstructions,
-    IReadOnlyList<AgentToolDefinition> Tools);
+    IReadOnlyList<AgentToolDefinition> Tools,
+    Guid? CurrentTaskMessageId = null);
+
+/// <summary>Contains a host-accepted local turn request and its durable idempotency identity.</summary>
+/// <param name="TurnId">New application turn identifier to persist if this request is new.</param>
+/// <param name="ConversationId">Conversation that owns this request.</param>
+/// <param name="ClientRequestId">Stable client key scoped to the conversation.</param>
+/// <param name="RequestFingerprint">SHA-256 digest of the normalized request fields used to detect conflicting key reuse.</param>
+/// <param name="UserMessageId">Stable message identifier assigned to the request text.</param>
+/// <param name="Text">Bounded, untrusted user text to persist as the turn's user message.</param>
+/// <param name="CreatedAtUtc">UTC acceptance instant.</param>
+public sealed record ConversationTurnSubmission(
+    TurnId TurnId,
+    ConversationId ConversationId,
+    string ClientRequestId,
+    string RequestFingerprint,
+    Guid UserMessageId,
+    string Text,
+    DateTimeOffset CreatedAtUtc);
+
+/// <summary>Describes the durable turn returned by an atomic submission.</summary>
+/// <param name="Turn">The original or newly created application-owned turn.</param>
+/// <param name="UserMessageId">Stable identifier of the persisted user message.</param>
+/// <param name="IsDuplicate">Whether the client request ID already identified this same request.</param>
+public sealed record SubmittedConversationTurn(
+    ConversationTurn Turn,
+    Guid UserMessageId,
+    bool IsDuplicate);
+
+/// <summary>Coordinates durable local turns, bounded execution, event retrieval, and cancellation.</summary>
+public interface ILocalTurnCoordinator
+{
+    /// <summary>Gets whether recovery completed and the coordinator is accepting work.</summary>
+    bool IsReady { get; }
+
+    /// <summary>Starts accepting and executing queued work after interrupted-turn recovery completes.</summary>
+    /// <param name="cancellationToken">Token that cancels startup recovery.</param>
+    /// <returns>A task that completes when recovery and worker startup finish.</returns>
+    Task StartAsync(CancellationToken cancellationToken);
+
+    /// <summary>Stops acceptance, interrupts queued work, and boundedly stops active inference.</summary>
+    /// <param name="cancellationToken">Token that bounds graceful shutdown.</param>
+    /// <returns>A task that completes when shutdown processing finishes.</returns>
+    Task StopAsync(CancellationToken cancellationToken);
+
+    /// <summary>Persists a request once and queues it unless it is a duplicate submission.</summary>
+    /// <param name="request">Host-classified local task and stable client request ID.</param>
+    /// <param name="cancellationToken">Token that cancels validation or persistence before acceptance.</param>
+    /// <returns>The original or newly accepted durable turn.</returns>
+    /// <exception cref="TurnQueueFullException">The bounded queue has no available capacity.</exception>
+    /// <exception cref="TurnRequestConflictException">The request ID was reused with different request content.</exception>
+    ValueTask<SubmittedConversationTurn> SubmitAsync(LocalTurnRequest request, CancellationToken cancellationToken);
+
+    /// <summary>Reads a bounded ordered page of persisted events after an exclusive sequence cursor.</summary>
+    /// <param name="turnId">Turn whose event stream is requested.</param>
+    /// <param name="afterSequence">Exclusive cursor; zero begins at the first event.</param>
+    /// <param name="maximumEvents">Maximum number of events to return.</param>
+    /// <param name="cancellationToken">Token that cancels the read.</param>
+    /// <returns>Events in ascending per-turn sequence order.</returns>
+    ValueTask<IReadOnlyList<PersistedTurnEvent>> ReadEventsAfterAsync(
+        TurnId turnId,
+        long afterSequence,
+        int maximumEvents,
+        CancellationToken cancellationToken);
+
+    /// <summary>Requests bounded user cancellation of a queued or active turn.</summary>
+    /// <param name="turnId">Turn to cancel.</param>
+    /// <param name="cancellationToken">Token that bounds cancellation processing.</param>
+    /// <returns>A task that completes after the request is recorded or the engine has processed it.</returns>
+    ValueTask CancelAsync(TurnId turnId, CancellationToken cancellationToken);
+}
+
+/// <summary>Contains host-owned local turn input; no routing or timeout policy is chosen by model output.</summary>
+/// <param name="ConversationId">Durable conversation that receives the turn.</param>
+/// <param name="ClientRequestId">Stable, non-secret idempotency key, scoped to the conversation.</param>
+/// <param name="Text">Untrusted user text within the local context input bound.</param>
+/// <param name="TaskKind">Host-classified routing category; omitted or ambiguous values clarify safely.</param>
+/// <param name="DeadlineOverride">Optional trusted host override; it is validated against coordinator policy.</param>
+public sealed record LocalTurnRequest(
+    ConversationId ConversationId,
+    string ClientRequestId,
+    string Text,
+    RoutingTaskKind TaskKind = RoutingTaskKind.Ambiguous,
+    TimeSpan? DeadlineOverride = null);
+
+/// <summary>Defines validated per-process limits for local turn acceptance and execution.</summary>
+/// <param name="InteractiveDeadline">Default end-to-end deadline from acceptance through execution; normally 120 seconds.</param>
+/// <param name="MaximumDeadline">Hard upper bound for a trusted provider/model-specific override.</param>
+/// <param name="MaximumActiveTurns">Maximum simultaneously executing turns; M1 uses four.</param>
+/// <param name="MaximumQueuedTurns">Maximum accepted turns waiting for an execution slot; M1 uses 20.</param>
+/// <param name="MaximumRequestIdCharacters">Maximum UTF-16 code units in one client request ID.</param>
+public sealed record LocalTurnCoordinatorOptions(
+    TimeSpan InteractiveDeadline,
+    TimeSpan MaximumDeadline,
+    int MaximumActiveTurns = 4,
+    int MaximumQueuedTurns = 20,
+    int MaximumRequestIdCharacters = 128)
+{
+    /// <summary>Validates finite deadlines and supported scheduler/request bounds.</summary>
+    /// <exception cref="ArgumentOutOfRangeException">A configured limit is outside its safe range.</exception>
+    public void Validate()
+    {
+        if (InteractiveDeadline <= TimeSpan.Zero
+            || MaximumDeadline < InteractiveDeadline
+            || MaximumDeadline > TimeSpan.FromMilliseconds(uint.MaxValue - 1))
+        {
+            throw new ArgumentOutOfRangeException(nameof(InteractiveDeadline), "Turn deadlines must be positive, finite, and bounded.");
+        }
+
+        if (MaximumActiveTurns != 4 || MaximumQueuedTurns != 20)
+        {
+            throw new ArgumentOutOfRangeException(nameof(MaximumActiveTurns), "M1 coordinator capacity is fixed at four active and twenty queued turns.");
+        }
+
+        if (MaximumRequestIdCharacters is < 1 or > 256)
+        {
+            throw new ArgumentOutOfRangeException(nameof(MaximumRequestIdCharacters));
+        }
+    }
+}
+
+/// <summary>Reports that a bounded turn queue cannot accept another distinct request.</summary>
+public sealed class TurnQueueFullException() : InvalidOperationException("The local turn queue is full.");
+
+/// <summary>Reports conflicting reuse of a durable client request ID.</summary>
+public sealed class TurnRequestConflictException()
+    : InvalidOperationException("The client request ID was already used for a different turn request.");
 
 /// <summary>Documents fixed M1 input bounds used by routing and context construction.</summary>
 public static class LocalContextLimits
@@ -469,6 +609,28 @@ public interface IConversationStore
         int maximumMessages,
         CancellationToken cancellationToken);
 
+    /// <summary>Persists a user message, received turn, event, and idempotency key atomically.</summary>
+    /// <param name="submission">Validated bounded input and its stable request identity.</param>
+    /// <param name="cancellationToken">Token that cancels before the transaction commits.</param>
+    /// <returns>The original matching turn or the newly persisted turn.</returns>
+    /// <exception cref="TurnRequestConflictException">A request ID already belongs to different input.</exception>
+    ValueTask<SubmittedConversationTurn> SubmitTurnAsync(
+        ConversationTurnSubmission submission,
+        CancellationToken cancellationToken);
+
+    /// <summary>Looks up a durable client request key and rejects conflicting request-fingerprint reuse.</summary>
+    /// <param name="conversationId">Conversation that scopes the client key.</param>
+    /// <param name="clientRequestId">Stable client idempotency key.</param>
+    /// <param name="requestFingerprint">SHA-256 fingerprint of the normalized submitted request.</param>
+    /// <param name="cancellationToken">Token that cancels the lookup.</param>
+    /// <returns>The previously accepted turn, or null if no matching key exists.</returns>
+    /// <exception cref="TurnRequestConflictException">The key was previously associated with different input.</exception>
+    ValueTask<SubmittedConversationTurn?> FindSubmittedTurnAsync(
+        ConversationId conversationId,
+        string clientRequestId,
+        string requestFingerprint,
+        CancellationToken cancellationToken);
+
     /// <summary>Creates a durable turn in a conversation with the supplied host-owned status.</summary>
     /// <param name="turnId">Stable application turn identifier.</param>
     /// <param name="conversationId">Owning conversation identifier.</param>
@@ -512,6 +674,27 @@ public interface IConversationStore
         TurnStatus status,
         long expectedVersion,
         DateTimeOffset updatedAtUtc,
+        CancellationToken cancellationToken);
+
+    /// <summary>Changes a nonterminal lifecycle state and appends its event in one transaction.</summary>
+    /// <param name="turnId">Turn whose state is changing.</param>
+    /// <param name="status">New nonterminal status.</param>
+    /// <param name="expectedVersion">Current turn version required for the update.</param>
+    /// <param name="updatedAtUtc">UTC state-change instant.</param>
+    /// <param name="eventType">Stable application event type.</param>
+    /// <param name="payloadJson">Structured event data.</param>
+    /// <param name="occurredAtUtc">UTC event observation instant.</param>
+    /// <param name="cancellationToken">Token that cancels before commit.</param>
+    /// <returns>The durably sequenced event.</returns>
+    /// <exception cref="PersistenceConcurrencyException">The expected turn version is stale or terminal.</exception>
+    ValueTask<PersistedTurnEvent> TransitionTurnAndAppendEventAsync(
+        TurnId turnId,
+        TurnStatus status,
+        long expectedVersion,
+        DateTimeOffset updatedAtUtc,
+        string eventType,
+        string payloadJson,
+        DateTimeOffset occurredAtUtc,
         CancellationToken cancellationToken);
 
     /// <summary>Appends an event and atomically assigns its next per-turn sequence number.</summary>
@@ -766,6 +949,18 @@ public interface IClock
 /// <param name="OccurredAtUtc">UTC instant when the host observed the event.</param>
 public abstract record AgentEvent(TurnId TurnId, DateTimeOffset OccurredAtUtc);
 
+/// <summary>Signals that a local request was durably accepted for one application conversation.</summary>
+/// <param name="TurnId">Application-owned turn identifier.</param>
+/// <param name="OccurredAtUtc">UTC acceptance instant.</param>
+public sealed record TurnReceived(TurnId TurnId, DateTimeOffset OccurredAtUtc)
+    : AgentEvent(TurnId, OccurredAtUtc);
+
+/// <summary>Signals that host routing and context selection have started for an accepted turn.</summary>
+/// <param name="TurnId">Application-owned turn identifier.</param>
+/// <param name="OccurredAtUtc">UTC observation instant.</param>
+public sealed record TurnRouting(TurnId TurnId, DateTimeOffset OccurredAtUtc)
+    : AgentEvent(TurnId, OccurredAtUtc);
+
 /// <summary>Signals that a turn was accepted and is starting.</summary>
 /// <param name="TurnId">Application-owned turn identifier.</param>
 /// <param name="OccurredAtUtc">UTC observation instant.</param>
@@ -839,6 +1034,17 @@ public sealed record TurnCompleted(TurnId TurnId, DateTimeOffset OccurredAtUtc)
 /// <param name="ReasonCode">Failure code without private prompts or provider payloads.</param>
 public sealed record TurnFailed(TurnId TurnId, DateTimeOffset OccurredAtUtc, string ReasonCode)
     : AgentEvent(TurnId, OccurredAtUtc);
+
+/// <summary>Requests safe owner clarification before any provider execution begins.</summary>
+/// <param name="TurnId">Application-owned turn identifier.</param>
+/// <param name="OccurredAtUtc">UTC observation instant.</param>
+/// <param name="ReasonCode">Stable routing-policy reason code.</param>
+/// <param name="UserMessage">Safe clarification presented to the owner.</param>
+public sealed record TurnClarificationRequired(
+    TurnId TurnId,
+    DateTimeOffset OccurredAtUtc,
+    string ReasonCode,
+    string UserMessage) : AgentEvent(TurnId, OccurredAtUtc);
 
 /// <summary>Signals a cooperative cancellation outcome.</summary>
 /// <param name="TurnId">Application-owned turn identifier.</param>

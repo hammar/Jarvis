@@ -18,6 +18,7 @@ internal sealed class CopilotActiveTurn
     private int emittedEvents;
     private int emittedTextCharacters;
     private bool cancelledByHost;
+    private bool stoppedForHostShutdown;
     private bool terminal;
     private string? failureCode;
 
@@ -67,6 +68,35 @@ internal sealed class CopilotActiveTurn
         stop.Cancel();
         eventStop.Cancel();
         return true;
+    }
+
+    public bool StopForHostShutdown()
+    {
+        lock (sync)
+        {
+            if (terminal)
+            {
+                return false;
+            }
+
+            cancelledByHost = true;
+            stoppedForHostShutdown = true;
+        }
+
+        stop.Cancel();
+        eventStop.Cancel();
+        return true;
+    }
+
+    public bool StoppedForHostShutdown
+    {
+        get
+        {
+            lock (sync)
+            {
+                return stoppedForHostShutdown;
+            }
+        }
     }
 
     public void CancelByCaller() => _ = CancelByHost();
@@ -121,18 +151,6 @@ internal sealed class CopilotActiveTurn
             : CopilotTurnSignal.ToolBudgetExceeded;
 
     public int IncrementToolCalls() => Interlocked.Increment(ref toolCalls);
-
-    public static CopilotTurnSignal SelectCompletedSignal(
-        bool toolBudgetExceeded,
-        bool cancellationRequested,
-        bool deadlineExceeded) =>
-        toolBudgetExceeded
-            ? CopilotTurnSignal.ToolBudgetExceeded
-            : cancellationRequested
-                ? CopilotTurnSignal.Cancelled
-                : deadlineExceeded
-                    ? CopilotTurnSignal.DeadlineExceeded
-                    : CopilotTurnSignal.Completed;
 
     public async Task AbortAsync(CancellationToken cancellationToken = default)
     {

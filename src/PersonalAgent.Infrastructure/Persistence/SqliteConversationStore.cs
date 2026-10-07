@@ -126,6 +126,224 @@ public sealed class SqliteConversationStore : IConversationStore, IAtomicTurnOut
     }
 
     /// <inheritdoc />
+    public async ValueTask<SubmittedConversationTurn> SubmitTurnAsync(
+        ConversationTurnSubmission submission,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(submission);
+        if (submission.TurnId.Value == Guid.Empty
+            || submission.ConversationId.Value == Guid.Empty
+            || submission.UserMessageId == Guid.Empty)
+        {
+            throw new ArgumentException("Turn, conversation, and message identifiers must be nonempty.", nameof(submission));
+        }
+
+        ArgumentException.ThrowIfNullOrWhiteSpace(submission.ClientRequestId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(submission.RequestFingerprint);
+        if (submission.ClientRequestId.Length > 256
+            || submission.RequestFingerprint.Length != 64
+            || !submission.RequestFingerprint.All(Uri.IsHexDigit))
+        {
+            throw new ArgumentException("The request identity or SHA-256 fingerprint is invalid.", nameof(submission));
+        }
+
+        ArgumentException.ThrowIfNullOrWhiteSpace(submission.Text);
+        if (submission.Text.Length > 8_000)
+        {
+            throw new ArgumentOutOfRangeException(nameof(submission), "Turn text exceeds the fixed local input limit.");
+        }
+
+        var createdAtUtc = submission.CreatedAtUtc.ToUniversalTime();
+        var createdAt = SqliteValue.Utc(createdAtUtc);
+        await using var connection = await database.OpenConnectionWithDefaultTimeoutAsync(1, cancellationToken);
+        await using var transaction = await SqliteDatabase.BeginImmediateTransactionAsync(connection, cancellationToken);
+
+        await using (var existing = connection.CreateCommand())
+        {
+            existing.Transaction = transaction;
+            existing.CommandText = """
+                SELECT t.id, t.conversation_id, t.status, t.created_at_utc, t.updated_at_utc,
+                    t.version, t.request_fingerprint, m.message_id
+                FROM turns t
+                LEFT JOIN messages m ON m.turn_id = t.id AND m.role = 'user'
+                WHERE t.conversation_id = $conversation_id AND t.client_request_id = $request_id;
+                """;
+            existing.Parameters.AddWithValue("$conversation_id", SqliteValue.Guid(submission.ConversationId.Value));
+            existing.Parameters.AddWithValue("$request_id", submission.ClientRequestId);
+            await using var reader = await existing.ExecuteReaderAsync(cancellationToken);
+            if (await reader.ReadAsync(cancellationToken))
+            {
+                var fingerprint = reader.IsDBNull(6) ? null : reader.GetString(6);
+                if (!string.Equals(fingerprint, submission.RequestFingerprint, StringComparison.Ordinal))
+                {
+                    throw new TurnRequestConflictException();
+                }
+
+                if (reader.IsDBNull(7)
+                    || !Enum.TryParse<TurnStatus>(reader.GetString(2), ignoreCase: false, out var existingStatus))
+                {
+                    throw new InvalidDataException("The durable request identity has no valid user message or turn status.");
+                }
+
+                var result = new SubmittedConversationTurn(
+                    new ConversationTurn(
+                        new TurnId(Guid.Parse(reader.GetString(0))),
+                        new ConversationId(Guid.Parse(reader.GetString(1))),
+                        existingStatus,
+                        SqliteValue.DateTimeOffset(reader.GetString(3)),
+                        SqliteValue.DateTimeOffset(reader.GetString(4)),
+                        reader.GetInt64(5)),
+                    Guid.Parse(reader.GetString(7)),
+                    IsDuplicate: true);
+                await reader.DisposeAsync();
+                await transaction.CommitAsync(cancellationToken);
+                return result;
+            }
+        }
+
+        await using (var conversation = connection.CreateCommand())
+        {
+            conversation.Transaction = transaction;
+            conversation.CommandText = """
+                INSERT INTO conversations (id, owner_id, created_at_utc, updated_at_utc)
+                VALUES ($id, 'owner', $created, $created)
+                ON CONFLICT(id) DO UPDATE SET updated_at_utc =
+                    CASE WHEN excluded.updated_at_utc > conversations.updated_at_utc
+                         THEN excluded.updated_at_utc ELSE conversations.updated_at_utc END;
+                """;
+            conversation.Parameters.AddWithValue("$id", SqliteValue.Guid(submission.ConversationId.Value));
+            conversation.Parameters.AddWithValue("$created", createdAt);
+            await conversation.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await using (var insertTurn = connection.CreateCommand())
+        {
+            insertTurn.Transaction = transaction;
+            insertTurn.CommandText = """
+                INSERT INTO turns (
+                    id, conversation_id, status, created_at_utc, updated_at_utc, version,
+                    client_request_id, request_fingerprint)
+                VALUES ($id, $conversation_id, 'Received', $created, $created, 1, $request_id, $fingerprint);
+                """;
+            insertTurn.Parameters.AddWithValue("$id", SqliteValue.Guid(submission.TurnId.Value));
+            insertTurn.Parameters.AddWithValue("$conversation_id", SqliteValue.Guid(submission.ConversationId.Value));
+            insertTurn.Parameters.AddWithValue("$created", createdAt);
+            insertTurn.Parameters.AddWithValue("$request_id", submission.ClientRequestId);
+            insertTurn.Parameters.AddWithValue("$fingerprint", submission.RequestFingerprint);
+            await insertTurn.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        long messageSequence;
+        await using (var nextSequence = connection.CreateCommand())
+        {
+            nextSequence.Transaction = transaction;
+            nextSequence.CommandText = "SELECT COALESCE(MAX(sequence), 0) + 1 FROM messages WHERE conversation_id = $id;";
+            nextSequence.Parameters.AddWithValue("$id", SqliteValue.Guid(submission.ConversationId.Value));
+            messageSequence = Convert.ToInt64(
+                await nextSequence.ExecuteScalarAsync(cancellationToken),
+                System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        await using (var insertMessage = connection.CreateCommand())
+        {
+            insertMessage.Transaction = transaction;
+            insertMessage.CommandText = """
+                INSERT INTO messages (message_id, conversation_id, turn_id, sequence, role, content, created_at_utc)
+                VALUES ($message_id, $conversation_id, $turn_id, $sequence, 'user', $content, $created);
+                """;
+            insertMessage.Parameters.AddWithValue("$message_id", SqliteValue.Guid(submission.UserMessageId));
+            insertMessage.Parameters.AddWithValue("$conversation_id", SqliteValue.Guid(submission.ConversationId.Value));
+            insertMessage.Parameters.AddWithValue("$turn_id", SqliteValue.Guid(submission.TurnId.Value));
+            insertMessage.Parameters.AddWithValue("$sequence", messageSequence);
+            insertMessage.Parameters.AddWithValue("$content", submission.Text);
+            insertMessage.Parameters.AddWithValue("$created", createdAt);
+            await insertMessage.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        var received = new TurnReceived(submission.TurnId, createdAtUtc);
+        await AppendTurnEventAsync(
+            connection,
+            transaction,
+            submission.TurnId,
+            nameof(TurnReceived),
+            JsonSerializer.Serialize(received),
+            createdAtUtc,
+            cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+        return new SubmittedConversationTurn(
+            new ConversationTurn(
+                submission.TurnId,
+                submission.ConversationId,
+                TurnStatus.Received,
+                createdAtUtc,
+                createdAtUtc,
+                1),
+            submission.UserMessageId,
+            IsDuplicate: false);
+    }
+
+    /// <inheritdoc />
+    public async ValueTask<SubmittedConversationTurn?> FindSubmittedTurnAsync(
+        ConversationId conversationId,
+        string clientRequestId,
+        string requestFingerprint,
+        CancellationToken cancellationToken)
+    {
+        if (conversationId.Value == Guid.Empty)
+        {
+            throw new ArgumentException("A nonempty conversation identifier is required.", nameof(conversationId));
+        }
+
+        ArgumentException.ThrowIfNullOrWhiteSpace(clientRequestId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(requestFingerprint);
+        if (clientRequestId.Length > 256
+            || requestFingerprint.Length != 64
+            || !requestFingerprint.All(Uri.IsHexDigit))
+        {
+            throw new ArgumentException("The request identity or SHA-256 fingerprint is invalid.");
+        }
+
+        await using var connection = await database.OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT t.id, t.conversation_id, t.status, t.created_at_utc, t.updated_at_utc,
+                t.version, t.request_fingerprint, m.message_id
+            FROM turns t
+            LEFT JOIN messages m ON m.turn_id = t.id AND m.role = 'user'
+            WHERE t.conversation_id = $conversation_id AND t.client_request_id = $request_id;
+            """;
+        command.Parameters.AddWithValue("$conversation_id", SqliteValue.Guid(conversationId.Value));
+        command.Parameters.AddWithValue("$request_id", clientRequestId);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return null;
+        }
+
+        if (!string.Equals(reader.GetString(6), requestFingerprint, StringComparison.Ordinal))
+        {
+            throw new TurnRequestConflictException();
+        }
+
+        if (reader.IsDBNull(7)
+            || !Enum.TryParse<TurnStatus>(reader.GetString(2), ignoreCase: false, out var status))
+        {
+            throw new InvalidDataException("The durable request identity has no valid user message or turn status.");
+        }
+
+        return new SubmittedConversationTurn(
+            new ConversationTurn(
+                new TurnId(Guid.Parse(reader.GetString(0))),
+                new ConversationId(Guid.Parse(reader.GetString(1))),
+                status,
+                SqliteValue.DateTimeOffset(reader.GetString(3)),
+                SqliteValue.DateTimeOffset(reader.GetString(4)),
+                reader.GetInt64(5)),
+            Guid.Parse(reader.GetString(7)),
+            IsDuplicate: true);
+    }
+
+    /// <inheritdoc />
     public async ValueTask<ConversationTurn> CreateTurnAsync(
         TurnId turnId,
         ConversationId conversationId,
@@ -303,6 +521,81 @@ public sealed class SqliteConversationStore : IConversationStore, IAtomicTurnOut
     }
 
     /// <inheritdoc />
+    public async ValueTask<PersistedTurnEvent> TransitionTurnAndAppendEventAsync(
+        TurnId turnId,
+        TurnStatus status,
+        long expectedVersion,
+        DateTimeOffset updatedAtUtc,
+        string eventType,
+        string payloadJson,
+        DateTimeOffset occurredAtUtc,
+        CancellationToken cancellationToken)
+    {
+        if (status is not (TurnStatus.Routing or TurnStatus.ContextReview or TurnStatus.Running or TurnStatus.WaitingForApproval))
+        {
+            throw new ArgumentOutOfRangeException(nameof(status), "A nonterminal turn lifecycle state is required.");
+        }
+
+        if (expectedVersion < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(expectedVersion));
+        }
+
+        ValidateTurnEvent(eventType, payloadJson);
+        await using var connection = await database.OpenConnectionWithDefaultTimeoutAsync(1, cancellationToken);
+        await using var transaction = await SqliteDatabase.BeginImmediateTransactionAsync(connection, cancellationToken);
+        TurnStatus currentStatus;
+        await using (var read = connection.CreateCommand())
+        {
+            read.Transaction = transaction;
+            read.CommandText = "SELECT status FROM turns WHERE id = $id AND version = $version;";
+            read.Parameters.AddWithValue("$id", SqliteValue.Guid(turnId.Value));
+            read.Parameters.AddWithValue("$version", expectedVersion);
+            var value = (string?)await read.ExecuteScalarAsync(cancellationToken);
+            if (!Enum.TryParse(value, ignoreCase: false, out currentStatus))
+            {
+                throw new PersistenceConcurrencyException("The conversation turn changed or no longer exists.");
+            }
+        }
+
+        if (!CanTransition(currentStatus, status))
+        {
+            throw new PersistenceConcurrencyException("The requested conversation turn state transition is not allowed.");
+        }
+
+        await using (var update = connection.CreateCommand())
+        {
+            update.Transaction = transaction;
+            update.CommandText = """
+                UPDATE turns SET status = $status,
+                    updated_at_utc = CASE WHEN updated_at_utc < $updated THEN $updated ELSE updated_at_utc END,
+                    version = version + 1
+                WHERE id = $id AND version = $version AND status = $current;
+                """;
+            update.Parameters.AddWithValue("$status", status.ToString());
+            update.Parameters.AddWithValue("$updated", SqliteValue.Utc(updatedAtUtc));
+            update.Parameters.AddWithValue("$id", SqliteValue.Guid(turnId.Value));
+            update.Parameters.AddWithValue("$version", expectedVersion);
+            update.Parameters.AddWithValue("$current", currentStatus.ToString());
+            if (await update.ExecuteNonQueryAsync(cancellationToken) != 1)
+            {
+                throw new PersistenceConcurrencyException("The conversation turn changed or no longer exists.");
+            }
+        }
+
+        var persisted = await AppendTurnEventAsync(
+            connection,
+            transaction,
+            turnId,
+            eventType,
+            payloadJson,
+            occurredAtUtc,
+            cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+        return persisted;
+    }
+
+    /// <inheritdoc />
     public async ValueTask<PersistedTurnEvent> AppendTurnEventAsync(
         TurnId turnId,
         string eventType,
@@ -334,7 +627,8 @@ public sealed class SqliteConversationStore : IConversationStore, IAtomicTurnOut
         string eventType,
         string payloadJson,
         DateTimeOffset occurredAtUtc,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        ConversationMessage? finalAssistantMessage = null)
     {
         if (status is not (TurnStatus.Completed or TurnStatus.Failed or TurnStatus.Cancelled or TurnStatus.Interrupted))
         {
@@ -347,6 +641,18 @@ public sealed class SqliteConversationStore : IConversationStore, IAtomicTurnOut
         }
 
         ValidateTurnEvent(eventType, payloadJson);
+        if (finalAssistantMessage is not null
+            && (status is not (TurnStatus.Completed or TurnStatus.Failed)
+                || finalAssistantMessage.Role != "assistant"
+                || finalAssistantMessage.MessageId == Guid.Empty
+                || string.IsNullOrWhiteSpace(finalAssistantMessage.Content)
+                || finalAssistantMessage.Content.Length > 1_000_000))
+        {
+            throw new ArgumentException(
+                "A completed or failed turn may persist one bounded nonempty assistant message.",
+                nameof(finalAssistantMessage));
+        }
+
         await using var connection = await database.OpenConnectionWithDefaultTimeoutAsync(1, cancellationToken);
         await using var transaction = await SqliteDatabase.BeginImmediateTransactionAsync(connection, cancellationToken);
         await using (var update = connection.CreateCommand())
@@ -390,6 +696,16 @@ public sealed class SqliteConversationStore : IConversationStore, IAtomicTurnOut
             payloadJson,
             occurredAtUtc,
             cancellationToken);
+        if (finalAssistantMessage is not null)
+        {
+            await AppendFinalAssistantMessageAsync(
+                connection,
+                transaction,
+                turnId,
+                finalAssistantMessage,
+                cancellationToken);
+        }
+
         await transaction.CommitAsync(cancellationToken);
         return persisted;
     }
@@ -464,6 +780,66 @@ public sealed class SqliteConversationStore : IConversationStore, IAtomicTurnOut
             occurredAtUtc.ToUniversalTime());
     }
 
+    private static async ValueTask AppendFinalAssistantMessageAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        TurnId turnId,
+        ConversationMessage message,
+        CancellationToken cancellationToken)
+    {
+        Guid conversationId;
+        await using (var turn = connection.CreateCommand())
+        {
+            turn.Transaction = transaction;
+            turn.CommandText = "SELECT conversation_id FROM turns WHERE id = $id;";
+            turn.Parameters.AddWithValue("$id", SqliteValue.Guid(turnId.Value));
+            var value = (string?)await turn.ExecuteScalarAsync(cancellationToken);
+            if (!Guid.TryParse(value, out conversationId) || conversationId != message.ConversationId.Value)
+            {
+                throw new ArgumentException("The final assistant message must belong to the completed turn's conversation.");
+            }
+        }
+
+        long sequence;
+        await using (var nextSequence = connection.CreateCommand())
+        {
+            nextSequence.Transaction = transaction;
+            nextSequence.CommandText = "SELECT COALESCE(MAX(sequence), 0) + 1 FROM messages WHERE conversation_id = $id;";
+            nextSequence.Parameters.AddWithValue("$id", SqliteValue.Guid(conversationId));
+            sequence = Convert.ToInt64(
+                await nextSequence.ExecuteScalarAsync(cancellationToken),
+                System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        var createdAt = SqliteValue.Utc(message.CreatedAtUtc);
+        await using (var insert = connection.CreateCommand())
+        {
+            insert.Transaction = transaction;
+            insert.CommandText = """
+                INSERT INTO messages (message_id, conversation_id, turn_id, sequence, role, content, created_at_utc)
+                VALUES ($message_id, $conversation_id, $turn_id, $sequence, 'assistant', $content, $created_at);
+                """;
+            insert.Parameters.AddWithValue("$message_id", SqliteValue.Guid(message.MessageId));
+            insert.Parameters.AddWithValue("$conversation_id", SqliteValue.Guid(conversationId));
+            insert.Parameters.AddWithValue("$turn_id", SqliteValue.Guid(turnId.Value));
+            insert.Parameters.AddWithValue("$sequence", sequence);
+            insert.Parameters.AddWithValue("$content", message.Content);
+            insert.Parameters.AddWithValue("$created_at", createdAt);
+            await insert.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await using var updateConversation = connection.CreateCommand();
+        updateConversation.Transaction = transaction;
+        updateConversation.CommandText = """
+            UPDATE conversations SET updated_at_utc =
+                CASE WHEN updated_at_utc < $updated THEN $updated ELSE updated_at_utc END
+            WHERE id = $id;
+            """;
+        updateConversation.Parameters.AddWithValue("$updated", createdAt);
+        updateConversation.Parameters.AddWithValue("$id", SqliteValue.Guid(conversationId));
+        await updateConversation.ExecuteNonQueryAsync(cancellationToken);
+    }
+
     /// <inheritdoc />
     public async ValueTask<IReadOnlyList<PersistedTurnEvent>> ReadTurnEventsAfterAsync(
         TurnId turnId,
@@ -518,4 +894,15 @@ public sealed class SqliteConversationStore : IConversationStore, IAtomicTurnOut
             SqliteValue.DateTimeOffset(reader.GetString(3)),
             SqliteValue.DateTimeOffset(reader.GetString(4)),
             reader.GetInt64(5));
+
+    private static bool CanTransition(TurnStatus current, TurnStatus next) =>
+        (current, next) switch
+        {
+            (TurnStatus.Received, TurnStatus.Routing) => true,
+            (TurnStatus.Routing, TurnStatus.ContextReview or TurnStatus.Running) => true,
+            (TurnStatus.ContextReview, TurnStatus.Routing or TurnStatus.Running) => true,
+            (TurnStatus.Running, TurnStatus.WaitingForApproval) => true,
+            (TurnStatus.WaitingForApproval, TurnStatus.Running) => true,
+            _ => false
+        };
 }

@@ -51,7 +51,7 @@ public sealed class SqliteAndWebSmokeTests
         using var data = IsolatedDirectory.Create();
         await using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(web =>
         {
-            web.UseSetting("JARVIS_PROFILE", "Simulator");
+            web.UseSetting("JARVIS_PROFILE", "Local");
             web.UseSetting("JARVIS_DATA_DIR", data.Path);
         });
         using var client = factory.CreateClient();
@@ -60,7 +60,7 @@ public sealed class SqliteAndWebSmokeTests
         var html = await response.Content.ReadAsStringAsync();
 
         response.EnsureSuccessStatusCode();
-        Assert.Contains("Running the Simulator profile.", html, StringComparison.Ordinal);
+        Assert.Contains("Running the Local profile.", html, StringComparison.Ordinal);
     }
 
     [Fact]
