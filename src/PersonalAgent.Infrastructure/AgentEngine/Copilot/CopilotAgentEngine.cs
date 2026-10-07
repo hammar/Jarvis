@@ -384,13 +384,19 @@ public sealed class CopilotAgentEngine : IAgentEngine
                     "event_persistence_failed");
             }
 
-            active.MarkTerminal();
+            var hostCancellationWonTerminal = active.MarkTerminal();
             if (terminalStatus == TurnStatus.Completed)
             {
                 var signal = GetCancellationSignal();
                 if (active.FailureCode is not null)
                 {
                     signal = active.GetFailureSignal();
+                }
+                else if (hostCancellationWonTerminal && signal == CopilotTurnSignal.Completed)
+                {
+                    signal = active.StoppedForHostShutdown
+                        ? CopilotTurnSignal.HostShutdown
+                        : CopilotTurnSignal.Cancelled;
                 }
 
                 (terminalStatus, terminalEvent) = CopilotTurnStateMachine.CreateTerminalOutcome(

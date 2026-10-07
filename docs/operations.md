@@ -22,9 +22,11 @@ During graceful shutdown the coordinator stops accepting work, interrupts
 queued turns, and asks the engine to stop active turns within a bounded
 deadline. Persistence or shutdown timeout failures are surfaced and make
 readiness unavailable; shutdown never reports uncertain work as completed.
-The 15-second shutdown budget begins before asynchronous cancellation callback
-publication. Acceptance and the queue close first; held callbacks do not hold
-the lifecycle lock or block readiness. Timeout or caller cancellation ends the
+The shared cleanup operation starts its 15-second shutdown budget before it
+awaits cancellation callback publication; synchronous cause selection and
+asynchronous publication scheduling happen first. Acceptance and the queue
+close; held callbacks do not hold the lifecycle lock or block readiness.
+Timeout or caller cancellation ends the
 shutdown wait explicitly, not the owned cleanup tasks. Resources used by a
 held callback stay alive until it finishes; do not treat a returned timeout as
 proof that runtime cleanup completed. Owner cancellation likewise bounds its

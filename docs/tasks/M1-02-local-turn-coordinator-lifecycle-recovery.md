@@ -693,3 +693,27 @@ Its search of Unit tests found remaining yields only in bounded in-memory
 state/GC loops, outside R31's SQLite polling scope. It did not independently
 rerun integration; 113/113 and docs are implementer evidence. Final-HEAD CI
 is pending. This focused review is not exhaustive.
+
+## PR review follow-up: R32-R34
+
+The review of `77f8a3b` raised R32 (low, summary-only), R33 (high, inline)
+and R34 (summary-only):
+
+| Finding | Disposition and evidence |
+| --- | --- |
+| R32 (low): XML/operations text overstates shutdown budget start | Fixed: contract XML and operations docs now say cause selection/publication scheduling precede the shared cleanup operation's finite budget; the budget starts before it awaits cancellation publication, matching architecture docs. |
+| R33 (high): direct engine cancellation can win the terminal lock yet successful inference persists Completed before cancellation token observers run | Fixed: final terminal selection now uses the `MarkTerminal()` cancellation snapshot when no callback signal has arrived, mapping the already-selected host shutdown or owner cancellation. A barrier-controlled actual-runtime SDK contract for direct `CancelAsync` and `StopAsync` omits coordinator cause delegates, holds the cancellation token observer before engine observers, completes a successful provider response in that interval, then verifies exactly one Cancelled/host_shutdown Interrupted outcome and no completed event/final assistant message. |
+| R34 (Previously missed): repeated coordinator owner cancellation returns while selected publication is still held after the first caller abandons its wait | Fixed: repeated cancellation observes the already-selected Owner cause under the lifecycle lock, then awaits its existing publication and invokes idempotent engine cancellation using its own caller token. Deadline/Shutdown winners still suppress direct owner-cancel handling. A held-publication unit regression cancels the first caller's wait, proves a retry remains pending, releases publication and checks one Cancelled event and one engine cancellation. |
+
+Focused verification passed: one owner-retry unit case and two actual-runtime
+SDK contract cases. Then all native gates passed on these changes:
+`tools/validate.sh build` (Release/format/analyzers, zero warnings/errors),
+`unit` (91/91), `integration` (115/115), `coverage` and negative fixtures,
+`architecture` (6/6), `sdk-contracts` (25/25 plus pinned runtime harness),
+`aspire-e2e` (3/3), `browser-e2e` (1/1 plus deliberate failure probe), and
+`docs`. Application measured 98.3% lines (918/934), 94.3% branches
+(280/297); Infrastructure measured 92.0% lines (2252/2447), 75.0% branches
+(554/739); changed executable lines 95.3% (1151/1208). All existing coverage
+thresholds passed. No schema/dependency changes. R1-R31 dispositions remain
+retained. These are implementer results; independent exact-commit review and
+new-HEAD CI remain pending.

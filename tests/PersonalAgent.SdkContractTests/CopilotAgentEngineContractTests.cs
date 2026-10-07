@@ -662,6 +662,84 @@ public sealed class CopilotAgentEngineContractTests
         Assert.Equal(TurnStatus.Cancelled, (await store.GetTurnAsync(turnId, CancellationToken.None))?.Status);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("Category", "SdkContract")]
+    public async Task DirectCancellationWinningTerminalLockPreventsCompletionBeforeTokenCallbacks(bool shutdown)
+    {
+        using var data = IsolatedDirectory.Create();
+        using var databaseFile = IsolatedDatabaseFile.Create();
+        var store = new SqliteConversationStore(await CreateDatabaseAsync(databaseFile.Path), new TestClock());
+        await using var provider = await FakeOpenAiProvider.StartAsync();
+        provider.PauseInference = true;
+        var engine = CreateEngine(store, provider.BaseUrl, provider.BaseUrl, Path.Combine(data.Path, "runtime"));
+        var turnId = await CreateTurnAsync(store);
+        var request = CreateRequest(turnId, ProviderKind.Local, "direct cancellation race");
+        var execution = CollectAsync(engine.RunTurnAsync(request, CancellationToken.None));
+        await provider.InferenceStalled.Task.WaitAsync(TimeSpan.FromSeconds(20));
+
+        var activeTurns = (System.Collections.IDictionary)typeof(CopilotAgentEngine)
+            .GetField("activeTurns", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .GetValue(engine)!;
+        var active = activeTurns[turnId]!;
+        var token = (CancellationToken)active.GetType().GetProperty("CancellationToken")!.GetValue(active)!;
+        using var release = new ManualResetEventSlim();
+        var publicationHeld = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var holdBeforeObserver = token.Register(() =>
+        {
+            publicationHeld.TrySetResult();
+            if (!release.Wait(TimeSpan.FromSeconds(30)))
+            {
+                throw new TimeoutException("Direct cancellation callback barrier was not released.");
+            }
+        });
+        var cancelling = Task.Run(async () =>
+        {
+            if (shutdown)
+            {
+                await engine.StopAsync(turnId, CancellationToken.None);
+            }
+            else
+            {
+                await engine.CancelAsync(turnId, CancellationToken.None);
+            }
+        });
+
+        try
+        {
+            await publicationHeld.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            provider.ContinueInference.TrySetResult();
+            await provider.StreamingResponseWritten.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            var events = await execution.WaitAsync(TimeSpan.FromSeconds(20));
+
+            Assert.DoesNotContain(events, item => item is TurnCompleted);
+            if (shutdown)
+            {
+                Assert.Single(events.OfType<TurnInterrupted>());
+                Assert.Equal("host_shutdown", Assert.Single(events.OfType<TurnInterrupted>()).ReasonCode);
+                Assert.Equal(TurnStatus.Interrupted, (await store.GetTurnAsync(turnId, CancellationToken.None))!.Status);
+            }
+            else
+            {
+                Assert.Single(events.OfType<TurnCancelled>());
+                Assert.Equal(TurnStatus.Cancelled, (await store.GetTurnAsync(turnId, CancellationToken.None))!.Status);
+            }
+            Assert.DoesNotContain(
+                await store.ReadRecentAsync((await store.GetTurnAsync(turnId, CancellationToken.None))!.ConversationId,
+                    10, CancellationToken.None),
+                message => message.Role == "assistant");
+            Assert.False(cancelling.IsCompleted);
+        }
+        finally
+        {
+            provider.ContinueInference.TrySetResult();
+            release.Set();
+        }
+
+        await cancelling.WaitAsync(TimeSpan.FromSeconds(10));
+    }
+
     [Fact]
     [Trait("Category", "SdkContract")]
     public async Task RuntimeProcessCrashBecomesInterruptedAndNextTurnStartsFreshRuntime()

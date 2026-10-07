@@ -230,7 +230,8 @@ public interface ILocalTurnCoordinator
     /// <summary>Stops acceptance, interrupts queued work, and boundedly stops active inference.</summary>
     /// <param name="cancellationToken">Token that bounds graceful shutdown.</param>
     /// <returns>A task that completes when shutdown processing finishes, or reports cancellation, timeout,
-    /// publication, engine or persistence failure. The finite host budget starts before callback publication.
+    /// publication, engine or persistence failure. The shared cleanup operation starts its finite host budget
+    /// before awaiting cancellation publication; cause selection and publication scheduling happen first.
     /// Acceptance and the queue close even when shutdown cannot finish; held callbacks retain their resources
     /// until publication completes, and interrupted-turn processing may continue after the wait ends.
     /// Concurrent or repeated callers observe one shared shutdown operation and its retained completion,
@@ -262,7 +263,9 @@ public interface ILocalTurnCoordinator
     /// <param name="cancellationToken">Token that bounds cancellation processing.</param>
     /// <returns>A task that completes after publication and pending cleanup or engine cancellation, or reports
     /// caller cancellation or publication/persistence failure. Cancelling the wait does not undo the selected
-    /// owner cause; its publication and durable pending cleanup continue independently.</returns>
+    /// owner cause; its publication and durable pending cleanup continue independently. Repeated requests after
+    /// Owner won await that same publication and active engine cancellation; a losing Deadline or Shutdown cause
+    /// is not reclassified as owner cancellation.</returns>
     ValueTask CancelAsync(TurnId turnId, CancellationToken cancellationToken);
 }
 

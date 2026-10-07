@@ -383,6 +383,7 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
         ActiveWork? running;
         WorkItem? waiting;
         bool ownerWon;
+        bool ownerSelected;
         lock (lifecycleLock)
         {
             active.TryGetValue(turnId, out running);
@@ -390,11 +391,12 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
                 ? pending
                 : null;
             ownerWon = (running?.Item ?? waiting)?.CancelOwner() ?? false;
+            ownerSelected = ownerWon || running?.Item.CancellationCause == CancellationCause.Owner;
         }
 
         if (running is not null)
         {
-            if (ownerWon)
+            if (ownerSelected)
             {
                 await running.Item.CancellationPublication.WaitAsync(cancellationToken);
                 await engine.CancelAsync(turnId, cancellationToken).AsTask().WaitAsync(cancellationToken);

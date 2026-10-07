@@ -1185,6 +1185,58 @@ public sealed class LocalTurnCoordinatorTests
 
     [Fact]
     [Trait("Category", "Unit")]
+    public async Task RepeatedOwnerCancellationWaitsForHeldPublicationAfterFirstCallerAbandonsWait()
+    {
+        var store = new InMemoryConversationStore();
+        var engine = new ControlledEngine(store, block: true);
+        await using var scope = CreateCoordinator(store, engine);
+        await scope.Coordinator.StartAsync(CancellationToken.None);
+        var submitted = await scope.Coordinator.SubmitAsync(Request(), CancellationToken.None);
+        await engine.WaitForTurnStartedAsync(submitted.Turn.Id);
+
+        var active = (System.Collections.IDictionary)typeof(LocalTurnCoordinator)
+            .GetField("active", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(scope.Coordinator)!;
+        var work = active[submitted.Turn.Id]!;
+        var item = work.GetType().GetProperty("Item")!.GetValue(work)!;
+        var source = (CancellationTokenSource)item.GetType()
+            .GetProperty("Cancellation")!.GetValue(item)!;
+        using var release = new ManualResetEventSlim();
+        var publicationHeld = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var barrier = source.Token.Register(() =>
+        {
+            publicationHeld.TrySetResult();
+            if (!release.Wait(TimeSpan.FromSeconds(30)))
+            {
+                throw new TimeoutException("Owner cancellation publication barrier was not released.");
+            }
+        });
+        using var firstCaller = new CancellationTokenSource();
+        try
+        {
+            var first = scope.Coordinator.CancelAsync(submitted.Turn.Id, firstCaller.Token).AsTask();
+            await publicationHeld.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            firstCaller.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => first);
+
+            var retry = scope.Coordinator.CancelAsync(submitted.Turn.Id, CancellationToken.None).AsTask();
+            Assert.False(retry.IsCompleted);
+            release.Set();
+            await retry.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        finally
+        {
+            release.Set();
+        }
+
+        await WaitForTerminalAsync(store, submitted.Turn.Id);
+        Assert.Equal(TurnStatus.Cancelled, (await store.GetTurnAsync(submitted.Turn.Id, CancellationToken.None))!.Status);
+        Assert.Single(await scope.Coordinator.ReadEventsAfterAsync(submitted.Turn.Id, 0, 20, CancellationToken.None),
+            item => item.EventType == nameof(TurnCancelled));
+        Assert.Equal(1, engine.CancelCallCount);
+    }
+
+    [Fact]
+    [Trait("Category", "Unit")]
     public async Task ShutdownAggregatesEngineAndTerminalPersistenceFailures()
     {
         var store = new InMemoryConversationStore { FailNextTerminalOutcome = true };
