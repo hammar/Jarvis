@@ -343,5 +343,15 @@ lines (2236/2442), 73.6% branches (522/709); changed executable lines are
 93.9% (1091/1162). All required thresholds and negative fixtures passed.
 An attempted simultaneous pair of focused builds briefly collided on shared
 generated reference assemblies; sequential reruns passed without deleting
-data or changing validation policy. Independent re-review of the narrower R18
-correction and Linux CI against the new revision remain pending.
+data or changing validation policy. Independent agentic re-review of exact
+commit `6c1842f7cf99421e2cf4baa03fe839bb85f04658` found no significant
+issue and confirmed R18 resolved without changing R1-R17 dispositions.
+It independently passed 12 focused native cases: two production
+coordinator/SQLite/adapter held-signal regressions; four adapter
+deadline/precedence cases; five coordinator cancellation/deadline cases; and
+one actual-runtime bounded-output consumer-disposal case. It did not re-run
+the full gates/harness or Linux CI, and did not exhaustively exercise all
+callback interleavings. The held-shutdown test checks durable interruption and
+terminal-event uniqueness, not its reason code. Linux CI against the new
+revision remains pending. No finding is accepted as a residual risk by the
+owner; no live credentials or physical writes were used.
