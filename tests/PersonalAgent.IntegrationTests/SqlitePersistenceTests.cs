@@ -1,4 +1,6 @@
 using Microsoft.Data.Sqlite;
+using Microsoft.AspNetCore.Identity;
+using Microsoft.Extensions.Options;
 using PersonalAgent.Application;
 using PersonalAgent.Domain;
 using PersonalAgent.Infrastructure.Persistence;
@@ -14,6 +16,80 @@ namespace PersonalAgent.IntegrationTests;
 public sealed class SqlitePersistenceTests
 {
     private static readonly DateTimeOffset Now = new(2026, 10, 4, 12, 0, 0, TimeSpan.Zero);
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task SuccessfulLoginUpgradesOutdatedVerifierWithoutOverwritingNewerVerifier()
+    {
+        using var file = IsolatedDatabaseFile.Create();
+        var database = new SqliteDatabase(file.Path);
+        await database.InitializeAsync();
+        var accounts = new SqliteOwnerStateStore(database);
+        var identity = new OwnerIdentity("owner");
+        var oldHasher = new PasswordHasher<OwnerIdentity>(Options.Create(new PasswordHasherOptions
+        {
+            IterationCount = 1000
+        }));
+        var passphrase = "a-long-owner-passphrase";
+        var oldHash = oldHasher.HashPassword(identity, passphrase);
+        await accounts.TryCreateOwnerAsync(oldHash, Now, CancellationToken.None);
+        var currentHasher = new PasswordHasher<OwnerIdentity>();
+        var authentication = new OwnerAuthenticationService(accounts, currentHasher, new MutableClock(Now));
+
+        Assert.False(await authentication.VerifyAsync("wrong-passphrase", CancellationToken.None));
+        Assert.Equal(oldHash, await accounts.GetPasswordHashAsync(CancellationToken.None));
+        Assert.True(await authentication.VerifyAsync(passphrase, CancellationToken.None));
+        var upgraded = await accounts.GetPasswordHashAsync(CancellationToken.None);
+        Assert.NotEqual(oldHash, upgraded);
+        Assert.Equal(PasswordVerificationResult.Success, currentHasher.VerifyHashedPassword(identity, upgraded!, passphrase));
+        Assert.False(await accounts.TryUpgradePasswordHashAsync(oldHash, "stale-replacement", CancellationToken.None));
+        Assert.Equal(upgraded, await accounts.GetPasswordHashAsync(CancellationToken.None));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(async () =>
+            await accounts.TryUpgradePasswordHashAsync(upgraded!, new string('x', 4097), CancellationToken.None));
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    [Trait("Category", "Integration")]
+    public async Task VerifierUpgradeRaceRechecksTheWinningPassword(bool samePassword)
+    {
+        using var file = IsolatedDatabaseFile.Create();
+        var database = new SqliteDatabase(file.Path);
+        await database.InitializeAsync();
+        var accounts = new SqliteOwnerStateStore(database);
+        var identity = new OwnerIdentity("owner");
+        var oldHasher = new PasswordHasher<OwnerIdentity>(Options.Create(new PasswordHasherOptions { IterationCount = 1000 }));
+        var hasher = new PasswordHasher<OwnerIdentity>();
+        const string passphrase = "a-long-owner-passphrase";
+        var oldHash = oldHasher.HashPassword(identity, passphrase);
+        await accounts.TryCreateOwnerAsync(oldHash, Now, CancellationToken.None);
+        var winningHash = hasher.HashPassword(identity, samePassword ? passphrase : "a-different-owner-passphrase");
+        var competing = new CompetingVerifierStore(accounts, winningHash);
+        var authentication = new OwnerAuthenticationService(competing, hasher, new MutableClock(Now));
+
+        Assert.Equal(samePassword, await authentication.VerifyAsync(passphrase, CancellationToken.None));
+        Assert.Equal(winningHash, await accounts.GetPasswordHashAsync(CancellationToken.None));
+    }
+
+    private sealed class CompetingVerifierStore(IOwnerAccountStore accounts, string winningHash) : IOwnerAccountStore
+    {
+        public ValueTask<bool> IsConfiguredAsync(CancellationToken cancellationToken) =>
+            accounts.IsConfiguredAsync(cancellationToken);
+
+        public ValueTask<bool> TryCreateOwnerAsync(string passwordHash, DateTimeOffset createdAtUtc, CancellationToken cancellationToken) =>
+            accounts.TryCreateOwnerAsync(passwordHash, createdAtUtc, cancellationToken);
+
+        public ValueTask<string?> GetPasswordHashAsync(CancellationToken cancellationToken) =>
+            accounts.GetPasswordHashAsync(cancellationToken);
+
+        public async ValueTask<bool> TryUpgradePasswordHashAsync(
+            string expectedHash, string replacementHash, CancellationToken cancellationToken)
+        {
+            Assert.True(await accounts.TryUpgradePasswordHashAsync(expectedHash, winningHash, cancellationToken));
+            return await accounts.TryUpgradePasswordHashAsync(expectedHash, replacementHash, cancellationToken);
+        }
+    }
 
     [Fact]
     [Trait("Category", "Integration")]

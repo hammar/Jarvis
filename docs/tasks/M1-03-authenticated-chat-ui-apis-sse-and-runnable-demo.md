@@ -145,6 +145,12 @@ and unexercised live behavior.
 | F29 | Previously missed: Simulator status omitted the configured model. | Fixed by reporting the composed simulator model for Simulator/E2E; browser verifies the visible model label. |
 | F30 | Previously missed: five invalid bootstrap attempts permanently disabled setup until restart. | Fixed by removing the permanent counter and retaining the existing bounded HTTP rate limiter; integration makes five invalid service attempts and then successfully bootstraps using the correct token. |
 | F31 | Previously missed: startup treated non-authentication API failures as sign-out. | Fixed by retaining explicit 401 status on authentication errors and showing other runtime failures without sign-in UI; browser injects a status 500 and verifies its alert and hidden authentication form. |
+| F32 | Accepted-turn startup exposed enabled controls before reading recovery state. | Fixed by restoring the turn and navigation lock synchronously before revealing chat or awaiting status/list requests; browser holds startup status after reload and verifies controls and turn identity. |
+| F33 | Previously missed: successful authentication never upgraded outdated password verifiers. | Fixed with an Application-owned conditional verifier replacement and re-verification if another update wins; SQLite integration verifies actual Identity rehash, wrong-passphrase preservation, and stale-write rejection. |
+| F34 | Previously missed: uncaught API exceptions did not return safe structured errors. | Fixed with correlation-scoped exception handling that emits generic problem details without logging private exception messages; aborted requests propagate cancellation and started responses are aborted. Integration verifies a private persistence failure produces safe correlated 500 details. |
+| F35 | Previously missed: expired-cookie 401 retained identity-bound antiforgery state. | Fixed by refreshing anonymous CSRF state before presenting the authentication error; browser signs out through HTTP and signs back in without reload. |
+| F36 | Previously missed: concurrent New conversation clicks created multiple durable roots. | Fixed with a creation-in-flight guard and locked controls until creation/selection/list refresh finishes; browser holds creation and dispatches a second click, verifying only one POST. |
+| F37 | Regression validation: repeated reload/CSRF reads exhausted the shared authentication limiter and blocked accepted-turn startup with 503. | Fixed by limiting password-bearing bootstrap/login attempts, not status/CSRF reads or logout; rejected attempts return 429. Integration verifies reads cannot exhaust the 20-attempt/minute limit and attempts remain bounded. |
 
 Follow-up validation on October 9, 2026: `tools/validate.sh build`,
 `integration` (126/126), `browser-e2e` (1/1 plus expected failing probe),
@@ -161,10 +167,26 @@ All eleven reported GitHub checks passed on the preceding `282de20` head;
 required-check configuration was not readable by the app, and new-head CI
 must be evaluated separately.
 
-- Acceptance: M1-03 scope and scenarios listed above; no contract or schema
-  changes beyond the previously described owner-authentication/settings
-  migration and Application-owned retention contract.
-- Validation (exact final worktree; October 9, 2026): ran
+After F32–F37, `tools/validate.sh build`, `integration` (131/131),
+`architecture` (6/6), `browser-e2e` (1/1 plus expected failing probe),
+`coverage`, and `docs` passed. The final error-handler/concurrent-verifier
+regressions were followed by another build/integration/coverage/docs run.
+Changed executable lines reached 98.1% (788/803); Web reached 98.5% lines
+(661/671) and 80.6% branches (108/134). The latest unit report (91/91) was
+reused by coverage; SDK and Aspire API gates were not rerun for this
+request/authentication follow-up, and new-head CI remains a separate gate.
+Two intermediate browser runs exposed F37; the final run passed after its
+root cause was fixed without changing thresholds or test assertions.
+The Application account contract now has a conditional verifier-upgrade
+operation; no further schema migration is required.
+The preceding CI docs failure was a remote GitHub link-check 503/504 on
+unchanged SDK documentation URLs; its failed jobs were rerun without
+removing links or weakening the check. Local docs validates internal links,
+not availability of those remote URLs.
+
+- Acceptance: M1-03 scope and scenarios listed above, including the conditional
+  owner-verifier upgrade follow-up; no additional schema change.
+- Original implementation validation (October 9, 2026): ran
   `./tools/validate.sh build && ./tools/validate.sh unit &&
   ./tools/validate.sh integration && ./tools/validate.sh architecture &&
   ./tools/validate.sh sdk-contracts && ./tools/validate.sh coverage &&

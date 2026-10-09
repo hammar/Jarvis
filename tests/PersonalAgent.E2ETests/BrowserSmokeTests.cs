@@ -45,8 +45,48 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
             await page.UnrouteAsync("**/api/status");
             await page.ReloadAsync();
             await page.Locator("#new-conversation").WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible });
+            await page.EvaluateAsync(
+                """
+                async () => {
+                    await api("/api/auth/logout", { method: "POST" });
+                    try { await refreshStatus(); } catch (error) { showError(error.message); }
+                }
+                """);
+            await page.GetByLabel("Passphrase").FillAsync(SimulatorHostFixture.OwnerPassphrase);
+            await page.GetByRole(AriaRole.Button, new PageGetByRoleOptions { Name = "Sign in" }).ClickAsync();
+            await page.Locator("#new-conversation").WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible });
+            var createResponseReady = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseCreateResponse = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var createRequests = 0;
+            await page.RouteAsync("**/api/conversations", async route =>
+            {
+                if (route.Request.Method != "POST")
+                {
+                    await route.ContinueAsync();
+                    return;
+                }
+                Interlocked.Increment(ref createRequests);
+                var response = await route.FetchAsync();
+                createResponseReady.TrySetResult();
+                await releaseCreateResponse.Task.WaitAsync(TimeSpan.FromSeconds(15));
+                await route.FulfillAsync(new RouteFulfillOptions { Response = response });
+            });
             await page.Locator("#new-conversation").ClickAsync();
+            await createResponseReady.Task.WaitAsync(TimeSpan.FromSeconds(15));
+            try
+            {
+                Assert.True(await page.Locator("#new-conversation").IsDisabledAsync());
+                await page.EvaluateAsync(
+                    "document.getElementById('new-conversation').dispatchEvent(new Event('click'))");
+                Assert.Equal(1, Volatile.Read(ref createRequests));
+            }
+            finally
+            {
+                releaseCreateResponse.TrySetResult();
+            }
             await page.WaitForFunctionAsync("() => conversationId !== ''");
+            await page.WaitForFunctionAsync("() => !document.getElementById('new-conversation').disabled");
+            await page.UnrouteAsync("**/api/conversations");
             var firstConversationId = await page.EvaluateAsync<string>("conversationId");
             await page.Locator("#new-conversation").ClickAsync();
             await page.WaitForFunctionAsync("previous => conversationId !== previous", firstConversationId);
@@ -221,7 +261,28 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
                 "/fixture/control/wait-for-delayed-stream");
             delayedStream.EnsureSuccessStatusCode();
             var acceptedTurnId = await page.EvaluateAsync<string>("activeTurnId");
+            var statusRequestReady = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseStatusRequest = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            await page.RouteAsync("**/api/status", async route =>
+            {
+                statusRequestReady.TrySetResult();
+                await releaseStatusRequest.Task.WaitAsync(TimeSpan.FromSeconds(15));
+                await route.ContinueAsync();
+            });
             await page.ReloadAsync();
+            await statusRequestReady.Task.WaitAsync(TimeSpan.FromSeconds(15));
+            try
+            {
+                Assert.True(await page.Locator("#new-conversation").IsDisabledAsync());
+                Assert.True(await page.Locator("#send-turn").IsDisabledAsync());
+                Assert.Equal(acceptedTurnId, await page.EvaluateAsync<string>("activeTurnId"));
+            }
+            finally
+            {
+                releaseStatusRequest.TrySetResult();
+            }
+            await page.WaitForFunctionAsync("() => conversationId === activeTurnConversationId");
+            await page.UnrouteAsync("**/api/status");
             await cancelButton.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible });
             Assert.Equal(acceptedTurnId, await page.EvaluateAsync<string>("activeTurnId"));
             Assert.True(await page.Locator("#new-conversation").IsDisabledAsync());

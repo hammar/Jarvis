@@ -52,6 +52,30 @@ public sealed class SqliteOwnerStateStore(SqliteDatabase database) : IOwnerAccou
     }
 
     /// <inheritdoc />
+    public async ValueTask<bool> TryUpgradePasswordHashAsync(
+        string expectedHash,
+        string replacementHash,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(expectedHash);
+        ArgumentException.ThrowIfNullOrWhiteSpace(replacementHash);
+        if (replacementHash.Length > 4096)
+        {
+            throw new ArgumentOutOfRangeException(nameof(replacementHash));
+        }
+
+        await using var connection = await database.OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            UPDATE owner_account SET password_hash = $replacement
+            WHERE owner_id = 'owner' AND password_hash = $expected;
+            """;
+        command.Parameters.AddWithValue("$replacement", replacementHash);
+        command.Parameters.AddWithValue("$expected", expectedHash);
+        return await command.ExecuteNonQueryAsync(cancellationToken) == 1;
+    }
+
+    /// <inheritdoc />
     public async ValueTask<RetentionSettings> GetRetentionAsync(
         RetentionSettings defaults,
         CancellationToken cancellationToken)

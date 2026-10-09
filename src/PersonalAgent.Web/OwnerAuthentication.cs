@@ -83,10 +83,21 @@ public sealed class OwnerAuthenticationService
             return false;
         }
 
-        return passwordHasher.VerifyHashedPassword(
+        var result = passwordHasher.VerifyHashedPassword(
             new OwnerIdentity(OwnerId),
             hash,
-            passphrase) is PasswordVerificationResult.Success or PasswordVerificationResult.SuccessRehashNeeded;
+            passphrase);
+        if (result == PasswordVerificationResult.SuccessRehashNeeded)
+        {
+            var replacement = passwordHasher.HashPassword(new OwnerIdentity(OwnerId), passphrase);
+            if (!await accounts.TryUpgradePasswordHashAsync(hash, replacement, cancellationToken))
+            {
+                var current = await accounts.GetPasswordHashAsync(cancellationToken);
+                return current is not null && passwordHasher.VerifyHashedPassword(
+                    new OwnerIdentity(OwnerId), current, passphrase) != PasswordVerificationResult.Failed;
+            }
+        }
+        return result != PasswordVerificationResult.Failed;
     }
 
     /// <summary>Signs the owner into a protected, bounded-duration browser session.</summary>

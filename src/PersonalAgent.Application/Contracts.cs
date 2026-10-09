@@ -269,6 +269,16 @@ public interface IOwnerAccountStore
     /// <param name="cancellationToken">Token that cancels the database read.</param>
     /// <returns>The password verifier, or null until bootstrap completes.</returns>
     ValueTask<string?> GetPasswordHashAsync(CancellationToken cancellationToken);
+
+    /// <summary>Upgrades the owner verifier only if it still matches the verified value.</summary>
+    /// <param name="expectedHash">Verifier that was successfully checked.</param>
+    /// <param name="replacementHash">New salted verifier using the current hashing policy.</param>
+    /// <param name="cancellationToken">Token that cancels the conditional write.</param>
+    /// <returns>True when the verifier was replaced; false when another write changed it.</returns>
+    ValueTask<bool> TryUpgradePasswordHashAsync(
+        string expectedHash,
+        string replacementHash,
+        CancellationToken cancellationToken);
 }
 
 /// <summary>Loads and updates durable owner retention settings, applying changes to cleanup immediately.</summary>

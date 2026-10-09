@@ -8,6 +8,7 @@ let conversationId = "";
 let activeTurnId = "";
 let activeTurnConversationId = "";
 let turnSubmissionInFlight = false;
+let conversationCreationInFlight = false;
 let pendingTurnSubmission = null;
 let conversationSelectionGeneration = 0;
 let eventSource = null;
@@ -58,8 +59,10 @@ async function api(path, options = {}) {
         credentials: "same-origin"
     });
     if (response.status === 401) {
-        authSection.hidden = false;
         chatSection.hidden = true;
+        authSection.hidden = true;
+        await csrf();
+        authSection.hidden = false;
         const error = new Error("Please sign in again.");
         error.status = 401;
         throw error;
@@ -97,7 +100,7 @@ async function loadConversations() {
         const button = document.createElement("button");
         button.type = "button";
         button.textContent = item.title || "New conversation";
-        button.disabled = activeTurnId !== "" || turnSubmissionInFlight;
+        button.disabled = activeTurnId !== "" || turnSubmissionInFlight || conversationCreationInFlight;
         button.addEventListener("click", () => openConversation(item.id.value || item.id));
         entry.append(button);
         list.append(entry);
@@ -132,12 +135,6 @@ async function refreshStatus() {
 }
 
 async function showChat() {
-    authSection.hidden = true;
-    chatSection.hidden = false;
-    document.getElementById("settings").hidden = true;
-    document.getElementById("activity").hidden = true;
-    await refreshStatus();
-    await loadConversations();
     if (!pendingTurnSubmission) {
         let stored;
         try {
@@ -162,21 +159,31 @@ async function showChat() {
             }
         }
     }
+    if (pendingTurnSubmission?.turnId) {
+        activeTurnId = pendingTurnSubmission.turnId;
+        activeTurnConversationId = pendingTurnSubmission.conversationId;
+        setTurnNavigationLocked(true);
+        document.getElementById("send-turn").disabled = true;
+        document.getElementById("cancel-turn").hidden = false;
+    }
+    authSection.hidden = true;
+    chatSection.hidden = false;
+    document.getElementById("settings").hidden = true;
+    document.getElementById("activity").hidden = true;
+    if (activeTurnId) {
+        try {
+            await refreshStatus();
+            await loadConversations();
+            await openConversation(activeTurnConversationId);
+        } finally {
+            if (!chatSection.hidden) connectEvents(activeTurnId, 0);
+        }
+        return;
+    }
+    await refreshStatus();
+    await loadConversations();
     if (pendingTurnSubmission) {
         document.getElementById("prompt").value = pendingTurnSubmission.text;
-        if (pendingTurnSubmission.turnId) {
-            activeTurnId = pendingTurnSubmission.turnId;
-            activeTurnConversationId = pendingTurnSubmission.conversationId;
-            setTurnNavigationLocked(true);
-            document.getElementById("send-turn").disabled = true;
-            document.getElementById("cancel-turn").hidden = false;
-            try {
-                await openConversation(activeTurnConversationId);
-            } finally {
-                connectEvents(activeTurnId, 0);
-            }
-            return;
-        }
         await openConversation(pendingTurnSubmission.conversationId);
         showError("A previous send may have been accepted. Resend the unchanged message to safely recover it.");
     }
@@ -189,7 +196,6 @@ async function start() {
     profile.textContent = status.bootstrapRequired ? "Create the local owner account." : "Sign in to your local assistant.";
 
     try {
-        await refreshStatus();
         await showChat();
     } catch (error) {
         if (error.status !== 401) {
@@ -229,8 +235,11 @@ document.getElementById("auth-form").addEventListener("submit", async event => {
 });
 
 document.getElementById("new-conversation").addEventListener("click", async () => {
-    if (activeTurnId || turnSubmissionInFlight) return;
+    if (activeTurnId || turnSubmissionInFlight || conversationCreationInFlight) return;
     clearError();
+    conversationCreationInFlight = true;
+    setTurnNavigationLocked(true);
+    document.getElementById("send-turn").disabled = true;
     try {
         const created = await api("/api/conversations", {
             method: "POST",
@@ -241,12 +250,17 @@ document.getElementById("new-conversation").addEventListener("click", async () =
         await loadConversations();
     } catch (error) {
         showError(error.message);
+    } finally {
+        conversationCreationInFlight = false;
+        const locked = activeTurnId !== "" || turnSubmissionInFlight;
+        setTurnNavigationLocked(locked);
+        document.getElementById("send-turn").disabled = locked;
     }
 });
 
 document.getElementById("turn-form").addEventListener("submit", async event => {
     event.preventDefault();
-    if (!conversationId || activeTurnId || turnSubmissionInFlight) return;
+    if (!conversationId || activeTurnId || turnSubmissionInFlight || conversationCreationInFlight) return;
     clearError();
     const submittedConversationId = conversationId;
     const text = document.getElementById("prompt").value;

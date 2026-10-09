@@ -16,7 +16,7 @@ internal static class ChatApi
 {
     internal static void Map(WebApplication app)
     {
-        var auth = app.MapGroup("/api/auth").RequireRateLimiting("owner-auth");
+        var auth = app.MapGroup("/api/auth");
         auth.MapGet("/status", async (OwnerAuthenticationService service, CancellationToken ct) =>
             Results.Ok(new { bootstrapRequired = !await service.IsOwnerConfiguredAsync(ct) }));
         auth.MapGet("/csrf", (HttpContext context, IAntiforgery antiforgery) =>
@@ -43,7 +43,7 @@ internal static class ChatApi
 
             await service.SignInAsync(context, request.RememberMe, ct);
             return Results.Ok(new { authenticated = true });
-        });
+        }).RequireRateLimiting("owner-auth");
         auth.MapPost("/login", async (
             LoginRequest request,
             HttpContext context,
@@ -63,7 +63,7 @@ internal static class ChatApi
 
             await service.SignInAsync(context, request.RememberMe, ct);
             return Results.Ok(new { authenticated = true });
-        });
+        }).RequireRateLimiting("owner-auth");
         auth.MapPost("/logout", async (HttpContext context, IAntiforgery antiforgery, CancellationToken ct) =>
         {
             if (!await OwnerHttpSecurity.ValidateCsrfAsync(antiforgery, context, ct))
@@ -421,16 +421,20 @@ internal static class OwnerAuthenticationRegistration
                 };
             });
         services.AddAuthorization();
-        services.AddRateLimiter(options => options.AddPolicy("owner-auth", context =>
-            RateLimitPartition.GetFixedWindowLimiter(
-                context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
-                _ => new FixedWindowRateLimiterOptions
-                {
-                    PermitLimit = 20,
-                    Window = TimeSpan.FromMinutes(1),
-                    QueueLimit = 0,
-                    AutoReplenishment = true
-                })));
+        services.AddRateLimiter(options =>
+        {
+            options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+            options.AddPolicy("owner-auth", context =>
+                RateLimitPartition.GetFixedWindowLimiter(
+                    context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+                    _ => new FixedWindowRateLimiterOptions
+                    {
+                        PermitLimit = 20,
+                        Window = TimeSpan.FromMinutes(1),
+                        QueueLimit = 0,
+                        AutoReplenishment = true
+                    }));
+        });
         services.AddSingleton<IPasswordHasher<OwnerIdentity>, PasswordHasher<OwnerIdentity>>();
         return services;
     }

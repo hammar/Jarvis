@@ -15,9 +15,15 @@ ASP.NET Identity adaptive salted password hash in SQLite. The browser receives
 an HttpOnly, SameSite=Strict session cookie, protected by persisted ASP.NET
 Data Protection keys in the private `JARVIS_DATA_DIR`. Sign-in sessions expire
 after 12 hours and may slide while active. Sign out or clear browser cookies
-to end the session. Login/bootstrap requests are rate-limited, and all
+to end the session. Login/bootstrap attempts share a 20-attempt/minute limit
+per client address; rejection returns HTTP 429. Status/CSRF reads and logout
+do not consume password attempts. All
 cookie-authenticated mutations require an antiforgery token in the
 `X-CSRF-TOKEN` header.
+
+Successful sign-in upgrades an outdated adaptive verifier with a conditional
+SQLite update. Authentication expiry refreshes anonymous antiforgery state
+so reauthentication does not require reloading the page.
 
 The account and conversations survive application upgrades as long as the
 owner keeps the same data directory. A lost passphrase has no recovery path in
@@ -52,7 +58,11 @@ This is browser-local recovery state, not a telemetry or logging channel.
 
 Conversation and turn lookups are owner-scoped in persistence before data is
 returned or cancellation is requested. API errors use safe problem details;
-responses include `X-Correlation-ID`. JSON request bodies are capped at 64 KiB, turn text at the Application
+responses include `X-Correlation-ID`. Unhandled request failures return
+generic correlated problem details without
+exposing exception text; requests whose response has already started are
+aborted, and request cancellation is not converted into a server error.
+JSON request bodies are capped at 64 KiB, turn text at the Application
 boundary's 8,000-character limit, and client request IDs at 128 characters by
 default. Kestrel also enforces the body cap for requests without
 `Content-Length`. SSE reads persisted events in pages of up to 100, drains

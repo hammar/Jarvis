@@ -28,6 +28,85 @@ public sealed class SqliteAndWebSmokeTests
 {
     [Fact]
     [Trait("Category", "Integration")]
+    public async Task AuthenticationReadsDoNotConsumePasswordAttemptLimit()
+    {
+        using var data = IsolatedDirectory.Create();
+        await using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(web =>
+        {
+            web.UseSetting("JARVIS_PROFILE", "Local");
+            web.UseSetting("JARVIS_DATA_DIR", data.Path);
+        });
+        using var client = factory.CreateClient();
+        for (var i = 0; i < 21; i++)
+        {
+            using var token = await client.GetAsync("/api/auth/csrf");
+            token.EnsureSuccessStatusCode();
+            using var content = JsonDocument.Parse(await token.Content.ReadAsStringAsync());
+            client.DefaultRequestHeaders.Remove("X-CSRF-TOKEN");
+            client.DefaultRequestHeaders.Add("X-CSRF-TOKEN", content.RootElement.GetProperty("token").GetString());
+        }
+        for (var i = 0; i < 21; i++)
+        {
+            using var attempt = await client.PostAsJsonAsync("/api/auth/login", new { passphrase = "not-the-owner-passphrase" });
+            Assert.Equal(i < 20 ? HttpStatusCode.Unauthorized : HttpStatusCode.TooManyRequests, attempt.StatusCode);
+            Assert.NotEmpty(attempt.Headers.GetValues("X-Correlation-ID"));
+        }
+        using var status = await client.GetAsync("/api/auth/status");
+        status.EnsureSuccessStatusCode();
+        using var csrf = await client.GetAsync("/api/auth/csrf");
+        csrf.EnsureSuccessStatusCode();
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task UncaughtApiFailureReturnsSafeCorrelatedProblemDetails()
+    {
+        using var data = IsolatedDirectory.Create();
+        await using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(web =>
+        {
+            web.UseSetting("JARVIS_PROFILE", "Local");
+            web.UseSetting("JARVIS_DATA_DIR", data.Path);
+            web.ConfigureTestServices(services =>
+            {
+                services.RemoveAll<IOwnerSettingsService>();
+                services.AddSingleton<IOwnerSettingsService, FailingOwnerSettingsService>();
+            });
+        });
+        using var client = factory.CreateClient();
+        using var csrf = await client.GetAsync("/api/auth/csrf");
+        using var csrfBody = JsonDocument.Parse(await csrf.Content.ReadAsStringAsync());
+        client.DefaultRequestHeaders.Add("X-CSRF-TOKEN", csrfBody.RootElement.GetProperty("token").GetString());
+        var auth = factory.Services.GetRequiredService<OwnerAuthenticationService>();
+        using var bootstrap = await client.PostAsJsonAsync("/api/auth/bootstrap", new
+        {
+            bootstrapToken = auth.BootstrapToken,
+            passphrase = "a-long-owner-passphrase",
+            rememberMe = false
+        });
+        bootstrap.EnsureSuccessStatusCode();
+        using var failure = await client.GetAsync("/api/settings");
+        Assert.Equal(HttpStatusCode.InternalServerError, failure.StatusCode);
+        Assert.Equal("application/problem+json", failure.Content.Headers.ContentType?.MediaType);
+        var content = await failure.Content.ReadAsStringAsync();
+        Assert.DoesNotContain("private-test-detail", content, StringComparison.Ordinal);
+        using var problem = JsonDocument.Parse(content);
+        Assert.Equal("The request could not be completed.", problem.RootElement.GetProperty("title").GetString());
+        Assert.Equal(Assert.Single(failure.Headers.GetValues("X-Correlation-ID")),
+            problem.RootElement.GetProperty("correlationId").GetString());
+    }
+
+    private sealed class FailingOwnerSettingsService : IOwnerSettingsService
+    {
+        public ValueTask<RetentionSettings> GetRetentionAsync(RetentionSettings defaults, CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("private-test-detail");
+
+        public ValueTask<RetentionSettings> UpdateRetentionAsync(
+            RetentionSettings settings, DateTimeOffset nowUtc, CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("private-test-detail");
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
     public async Task SseDrainsTerminalEventCommittedBetweenEventReadAndStatusRead()
     {
         using var data = IsolatedDirectory.Create();

@@ -147,7 +147,38 @@ app.Use(async (context, next) =>
         return;
     }
 
-    await next();
+    try
+    {
+        await next();
+    }
+    catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
+    {
+        throw;
+    }
+    catch (Exception error)
+    {
+        app.Logger.LogError(
+            "Request failed with {ErrorType}; correlation {CorrelationId}.",
+            error.GetType().Name,
+            context.TraceIdentifier);
+        if (context.Response.HasStarted || context.RequestAborted.IsCancellationRequested)
+        {
+            context.Abort();
+            return;
+        }
+
+        context.Response.Clear();
+        var status = error is BadHttpRequestException badRequest
+            ? badRequest.StatusCode
+            : StatusCodes.Status500InternalServerError;
+        await Results.Problem(
+            statusCode: status,
+            title: status == StatusCodes.Status500InternalServerError
+                ? "The request could not be completed."
+                : "The request could not be read.",
+            extensions: new Dictionary<string, object?> { ["correlationId"] = context.TraceIdentifier })
+            .ExecuteAsync(context);
+    }
 });
 app.UseRateLimiter();
 app.UseAuthentication();
