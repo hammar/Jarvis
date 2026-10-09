@@ -210,6 +210,7 @@ authority.
 | Wrong-passphrase login shows its accurate failure before successful same-form reauthentication | `BrowserSmokeTests.FirstRunReportsAuthStatusFailureAndSerializesBootstrapThenReauthenticatesWithoutReload` |
 | Settings save notices use a status region; conversation activation hides ancillary panels; stale Settings/Activity responses and obsolete save errors cannot override newer selected surfaces | `BrowserSmokeTests.PlaywrightSignsInAndStreamsASimulatorChat` |
 | Concurrent retention reads return committed conversation/audit pairs with independent defaults for missing rows | `SqlitePersistenceTests.RetentionReadsReturnOnlyCommittedPairsDuringConcurrentUpdates` |
+| Two loopback instances share one browser cookie jar without session/CSRF collisions; signing out one preserves the other, including authenticated mutations after restart | `SqliteAndWebSmokeTests.SeparateInstancesShareBrowserCookieJarWithoutLosingAuthenticationOrCsrfAcrossRestart` |
 | Terminal event committed between SSE event-page and status reads is delivered before the stream closes | `SqliteAndWebSmokeTests.SseDrainsTerminalEventCommittedBetweenEventReadAndStatusRead` |
 | SDK compatibility uses pinned actual runtime | T01 `--contracts` suite, `sdk-contracts-platform` on Linux/macOS |
 | Adapter streams events with explicit local/cloud provider and transcript isolation | `CopilotAgentEngineContractTests.ActualRuntimeStreamsEventsUsesExplicitProviderAndPersistsOrderedTerminalOutcome` |

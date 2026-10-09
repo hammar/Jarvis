@@ -101,6 +101,14 @@ validation. Mutations require the antiforgery request token in
 `X-CSRF-TOKEN`. Login and bootstrap are rate-limited. If the passphrase is
 lost, this M1 version has no reset flow; retain the protected data directory.
 
+Session and antiforgery cookie names share a namespace derived from the
+normalized absolute data-directory path. Separate Local/Simulator data
+directories can therefore use the same browser and loopback hostname on
+different ports without overwriting each other's cookies. Keep that path
+stable across restarts; moving it or using a different symlink alias requires
+sign-in again. Upgrading from the earlier fixed-cookie names also requires
+one sign-in; account credentials and durable history are unchanged.
+
 The root page provides Chat, Settings, and Activity. Chat submits bounded
 requests with stable IDs and reconnects through the SSE `Last-Event-ID`
 sequence. Closing the browser stream does not stop inference; use Cancel for

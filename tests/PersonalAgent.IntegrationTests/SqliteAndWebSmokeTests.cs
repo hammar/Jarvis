@@ -29,6 +29,116 @@ public sealed class SqliteAndWebSmokeTests
 {
     [Fact]
     [Trait("Category", "Integration")]
+    public async Task SeparateInstancesShareBrowserCookieJarWithoutLosingAuthenticationOrCsrfAcrossRestart()
+    {
+        using var firstData = IsolatedDirectory.Create();
+        using var secondData = IsolatedDirectory.Create();
+        var cookies = new CookieContainer();
+        await using var first = CreateInstance(firstData.Path);
+        await using var second = CreateInstance(secondData.Path);
+        using var firstClient = first.CreateClient(new WebApplicationFactoryClientOptions
+        {
+            HandleCookies = false,
+            BaseAddress = new Uri("http://localhost:5101")
+        });
+        using var secondClient = second.CreateClient(new WebApplicationFactoryClientOptions
+        {
+            HandleCookies = false,
+            BaseAddress = new Uri("http://localhost:5102")
+        });
+
+        await BootstrapAsync(first, firstClient);
+        var firstToken = await CsrfAsync(firstClient);
+        await BootstrapAsync(second, secondClient);
+        var secondToken = await CsrfAsync(secondClient);
+        var sharedCookies = cookies.GetCookies(firstClient.BaseAddress!).Cast<Cookie>().ToArray();
+        Assert.Equal(2, sharedCookies.Count(cookie => cookie.Name.StartsWith("Jarvis.Session.", StringComparison.Ordinal)));
+        Assert.Equal(2, sharedCookies.Count(cookie => cookie.Name.StartsWith("Jarvis.Antiforgery.", StringComparison.Ordinal)));
+        Assert.Equal(sharedCookies.Select(cookie => cookie.Name).Order(),
+            cookies.GetCookies(secondClient.BaseAddress!).Cast<Cookie>().Select(cookie => cookie.Name).Order());
+
+        await SaveAsync(firstClient, firstToken);
+        await SaveAsync(secondClient, secondToken);
+        using var invalid = await SendAsync(firstClient, HttpMethod.Put, "/api/settings/retention",
+            new { conversationDays = 0, auditDays = 34 }, firstToken);
+        Assert.Equal(HttpStatusCode.BadRequest, invalid.StatusCode);
+        using var logout = await SendAsync(secondClient, HttpMethod.Post, "/api/auth/logout", null, secondToken);
+        logout.EnsureSuccessStatusCode();
+        await SaveAsync(firstClient, firstToken);
+        using var signedOut = await SendAsync(secondClient, HttpMethod.Get, "/api/settings");
+        Assert.Equal(HttpStatusCode.Unauthorized, signedOut.StatusCode);
+
+        await first.DisposeAsync();
+        await using var restarted = CreateInstance(Path.Combine(firstData.Path, "."));
+        using var restartedClient = restarted.CreateClient(new WebApplicationFactoryClientOptions
+        {
+            HandleCookies = false,
+            BaseAddress = new Uri("http://localhost:5101")
+        });
+        await SaveAsync(restartedClient, firstToken);
+        using var persisted = await SendAsync(restartedClient, HttpMethod.Get, "/api/settings");
+        persisted.EnsureSuccessStatusCode();
+        using var settings = JsonDocument.Parse(await persisted.Content.ReadAsStringAsync());
+        Assert.Equal(12, settings.RootElement.GetProperty("conversationDays").GetInt32());
+        Assert.Equal(34, settings.RootElement.GetProperty("auditDays").GetInt32());
+
+        static WebApplicationFactory<Program> CreateInstance(string path) =>
+            new WebApplicationFactory<Program>().WithWebHostBuilder(web =>
+            {
+                web.UseSetting("JARVIS_PROFILE", "Local");
+                web.UseSetting("JARVIS_DATA_DIR", path);
+            });
+
+        async Task<HttpResponseMessage> SendAsync(
+            HttpClient client, HttpMethod method, string path, object? body = null, string? token = null)
+        {
+            var uri = new Uri(client.BaseAddress!, path);
+            using var request = new HttpRequestMessage(method, uri);
+            var cookieHeader = cookies.GetCookieHeader(uri);
+            if (cookieHeader.Length > 0) request.Headers.Add("Cookie", cookieHeader);
+            if (token is not null) request.Headers.Add("X-CSRF-TOKEN", token);
+            if (body is not null) request.Content = JsonContent.Create(body);
+            var response = await client.SendAsync(request);
+            if (response.Headers.TryGetValues("Set-Cookie", out var values))
+            {
+                foreach (var value in values) cookies.SetCookies(uri, value);
+            }
+            return response;
+        }
+
+        async Task<string> CsrfAsync(HttpClient client)
+        {
+            using var response = await SendAsync(client, HttpMethod.Get, "/api/auth/csrf");
+            response.EnsureSuccessStatusCode();
+            using var content = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            return content.RootElement.GetProperty("token").GetString()!;
+        }
+
+        async Task BootstrapAsync(WebApplicationFactory<Program> factory, HttpClient client)
+        {
+            var token = await CsrfAsync(client);
+            using var response = await SendAsync(client, HttpMethod.Post, "/api/auth/bootstrap", new
+            {
+                bootstrapToken = factory.Services.GetRequiredService<OwnerAuthenticationService>().BootstrapToken,
+                passphrase = "a-long-owner-passphrase",
+                rememberMe = true
+            }, token);
+            response.EnsureSuccessStatusCode();
+        }
+
+        async Task SaveAsync(HttpClient client, string token)
+        {
+            using var response = await SendAsync(client, HttpMethod.Put, "/api/settings/retention",
+                new { conversationDays = 12, auditDays = 34 }, token);
+            response.EnsureSuccessStatusCode();
+            using var saved = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            Assert.Equal(12, saved.RootElement.GetProperty("conversationDays").GetInt32());
+            Assert.Equal(34, saved.RootElement.GetProperty("auditDays").GetInt32());
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
     public async Task CleanupFailureAppearsInAuthenticatedWebReadinessWithSafeLogging()
     {
         using var data = IsolatedDirectory.Create();

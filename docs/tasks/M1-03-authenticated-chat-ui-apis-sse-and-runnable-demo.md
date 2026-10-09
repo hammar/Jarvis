@@ -133,6 +133,18 @@ and unexercised live behavior.
 
 ## Final handoff
 
+F58 follow-up owns authentication cookie registration in `ChatApi.cs`,
+the shared-cookie SQLite/HTTP regression, and development/testing/Web docs.
+Objective: isolate Local and Simulator browser sessions when their separate
+data directories share a hostname on different ports, while preserving
+same-path restart sessions under the existing M1-03 authentication criteria.
+No schema, Application contract, dependency or profile changes. Cookie names
+use the normalized absolute data path, not transient port/profile settings.
+The first upgrade from fixed names requires sign-in again; credentials and
+history are retained. Moving the directory or changing its symlink alias
+also requires sign-in. Completion requires coexistence/sign-out/CSRF/restart
+regression, applicable validation and independent review; results follow.
+
 Latest summary-review follow-up (F51–F57) owns the browser navigation/login
 script, settings live-status markup, atomic Infrastructure retention read,
 real SQLite/browser regressions, and related architecture/testing/Web docs.
@@ -218,6 +230,8 @@ the new revision remains required and is not inferred from this native run.
 | F55 | Previously missed: two autocommit reads could return a retention pair never saved during concurrent update. Medium. | Read both values/defaults in one SQLite statement/snapshot. Real SQLite concurrent readers/writers assert only committed pairs and preserve independent default handling for a missing setting. |
 | F56 | Previously missed: wrong passphrases displayed session-expiry text instead of the login failure. Low. | Excluded login from protected-request expiry handling, preserving its `Sign-in failed.` problem title. First-run/re-login browser scenario checks a failed passphrase then succeeds using the same form. |
 | F57 | Independent review of `82d9fd8`: stale retention-save failures could show an obsolete alert after navigation even though stale successful saves were ignored. Medium. | Applied the same captured-generation guard to save errors. Browser holds a save, navigates to Activity, returns a controlled 500, awaits the stale handler and asserts the newer view remains with no obsolete alert. |
+| F58 | Previously missed: fixed session and antiforgery cookie names collide between loopback instances because browser cookie scope excludes TCP ports. Medium. | Namespaced both cookies with the same stable hash of the normalized absolute data-directory path. Shared browser-cookie regression checks distinct names, authenticated CSRF mutations on both instances, sign-out isolation and same-path restart with preserved session/token. Existing fixed-name sessions require one sign-in after upgrade. |
+| F59 | F58 regression exposed retention PUT binding registered default settings from DI rather than the request JSON, returning success without applying the owner's submitted values. High. | Explicit body binding restores intended mutation semantics. Shared-cookie regression asserts the exact saved response and durable 12/34-day pair after restart, and rejects a submitted out-of-range period with HTTP 400. Earlier status-only/default-value assertions did not establish this behavior. |
 
 Follow-up validation on October 9, 2026: `tools/validate.sh build`,
 `integration` (126/126), `browser-e2e` (1/1 plus expected failing probe),

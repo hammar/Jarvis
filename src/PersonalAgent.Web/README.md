@@ -21,6 +21,14 @@ do not consume password attempts. All
 cookie-authenticated mutations require an antiforgery token in the
 `X-CSRF-TOKEN` header.
 
+Both cookie names include the same SHA-256 namespace of the normalized
+absolute data-directory path (case-normalized on Windows). Distinct data
+directories remain isolated in one browser on the same hostname, regardless
+of port. Restarts with the same path preserve authentication and antiforgery
+state. Moving the directory or selecting it through another symlink alias
+requires sign-in again, as does upgrading from the original fixed names;
+stored credentials and conversations are unaffected.
+
 Successful sign-in upgrades an outdated adaptive verifier with a conditional
 SQLite update. Authentication expiry refreshes anonymous antiforgery state
 so reauthentication does not require reloading the page.

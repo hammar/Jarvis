@@ -1,4 +1,6 @@
 using System.Globalization;
+using System.Security.Cryptography;
+using System.Text;
 using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
@@ -252,7 +254,7 @@ internal static class ChatApi
             Results.Ok(await settings.GetRetentionAsync(ReadRetentionDefaults(configuration), ct)));
         api.MapPut("/settings/retention", async (
             HttpContext context,
-            RetentionSettings settings,
+            [Microsoft.AspNetCore.Mvc.FromBody] RetentionSettings settings,
             IAntiforgery antiforgery,
             IOwnerSettingsService store,
             IClock clock,
@@ -380,6 +382,12 @@ internal static class OwnerAuthenticationRegistration
         this IServiceCollection services,
         string dataDirectory)
     {
+        var instancePath = Path.TrimEndingDirectorySeparator(Path.GetFullPath(dataDirectory));
+        if (OperatingSystem.IsWindows())
+        {
+            instancePath = instancePath.ToUpperInvariant();
+        }
+        var cookieNamespace = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(instancePath)));
         var keyDirectory = Path.Combine(dataDirectory, "data-protection-keys");
         Directory.CreateDirectory(keyDirectory);
         if (!OperatingSystem.IsWindows())
@@ -393,7 +401,7 @@ internal static class OwnerAuthenticationRegistration
         services.AddAntiforgery(options =>
         {
             options.HeaderName = "X-CSRF-TOKEN";
-            options.Cookie.Name = "Jarvis.Antiforgery";
+            options.Cookie.Name = $"Jarvis.Antiforgery.{cookieNamespace}";
             options.Cookie.HttpOnly = true;
             options.Cookie.SecurePolicy = CookieSecurePolicy.SameAsRequest;
             options.Cookie.SameSite = SameSiteMode.Strict;
@@ -402,7 +410,7 @@ internal static class OwnerAuthenticationRegistration
         services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
             .AddCookie(options =>
             {
-                options.Cookie.Name = "Jarvis.Session";
+                options.Cookie.Name = $"Jarvis.Session.{cookieNamespace}";
                 options.Cookie.HttpOnly = true;
                 options.Cookie.SecurePolicy = CookieSecurePolicy.SameAsRequest;
                 options.Cookie.SameSite = SameSiteMode.Strict;
