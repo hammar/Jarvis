@@ -221,7 +221,9 @@ internal static class ChatApi
             }
             catch (TurnRequestConflictException)
             {
-                return Results.Conflict(new { title = "Request ID was already used for different content." });
+                return Results.Problem(
+                    statusCode: StatusCodes.Status409Conflict,
+                    title: "Request ID was already used for different content.");
             }
             catch (ArgumentOutOfRangeException)
             {

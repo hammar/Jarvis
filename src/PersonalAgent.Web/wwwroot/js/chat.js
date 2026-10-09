@@ -75,6 +75,7 @@ async function api(path, options = {}) {
         chatSection.hidden = true;
         authSection.hidden = true;
         await csrf();
+        setAuthenticationMode(false);
         authSection.hidden = false;
         const error = new Error("Please sign in again.");
         error.status = 401;
@@ -204,6 +205,7 @@ async function showChat() {
     }
     authSection.hidden = true;
     chatSection.hidden = false;
+    profile.textContent = "Signed in to your local assistant.";
     document.getElementById("settings").hidden = true;
     document.getElementById("activity").hidden = true;
     if (activeTurnId) {
@@ -236,21 +238,25 @@ async function restoreConversation(id) {
         return true;
     } catch (error) {
         if (error.status !== 404) throw error;
-        if (pendingTurnSubmission !== recoveredSubmission) return false;
-        if (!clearPendingTurn()) return false;
-        if (recoveryGeneration !== conversationSelectionGeneration) return false;
-        eventSource?.close();
-        eventSource = null;
-        activeTurnId = "";
-        activeTurnConversationId = "";
-        conversationId = "";
-        setTurnNavigationLocked(false);
-        document.getElementById("send-turn").disabled = false;
-        document.getElementById("cancel-turn").hidden = true;
-        document.getElementById("conversation").hidden = true;
-        showError("The recovered conversation no longer exists. Start or select another conversation.");
+        clearMissingRecovery(recoveredSubmission, recoveryGeneration);
         return false;
     }
+}
+
+function clearMissingRecovery(recoveredSubmission, recoveryGeneration) {
+    if (pendingTurnSubmission !== recoveredSubmission) return;
+    if (!clearPendingTurn()) return;
+    if (recoveryGeneration !== conversationSelectionGeneration) return;
+    eventSource?.close();
+    eventSource = null;
+    activeTurnId = "";
+    activeTurnConversationId = "";
+    conversationId = "";
+    setTurnNavigationLocked(false);
+    document.getElementById("send-turn").disabled = false;
+    document.getElementById("cancel-turn").hidden = true;
+    document.getElementById("conversation").hidden = true;
+    showError("The recovered conversation no longer exists. Start or select another conversation.");
 }
 
 async function start() {
@@ -443,8 +449,27 @@ function connectEvents(turnId, lastSequence) {
     for (const type of ["TextDelta", "AssistantMessage", "TurnCompleted", "TurnFailed", "TurnCancelled", "TurnInterrupted"]) {
         source.addEventListener(type, handleEvent);
     }
-    source.onerror = () => {
-        // EventSource reconnects automatically and resends its last event ID.
+    let recoveryCheckInFlight = false;
+    source.onerror = async () => {
+        if (recoveryCheckInFlight || eventSource !== source || activeTurnId !== turnId) return;
+        recoveryCheckInFlight = true;
+        const recoveredSubmission = pendingTurnSubmission;
+        const recoveryGeneration = conversationSelectionGeneration;
+        try {
+            await api(`/api/conversations/${encodeURIComponent(activeTurnConversationId)}`);
+        } catch (error) {
+            if (eventSource !== source || activeTurnId !== turnId ||
+                recoveryGeneration !== conversationSelectionGeneration) return;
+            if (error.status === 404) {
+                source.close();
+                clearMissingRecovery(recoveredSubmission, recoveryGeneration);
+            } else {
+                showError(`Stream recovery could not be checked: ${error.message}`);
+            }
+        } finally {
+            recoveryCheckInFlight = false;
+        }
+        // Existing targets and transient failures retain EventSource's automatic cursor reconnect.
     };
 }
 

@@ -83,6 +83,11 @@ If removal fails, the record and recovery state remain intact with the storage
 error visible; missing-root recovery does not reconnect SSE or pretend to
 unlock. Reload retries cleanup after storage becomes available. Terminal and
 definitive-rejection cleanup also preserve the record and removal error.
+After a stream error, the browser checks the owned conversation: confirmed
+404 stops reconnect and runs the same failure-aware missing-history cleanup.
+Existing history and transient/network/server lookup failures retain automatic
+cursor reconnect; transient lookup failures are visible, and stale source or
+navigation results cannot reset newer state.
 Temporary startup network/500 failures retain recovery and reconnect. A definitive submission
 409 clears that request identity so an edited/new request can be sent;
 408/429 and ambiguous transport failures retain the unchanged retry identity.
@@ -102,6 +107,11 @@ Authenticated duplicate retries refresh the root's activity timestamp
 transactionally, extending retention and recent-list order without
 re-executing inference; trusted owner-less duplicates remain read-only.
 API errors use safe problem details;
+expected empty error statuses (including missing objects, malformed cursors,
+cookie challenges/forbids and throttling) share the Problem Details pipeline.
+Problem bodies include the server correlation ID matching `X-Correlation-ID`,
+including when a client requests SSE or HTML. Successful JSON/SSE and already
+started streams are not rewritten.
 responses include `X-Correlation-ID`. Unhandled request failures return
 generic correlated problem details without
 exposing exception text; requests whose response has already started are
@@ -120,6 +130,8 @@ The root page has Chat, Settings, and Activity surfaces. Settings show only
 provider/model and connection configuration status, never secret values.
 Explicit light/dark canvases and scheme-specific error colors keep error
 text at least 4.5:1 contrast in both supported color schemes.
+The profile status distinguishes signed-in chat from sign-in guidance,
+including authenticated reload and expired-session transitions.
 Only the latest selected surface is revealed after asynchronous navigation;
 stale Settings/Activity/conversation reads cannot replace it.
 Recent-conversation failures are shown in the alert only while that

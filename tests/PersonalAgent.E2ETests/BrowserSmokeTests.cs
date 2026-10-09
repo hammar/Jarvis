@@ -7,6 +7,192 @@ namespace PersonalAgent.E2ETests;
 [Collection(SimulatorCollection.Name)]
 public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
 {
+    [Fact]
+    [Trait("Category", "BrowserE2E")]
+    public async Task LateStreamRecoveryLookupCannotClearANewerConversation()
+    {
+        var isolated = new SimulatorHostFixture();
+        await isolated.InitializeAsync();
+        try
+        {
+            using var playwright = await Playwright.CreateAsync();
+            await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+            var page = await browser.NewPageAsync();
+            await page.GotoAsync(isolated.WebClient.BaseAddress!.ToString());
+            await page.GetByLabel("Passphrase").FillAsync(SimulatorHostFixture.OwnerPassphrase);
+            await page.Locator("#auth-submit").ClickAsync();
+            await page.WaitForFunctionAsync("() => !authenticationInFlight && !document.getElementById('chat').hidden");
+            await page.Locator("#new-conversation").ClickAsync();
+            await page.WaitForFunctionAsync("() => conversationId !== '' && !conversationCreationInFlight");
+            var conversation = await page.EvaluateAsync<string>("conversationId");
+            var turn = Guid.NewGuid().ToString();
+            var reached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var checks = 0;
+            await page.RouteAsync($"**/api/conversations/{conversation}", async route =>
+            {
+                if (Interlocked.Increment(ref checks) != 1)
+                {
+                    await route.ContinueAsync();
+                    return;
+                }
+                reached.TrySetResult();
+                await release.Task.WaitAsync(TimeSpan.FromSeconds(15));
+                await route.FulfillAsync(new RouteFulfillOptions { Status = 404, Body = "{}" });
+            });
+            await page.RouteAsync($"**/api/turns/{turn}/events",
+                route => route.FulfillAsync(new RouteFulfillOptions { Status = 404 }));
+            await page.EvaluateAsync(
+                """
+                input => {
+                    pendingTurnSubmission = { conversationId: input.conversation, text: "Old request",
+                        requestId: crypto.randomUUID(), turnId: input.turn };
+                    sessionStorage.setItem("jarvis.pending-turn.v1", JSON.stringify(pendingTurnSubmission));
+                    activeTurnId = input.turn;
+                    activeTurnConversationId = input.conversation;
+                    setTurnNavigationLocked(true);
+                    connectEvents(input.turn, 0);
+                    const original = eventSource.onerror;
+                    eventSource.onerror = () => window.__streamCheck = original();
+                }
+                """, new { conversation, turn });
+            await reached.Task.WaitAsync(TimeSpan.FromSeconds(15));
+            string selected;
+            try
+            {
+                await page.EvaluateAsync(
+                    "() => eventSource.dispatchEvent(new MessageEvent('TurnCompleted', { data: '{}', lastEventId: '1' }))");
+                await page.WaitForFunctionAsync("() => activeTurnId === '' && pendingTurnSubmission === null");
+                await page.Locator("#new-conversation").ClickAsync();
+                await page.WaitForFunctionAsync("() => conversationId !== '' && !conversationCreationInFlight");
+                selected = await page.EvaluateAsync<string>("conversationId");
+            }
+            finally
+            {
+                release.TrySetResult();
+            }
+            await page.EvaluateAsync("() => window.__streamCheck");
+            Assert.Equal(selected, await page.EvaluateAsync<string>("conversationId"));
+            Assert.True(await page.Locator("#conversation").IsVisibleAsync());
+            Assert.True(await page.Locator("#send-turn").IsEnabledAsync());
+            Assert.True(await page.GetByRole(AriaRole.Alert).IsHiddenAsync());
+        }
+        finally
+        {
+            await isolated.DisposeAsync();
+        }
+    }
+
+    [Theory]
+    [InlineData(404, 404, false)]
+    [InlineData(200, 404, false)]
+    [InlineData(404, 404, true)]
+    [InlineData(404, 500, false)]
+    [Trait("Category", "BrowserE2E")]
+    public async Task StreamFailureChecksMissingHistoryWithoutDiscardingTransientOrUnclearableRecovery(
+        int streamStatus, int historyStatus, bool removalFails)
+    {
+        var isolated = new SimulatorHostFixture();
+        await isolated.InitializeAsync();
+        try
+        {
+            using var playwright = await Playwright.CreateAsync();
+            await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+            var page = await browser.NewPageAsync();
+            await page.GotoAsync(isolated.WebClient.BaseAddress!.ToString());
+            await page.GetByLabel("Passphrase").FillAsync(SimulatorHostFixture.OwnerPassphrase);
+            await page.Locator("#auth-submit").ClickAsync();
+            await page.WaitForFunctionAsync("() => !authenticationInFlight && !document.getElementById('chat').hidden");
+            await page.Locator("#new-conversation").ClickAsync();
+            await page.WaitForFunctionAsync("() => conversationId !== '' && !conversationCreationInFlight");
+            var conversation = await page.EvaluateAsync<string>("conversationId");
+            var turn = Guid.NewGuid().ToString();
+            await page.EvaluateAsync(
+                """
+                input => {
+                    pendingTurnSubmission = { conversationId: input.conversation, text: "Recovered request",
+                        requestId: crypto.randomUUID(), turnId: input.turn };
+                    sessionStorage.setItem("jarvis.pending-turn.v1", JSON.stringify(pendingTurnSubmission));
+                    activeTurnId = input.turn;
+                    activeTurnConversationId = input.conversation;
+                    setTurnNavigationLocked(true);
+                    document.getElementById("send-turn").disabled = true;
+                    const original = Storage.prototype.removeItem;
+                    Storage.prototype.removeItem = function(key) {
+                        if (input.removalFails && key === "jarvis.pending-turn.v1") throw new Error("Controlled removal failure.");
+                        return original.call(this, key);
+                    };
+                    window.__restoreRemoval = () => Storage.prototype.removeItem = original;
+                }
+                """, new { conversation, turn, removalFails });
+            await page.RouteAsync($"**/api/conversations/{conversation}", route => route.FulfillAsync(new RouteFulfillOptions
+            {
+                Status = historyStatus,
+                ContentType = "application/problem+json",
+                Body = "{\"title\":\"Controlled recovery lookup.\"}"
+            }));
+            await page.RouteAsync($"**/api/turns/{turn}/events", route => route.FulfillAsync(new RouteFulfillOptions
+            {
+                Status = streamStatus,
+                ContentType = "text/event-stream",
+                Body = ""
+            }));
+            await page.EvaluateAsync("turn => connectEvents(turn, 0)", turn);
+            var expected = removalFails ? "could not be cleared" :
+                historyStatus == 404 ? "no longer exists" : "Stream recovery could not be checked";
+            await page.GetByRole(AriaRole.Alert).Filter(new LocatorFilterOptions { HasText = expected }).WaitForAsync();
+            if (removalFails || historyStatus == 500)
+            {
+                Assert.Equal(turn, await page.EvaluateAsync<string>("activeTurnId"));
+                Assert.NotNull(await page.EvaluateAsync<string?>("sessionStorage.getItem('jarvis.pending-turn.v1')"));
+                Assert.True(await page.Locator("#new-conversation").IsDisabledAsync());
+                if (removalFails)
+                {
+                    await page.EvaluateAsync("async () => { window.__restoreRemoval(); await eventSource.onerror(); }");
+                    await page.GetByRole(AriaRole.Alert).Filter(new LocatorFilterOptions { HasText = "no longer exists" }).WaitForAsync();
+                }
+                else
+                {
+                    await page.EvaluateAsync("() => eventSource.close()");
+                }
+            }
+            if (historyStatus == 404)
+            {
+                Assert.Equal("", await page.EvaluateAsync<string>("activeTurnId"));
+                Assert.Null(await page.EvaluateAsync<string?>("sessionStorage.getItem('jarvis.pending-turn.v1')"));
+                Assert.True(await page.Locator("#new-conversation").IsEnabledAsync());
+                Assert.True(await page.EvaluateAsync<bool>("eventSource === null"));
+            }
+        }
+        finally
+        {
+            await isolated.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "BrowserE2E")]
+    public async Task ProfileGuidanceMatchesSignInReloadAndExpiredSession()
+    {
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+        var page = await browser.NewPageAsync();
+        await page.GotoAsync(fixture.WebClient.BaseAddress!.ToString());
+        await page.Locator("#auth").WaitForAsync();
+        Assert.Equal("Sign in to your local assistant.", await page.Locator("#profile").InnerTextAsync());
+        await page.GetByLabel("Passphrase").FillAsync(SimulatorHostFixture.OwnerPassphrase);
+        await page.Locator("#auth-submit").ClickAsync();
+        await page.WaitForFunctionAsync("() => !authenticationInFlight && !document.getElementById('chat').hidden");
+        Assert.Equal("Signed in to your local assistant.", await page.Locator("#profile").InnerTextAsync());
+        await page.ReloadAsync();
+        await page.Locator("#chat").WaitForAsync();
+        Assert.Equal("Signed in to your local assistant.", await page.Locator("#profile").InnerTextAsync());
+        await page.RouteAsync("**/api/settings", route => route.FulfillAsync(new RouteFulfillOptions { Status = 401 }));
+        await page.Locator("#settings-button").ClickAsync();
+        await page.Locator("#auth").WaitForAsync();
+        Assert.Equal("Sign in to your local assistant.", await page.Locator("#profile").InnerTextAsync());
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

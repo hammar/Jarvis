@@ -16,6 +16,10 @@ builder.WebHost.ConfigureKestrel(options =>
 builder.AddServiceDefaults();
 builder.Services.AddRazorPages();
 builder.Services.AddHealthChecks();
+builder.Services.AddProblemDetails(options =>
+    options.CustomizeProblemDetails = context =>
+        context.ProblemDetails.Extensions["correlationId"] = context.HttpContext.TraceIdentifier);
+builder.Services.AddSingleton<IProblemDetailsWriter, ApiProblemDetailsFallbackWriter>();
 
 var profile = builder.Configuration["JARVIS_PROFILE"] ?? "Local";
 if (profile is not ("Simulator" or "Local" or "Hybrid" or "E2E"))
@@ -144,8 +148,7 @@ app.Use(async (context, next) =>
         context.Response.StatusCode = StatusCodes.Status413PayloadTooLarge;
         await Microsoft.AspNetCore.Http.Results.Problem(
             statusCode: StatusCodes.Status413PayloadTooLarge,
-            title: "Request exceeds the supported size.",
-            extensions: new Dictionary<string, object?> { ["correlationId"] = context.TraceIdentifier })
+            title: "Request exceeds the supported size.")
             .ExecuteAsync(context);
         return;
     }
@@ -178,11 +181,13 @@ app.Use(async (context, next) =>
             statusCode: status,
             title: status == StatusCodes.Status500InternalServerError
                 ? "The request could not be completed."
-                : "The request could not be read.",
-            extensions: new Dictionary<string, object?> { ["correlationId"] = context.TraceIdentifier })
+                : "The request could not be read.")
             .ExecuteAsync(context);
     }
 });
+app.UseStatusCodePages(async statusContext =>
+    await Results.Problem(statusCode: statusContext.HttpContext.Response.StatusCode)
+        .ExecuteAsync(statusContext.HttpContext));
 app.UseRateLimiter();
 app.UseAuthentication();
 app.UseAuthorization();
@@ -296,4 +301,24 @@ static int ReadBoundedSeconds(
 /// <summary>Exposes the generated entry point to in-process ASP.NET Core integration tests.</summary>
 public partial class Program
 {
+}
+
+// EventSource requests accept text/event-stream, but pre-stream failures still require
+// correlated JSON. The default writer otherwise declines these requests, bypassing customization.
+internal sealed class ApiProblemDetailsFallbackWriter(
+    Microsoft.Extensions.Options.IOptions<ProblemDetailsOptions> options) : IProblemDetailsWriter
+{
+    /// <inheritdoc />
+    public bool CanWrite(ProblemDetailsContext context) => !context.HttpContext.Response.HasStarted;
+
+    /// <inheritdoc />
+    public ValueTask WriteAsync(ProblemDetailsContext context)
+    {
+        options.Value.CustomizeProblemDetails?.Invoke(context);
+        return new ValueTask(context.HttpContext.Response.WriteAsJsonAsync(
+            context.ProblemDetails,
+            options: null,
+            contentType: "application/problem+json",
+            cancellationToken: context.HttpContext.RequestAborted));
+    }
 }

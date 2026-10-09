@@ -328,6 +328,9 @@ the new revision remains required and is not inferred from this native run.
 | F71 | Independent review of a93ba39: terminal duplicate pre-read can return an expired root's turn directly; retention after the read deletes it before 202, leaving a missing accepted SSE target. Medium. | Fixed ba2403e: owner-scoped duplicate acceptance revalidates/touches activity in the immediate transaction, full queue does not reject duplicates, owner-less duplicates remain read-only. Release integration 145/145 and unit 93/93 cover cleanup before/after acceptance, original ID/readable terminal SSE, monotonic activity and capacity. Independent follow-up substantiated correction. |
 | F72 | Inline review: dark-scheme error red fails 4.5:1 contrast on common dark canvases. Medium. | Fixed 8cf22fd: explicit light/dark canvas and foreground, preserve light error red and use lighter dark red. Full browser 16/16 computes actual foreground/canvas contrast and requires at least 4.5:1 in both schemes. Independent calculation: 4.572873 light, 7.980275 dark. |
 | F73 | Inline review: failed pending-record removal nulls memory, hides recovery and overwrites the storage error with a missing-conversation notice. Medium. | Fixed 8cf22fd: memory cleared only after removal succeeds; boolean failure stops missing recovery reset/reconnect and preserves error/state. Terminal/rejection callers honor failure. Full browser 16/16 covers accepted/unaccepted blocked removal across reload and successful cleanup; independent actual-script probes cover all callers. |
+| F74 | Previously missed: expected errors omit structured correlated Problem Details (404, cursor 400, cookie 401/403, limiter 429 and ad hoc conflict). Medium. | In progress: shared Problem Details customization and expected-status handling, exact HTTP payload/correlation regressions. |
+| F75 | Previously missed: retention after conversation/stream authorization can delete terminal history, ending SSE without terminal output and permanently locking recovery. Medium. | Working-tree correction: on stream error verify the owned conversation, clean missing history via shared failure-aware recovery path, retain automatic reconnect on transient failure and ignore stale source/generation. Browser exercises missing-before-stream, empty stream after deletion, storage-removal failure and transient lookup. Validation pending. |
+| F76 | Previously missed: authenticated chat displays sign-in guidance in the visible profile region. Low. | Working-tree correction: authenticated chat sets signed-in status; 401 restores sign-in guidance. Browser covers login, cookie reload and expired-session transition. Validation pending. |
 
 Follow-up validation on October 9, 2026: `tools/validate.sh build`,
 `integration` (126/126), `browser-e2e` (1/1 plus expected failing probe),
@@ -568,3 +571,14 @@ contrast and missing-root behavior; terminal/rejection failures have probe,
 not dedicated browser, coverage. Failed-removal late-generation interleaving
 was inspected, not executed; non-Chromium/forced-color/assistive-technology
 behavior remains unverified. Full F1–F73 ledger retained.
+
+F74–F76 owner-authorized scope: consistent safe expected-error payloads,
+missing SSE target recovery and truthful authentication status. Spec sections
+12/14/19/20; M1-03 structured errors/correlation, owner-scoped lookup and
+reconnect/durable-history scenarios. Owned files: Web Program/API/script,
+integration/browser regressions and affected Web/testing docs/ledger.
+Dependencies: existing owner auth, persisted history and F73 failure-aware
+cleanup. No schema/Application contract/provider/product expansion.
+Completion: real HTTP expected status/content-type/title/correlation evidence,
+SSE error missing/transient/storage/stale behavior, authentication transitions,
+relevant build/integration/coverage/browser/docs gates and independent review.
