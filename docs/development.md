@@ -56,7 +56,7 @@ never through a model or request payload.
 | Simulator | No credentials or real endpoints. AppHost supplies Web with a discovered deterministic OpenAI-compatible model fixture and fake Home Assistant process; external cloud and Home Assistant credentials are not forwarded. Simulator data is persistent and separate from Local data. |
 | Local | Requires `JARVIS_OLLAMA_BASE_URL` and `JARVIS_OLLAMA_MODEL`; cloud is disabled. Optional HA uses `JARVIS_HOME_ASSISTANT_BASE_URL` and a secret reference. |
 | Hybrid | Requires explicit Ollama endpoint/model and cloud HTTP(S) endpoints plus `JARVIS_CLOUD_SECRET_REFERENCE`. Configuring Hybrid does not bypass packet review or consent. |
-| E2E | Test-only; requires unique `JARVIS_E2E_DATA_DIR`, launches controlled model/Home Assistant fixtures, and configures Web to use the discovered model fixture instead of external inference. |
+| E2E | Test-only; requires unique `JARVIS_E2E_DATA_DIR`, launches controlled model/Home Assistant fixtures, and configures Web to use the discovered model fixture instead of external inference. Its model fixture exposes a one-shot delayed-stream control only to E2E tests for deterministic cancellation checks; model input cannot enable it. An optional `JARVIS_E2E_BOOTSTRAP_TOKEN` is test-only and rejected in all other profiles. |
 
 Endpoint settings must be absolute HTTP(S) URIs without embedded user info or
 query data. Supply tokens through a named protected secret reference, not an
@@ -89,6 +89,36 @@ replayed. Readiness probes SQLite reachability and the applied schema version, a
 with local-policy availability,
 coordinator recovery, and provider configuration separately from model
 connectivity; it does not probe or log the model endpoint.
+
+### Owner authentication and local chat
+
+The first Web startup prints a one-time owner bootstrap token to the local
+host console. Use it once in the setup form to create the owner passphrase.
+Only an adaptive salted password hash is stored in SQLite. The session is an
+HttpOnly, SameSite=Strict cookie with a 12-hour lifetime; Data Protection keys
+persist below the owner-private data directory so restarts preserve cookie
+validation. Mutations require the antiforgery request token in
+`X-CSRF-TOKEN`. Login and bootstrap are rate-limited. If the passphrase is
+lost, this M1 version has no reset flow; retain the protected data directory.
+
+The root page provides Chat, Settings, and Activity. Chat submits bounded
+requests with stable IDs and reconnects through the SSE `Last-Event-ID`
+sequence. Closing the browser stream does not stop inference; use Cancel for
+owner cancellation. Settings persist conversation/audit retention windows in
+SQLite (1–3650 days; defaults are 90/30). The configuration keys
+`JARVIS_CONVERSATION_RETENTION_DAYS` and `JARVIS_AUDIT_RETENTION_DAYS` are
+initial defaults only and are read if no owner setting exists. Editing those
+settings uses .NET options/configuration for startup defaults and SQLite for
+the authoritative mutable owner state; it intentionally does not add a
+SQLite-backed .NET configuration provider. Expired eligible history is
+cleaned at startup, immediately when settings are saved, and hourly from the
+current persisted retention values while the host remains running.
+
+`GET /health/live` is public for the Aspire process health probe.
+`GET /health/ready` is authenticated and reports database, recovery, and
+provider-configuration state to the owner. Development-only `/health` and
+`/alive` aliases are liveness-only; they do not expose readiness details. A
+healthy process probe does not mean that the model is reachable.
 
 ## Direct Web host and resources
 

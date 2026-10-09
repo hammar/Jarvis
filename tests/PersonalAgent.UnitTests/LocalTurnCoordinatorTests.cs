@@ -2048,6 +2048,23 @@ public sealed class LocalTurnCoordinatorTests
             }
         }
 
+        public ValueTask<ConversationRecord> CreateConversationAsync(
+            ConversationRecord conversation,
+            CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
+        public ValueTask<ConversationRecord?> GetConversationAsync(
+            ConversationId conversationId,
+            string ownerId,
+            CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
+        public ValueTask<IReadOnlyList<ConversationRecord>> ReadRecentConversationsAsync(
+            string ownerId,
+            int maximumConversations,
+            CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
         public ValueTask<ConversationMessage> AppendMessageAsync(
             ConversationMessage message,
             CancellationToken cancellationToken)
@@ -2212,6 +2229,18 @@ public sealed class LocalTurnCoordinatorTests
                 return ValueTask.FromResult(turn);
             }
         }
+
+        public ValueTask<ConversationTurn?> GetTurnForOwnerAsync(
+            TurnId turnId,
+            string ownerId,
+            CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
+        public ValueTask<IReadOnlyList<ConversationTurn>> ReadRecentTurnsForOwnerAsync(
+            string ownerId,
+            int maximumTurns,
+            CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
 
         public async ValueTask<IReadOnlyList<ConversationTurn>> ReadNonterminalTurnsAsync(
             int maximumTurns,

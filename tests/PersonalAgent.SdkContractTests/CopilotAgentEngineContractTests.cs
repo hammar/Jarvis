@@ -929,6 +929,23 @@ public sealed class CopilotAgentEngineContractTests
         public TaskCompletionSource BudgetRejectionStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource BudgetRejectionCancelled { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
+        public ValueTask<ConversationRecord> CreateConversationAsync(
+            ConversationRecord conversation,
+            CancellationToken cancellationToken) =>
+            inner.CreateConversationAsync(conversation, cancellationToken);
+
+        public ValueTask<ConversationRecord?> GetConversationAsync(
+            ConversationId conversationId,
+            string ownerId,
+            CancellationToken cancellationToken) =>
+            inner.GetConversationAsync(conversationId, ownerId, cancellationToken);
+
+        public ValueTask<IReadOnlyList<ConversationRecord>> ReadRecentConversationsAsync(
+            string ownerId,
+            int maximumConversations,
+            CancellationToken cancellationToken) =>
+            inner.ReadRecentConversationsAsync(ownerId, maximumConversations, cancellationToken);
+
         public ValueTask<ConversationMessage> AppendMessageAsync(
             ConversationMessage message,
             CancellationToken cancellationToken) =>
@@ -963,6 +980,18 @@ public sealed class CopilotAgentEngineContractTests
 
         public ValueTask<ConversationTurn?> GetTurnAsync(TurnId turnId, CancellationToken cancellationToken) =>
             inner.GetTurnAsync(turnId, cancellationToken);
+
+        public ValueTask<ConversationTurn?> GetTurnForOwnerAsync(
+            TurnId turnId,
+            string ownerId,
+            CancellationToken cancellationToken) =>
+            inner.GetTurnForOwnerAsync(turnId, ownerId, cancellationToken);
+
+        public ValueTask<IReadOnlyList<ConversationTurn>> ReadRecentTurnsForOwnerAsync(
+            string ownerId,
+            int maximumTurns,
+            CancellationToken cancellationToken) =>
+            inner.ReadRecentTurnsForOwnerAsync(ownerId, maximumTurns, cancellationToken);
 
         public ValueTask<IReadOnlyList<ConversationTurn>> ReadNonterminalTurnsAsync(
             int maximumTurns,

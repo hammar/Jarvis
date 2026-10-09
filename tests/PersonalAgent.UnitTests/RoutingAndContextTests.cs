@@ -375,6 +375,23 @@ public sealed class RoutingAndContextTests
 
         internal int RequestedMaximum { get; private set; }
 
+        public ValueTask<ConversationRecord> CreateConversationAsync(
+            ConversationRecord conversation,
+            CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
+        public ValueTask<ConversationRecord?> GetConversationAsync(
+            ConversationId conversationId,
+            string ownerId,
+            CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
+        public ValueTask<IReadOnlyList<ConversationRecord>> ReadRecentConversationsAsync(
+            string ownerId,
+            int maximumConversations,
+            CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
         public ValueTask<ConversationMessage> AppendMessageAsync(
             ConversationMessage message,
             CancellationToken cancellationToken) =>
@@ -412,6 +429,18 @@ public sealed class RoutingAndContextTests
             throw new NotSupportedException();
 
         public ValueTask<ConversationTurn?> GetTurnAsync(TurnId turnId, CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
+        public ValueTask<ConversationTurn?> GetTurnForOwnerAsync(
+            TurnId turnId,
+            string ownerId,
+            CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
+        public ValueTask<IReadOnlyList<ConversationTurn>> ReadRecentTurnsForOwnerAsync(
+            string ownerId,
+            int maximumTurns,
+            CancellationToken cancellationToken) =>
             throw new NotSupportedException();
 
         public ValueTask<IReadOnlyList<ConversationTurn>> ReadNonterminalTurnsAsync(

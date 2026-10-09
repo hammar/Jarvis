@@ -1,10 +1,75 @@
 # PersonalAgent.Web
 
-Owns the ASP.NET Core/Razor host, health endpoints, and composition root.
-Handlers call Application use cases. Infrastructure may be referenced only
-from `Program.cs` for future composition; ServiceDefaults supplies health,
-discovery, and privacy-filtered telemetry.
+Owns the ASP.NET Core/Razor host, owner authentication, authenticated chat APIs,
+SSE delivery, health endpoints, and composition root. Request handlers use
+Application-owned contracts. Infrastructure references are confined to
+`Program.cs`; ServiceDefaults supplies service discovery and
+privacy-filtered telemetry.
 
-Entry point: `Program.cs`; the current Razor page is a profile smoke surface.
-Tests: `dotnet test tests/PersonalAgent.IntegrationTests` and
+## Owner setup and sessions
+
+At first startup, the host prints a one-time bootstrap token to its local
+console. Keep the token local and enter it in the setup form; it is not placed
+in a URL. Choose a passphrase of at least 12 characters. Jarvis stores only an
+ASP.NET Identity adaptive salted password hash in SQLite. The browser receives
+an HttpOnly, SameSite=Strict session cookie, protected by persisted ASP.NET
+Data Protection keys in the private `JARVIS_DATA_DIR`. Sign-in sessions expire
+after 12 hours and may slide while active. Sign out or clear browser cookies
+to end the session. Login/bootstrap requests are rate-limited, and all
+cookie-authenticated mutations require an antiforgery token in the
+`X-CSRF-TOKEN` header.
+
+The account and conversations survive application upgrades as long as the
+owner keeps the same data directory. A lost passphrase has no recovery path in
+this M1 slice; preserve the data directory and use the configured OS account's
+local access controls.
+The deterministic bootstrap token is injected only by the isolated E2E
+profile; normal Simulator, Local, and Hybrid hosts generate a fresh token.
+
+## API and streaming
+
+- `GET /api/auth/status`, `GET /api/auth/csrf`, `POST /api/auth/bootstrap`,
+  `POST /api/auth/login`, and authenticated `POST /api/auth/logout`.
+- Authenticated `GET/POST /api/conversations` and
+  `GET /api/conversations/{id}`. `POST /api/conversations/{id}/turns`
+  accepts `{ "requestId": "...", "text": "..." }`; retries with the same
+  conversation/request ID and same content return the original turn.
+- `GET /api/turns/{id}/events` streams stored ordered events using SSE and
+  honors the standard `Last-Event-ID` sequence header. Disconnecting only
+  stops delivery; it does not cancel inference. `POST /api/turns/{id}/cancel`
+  performs explicit bounded cancellation.
+- `GET /api/settings`, `PUT /api/settings/retention`,
+  authenticated `GET /health/ready`, and public `GET /health/live`.
+
+Before sending a turn, the browser temporarily stores its text, conversation,
+and request ID in tab-scoped `sessionStorage`. This lets an owner safely retry
+with the same idempotency key after a lost response or page reload. The record
+is cleared when the server accepts the turn or returns a definitive
+non-retryable client error; it remains available after an ambiguous failure.
+This is browser-local recovery state, not a telemetry or logging channel.
+
+Conversation and turn lookups are owner-scoped in persistence before data is
+returned or cancellation is requested. API errors use safe problem details;
+responses include `X-Correlation-ID`. JSON request bodies are capped at 64 KiB, turn text at the Application
+boundary's 8,000-character limit, and client request IDs at 128 characters by
+default. Kestrel also enforces the body cap for requests without
+`Content-Length`. SSE reads persisted events in pages of up to 100, drains
+terminal backlogs before closing, and does not hold a worker while waiting for
+inference.
+
+The root page has Chat, Settings, and Activity surfaces. Settings show only
+provider/model and connection configuration status, never secret values.
+Retention periods default to 90 conversation days and 30 audit days; the owner
+may save 1–3650 days. Saved values are held in SQLite and survive restarts.
+They override the trusted host defaults from
+`JARVIS_CONVERSATION_RETENTION_DAYS` and `JARVIS_AUDIT_RETENTION_DAYS`.
+Lowering a period removes newly expired eligible conversation/audit history
+when saved; conversations with unresolved turns are retained.
+
+The E2E-only bootstrap token setting is rejected unless
+`JARVIS_PROFILE=E2E`. Do not configure test controls in Local, Simulator, or
+Hybrid profiles.
+
+Entry point: `Program.cs`; API and SSE routes: `ChatApi.cs`. Tests:
+`dotnet test tests/PersonalAgent.IntegrationTests` and
 `dotnet test tests/PersonalAgent.E2ETests`.

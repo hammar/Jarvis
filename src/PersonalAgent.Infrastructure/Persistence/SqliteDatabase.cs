@@ -19,7 +19,8 @@ public sealed class SqliteDatabase
     [
         (1, "PersonalAgent.Infrastructure.Persistence.Migrations.001-initial.sql"),
         (2, "PersonalAgent.Infrastructure.Persistence.Migrations.002-durable-state.sql"),
-        (3, "PersonalAgent.Infrastructure.Persistence.Migrations.003-turn-request-idempotency.sql")
+        (3, "PersonalAgent.Infrastructure.Persistence.Migrations.003-turn-request-idempotency.sql"),
+        (4, "PersonalAgent.Infrastructure.Persistence.Migrations.004-owner-auth-settings.sql")
     ];
 
     private readonly string connectionString;

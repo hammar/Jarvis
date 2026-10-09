@@ -18,6 +18,10 @@ enforces at most one user and one assistant message per turn. Submission
 persists the received turn, user message, request identity, and initial event
 in one transaction; terminal completion persists its answer, status, and event
 atomically.
+Migration 004 adds the single-owner password-verifier row and constrained
+owner retention settings. It does not store plaintext passphrases or
+credentials. The passphrase hash is produced by ASP.NET Identity in Web; owner
+settings remain Application contracts backed here by SQLite.
 If only the previous AppHost `PersonalAgent` default contains a database, the
 Web host continues using that location; if both defaults contain a database,
 configure `JARVIS_DATA_DIR` explicitly.
@@ -32,9 +36,13 @@ Administrators only. New Windows data directories use that protected ACL, and
 existing directories granting other identities are rejected.
 
 The owner can set `JARVIS_CONVERSATION_RETENTION_DAYS` (default 90) and
-`JARVIS_AUDIT_RETENTION_DAYS` (default 30); each must be an integer from 1 to
-3650. Startup removes expired conversations/messages/turn events only when
-they have no unresolved turns; expired audit events are removed independently.
+`JARVIS_AUDIT_RETENTION_DAYS` (default 30) as trusted first-run defaults; each
+must be an integer from 1 to 3650. Owner-edited values persist in SQLite and
+take precedence over later configuration defaults. Startup removes expired
+conversations/messages/turn events only when they have no unresolved turns;
+expired audit events are removed independently. Cleanup runs at startup,
+hourly using the latest persisted values, and in the same SQLite transaction
+as a retention-settings update.
 Running, approval-waiting, and interrupted turn state is retained for recovery.
 It does not delete durable facts, jobs, approval/action journals, or
 `Unknown` outcomes.

@@ -1,10 +1,63 @@
 @page
 @model PersonalAgent.Web.Pages.IndexModel
 @{
-    ViewData["Title"] = "Jarvis";
+    ViewData["Title"] = "Jarvis local chat";
 }
 
 <main>
     <h1>Jarvis</h1>
-    <p id="profile">Running the @Model.Profile profile.</p>
+    <p id="profile" role="status">Running the @Model.Profile profile.</p>
+    <section id="auth" aria-labelledby="auth-title" hidden>
+        <h2 id="auth-title">Owner sign-in</h2>
+        <form id="auth-form">
+            <label id="bootstrap-token-label" for="bootstrap-token" hidden>One-time setup token</label>
+            <input id="bootstrap-token" name="bootstrapToken" type="password" autocomplete="one-time-code" maxlength="256" hidden />
+            <label for="passphrase">Passphrase</label>
+            <input id="passphrase" name="passphrase" type="password" autocomplete="current-password" minlength="12" maxlength="1024" required />
+            <label class="remember"><input id="remember-me" type="checkbox" /> Keep me signed in on this browser</label>
+            <button id="auth-submit" type="submit">Sign in</button>
+        </form>
+    </section>
+    <section id="chat" hidden aria-label="Chat">
+        <nav aria-label="Chat actions">
+            <button id="new-conversation" type="button">New conversation</button>
+            <button id="settings-button" type="button">Settings</button>
+            <button id="activity-button" type="button">Activity</button>
+            <button id="logout" type="button">Sign out</button>
+        </nav>
+        <p id="route-status"></p>
+        <aside>
+            <h2>Recent conversations</h2>
+            <ul id="conversation-list"></ul>
+        </aside>
+        <section id="conversation" hidden aria-label="Conversation">
+            <h2 id="conversation-title">Conversation</h2>
+            <ol id="messages" aria-live="polite"></ol>
+            <form id="turn-form">
+                <label for="prompt">Message</label>
+                <textarea id="prompt" name="text" maxlength="8000" required></textarea>
+                <button id="send-turn" type="submit">Send</button>
+                <button id="cancel-turn" type="button" hidden>Cancel turn</button>
+            </form>
+        </section>
+        <section id="settings" hidden aria-label="Settings">
+            <h2>Local settings</h2>
+            <p id="settings-status"></p>
+            <form id="retention-form">
+                <label for="conversation-days">Conversation retention (days)</label>
+                <input id="conversation-days" type="number" min="1" max="3650" required />
+                <label for="audit-days">Audit retention (days)</label>
+                <input id="audit-days" type="number" min="1" max="3650" required />
+                <button type="submit">Save settings</button>
+            </form>
+        </section>
+        <section id="activity" hidden aria-label="Activity">
+            <h2>Local activity</h2>
+            <p>Activity is limited to local conversation and turn history. Provider secrets and prompt telemetry are not displayed.</p>
+            <ul id="activity-list"></ul>
+        </section>
+    </section>
+    <p id="error" role="alert" hidden></p>
 </main>
+<link rel="stylesheet" href="~/css/site.css" asp-append-version="true" />
+<script src="~/js/chat.js" asp-append-version="true"></script>

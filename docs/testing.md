@@ -186,12 +186,25 @@ authority.
 | Direct Web startup rejects unsupported profiles before persistence access | `SqliteAndWebSmokeTests.DirectHostRejectsUnsupportedProfilesBeforeOpeningStorage` |
 | Concurrent startup recovers a prepared restore once | `SqlitePersistenceTests.ConcurrentStartupSerializesPreparedRestoreRecovery` |
 | Independent workers race on optimistic writes and startup migrations | `SqlitePersistenceTests.ConcurrentMemoryWritersAllowOnlyOneExpectedVersionUpdate`, `SqlitePersistenceTests.SimultaneousStartupAppliesEachMigrationOnlyOnce` |
-| Expired conversations with unresolved turns survive retention | `SqlitePersistenceTests.RetentionUsesDefaultAndOverrideWindowsAndKeepsDurableState` |
+| Running, approval-waiting, and interrupted turns preserve expired conversations; Completed, Failed, and Cancelled turns do not block retention | `SqlitePersistenceTests.RetentionUsesDefaultAndOverrideWindowsAndKeepsDurableState` |
+| Retention cleanup runs during host uptime using durable settings | `SqlitePersistenceTests.HostedRetentionCleanupAppliesExpiredHistoryDuringUptime` |
 | Razor host works without external services | `SqliteAndWebSmokeTests.RazorHostServesTheConfiguredProfileWithoutExternalServices` |
+| Bootstrap creates only one owner verifier; sign-in, sign-out, CSRF checks and owner-only chat APIs are enforced | `SqliteAndWebSmokeTests.OwnerBootstrapSignInCsrfAndConversationAuthorizationAreEnforced` |
+| Readiness is authenticated while process liveness remains public | `SqliteAndWebSmokeTests.ReadinessRequiresOwnerSessionWhileLivenessRemainsPublic` |
+| Owner password verifier and retention settings survive SQLite reopen; owner-scoped conversation/turn lookups hide other owners | `SqlitePersistenceTests.OwnerVerifierAndRetentionSettingsSurviveDatabaseReopen`, `SqlitePersistenceTests.ConversationQueriesEnforceOwnerIdentity` |
+| Owner-edited retention settings are bounded and durable; periodic cleanup reads the current durable values transactionally rather than applying stale startup values | `SqlitePersistenceTests.OwnerVerifierAndRetentionSettingsSurviveDatabaseReopen`, `SqlitePersistenceTests.PeriodicCleanupUsesCurrentDurableRetentionAfterOwnerChangesSettings` |
+| Trusted retention defaults accept bounded integers and invalid values fail startup | `SqliteAndWebSmokeTests.OwnerBootstrapSignInCsrfAndConversationAuthorizationAreEnforced`, `SqliteAndWebSmokeTests.InvalidConversationRetentionConfigurationFailsStartup` |
+| Repeated conversation/client request ID returns its original turn; stored terminal SSE events are delivered in order | `SqliteAndWebSmokeTests.OwnerBootstrapSignInCsrfAndConversationAuthorizationAreEnforced` |
+| API rejects request sizes beyond coordinator bounds instead of surfacing coordinator validation as a server error | `SqliteAndWebSmokeTests.OwnerBootstrapSignInCsrfAndConversationAuthorizationAreEnforced` |
+| SSE resumes after `Last-Event-ID`, replays only later terminal events, rejects malformed cursors, and does not repeat a consumed terminal event | `SqliteAndWebSmokeTests.OwnerBootstrapSignInCsrfAndConversationAuthorizationAreEnforced` |
+| Terminal SSE history larger than one bounded page drains all ordered events before closing | `SqliteAndWebSmokeTests.OwnerBootstrapSignInCsrfAndConversationAuthorizationAreEnforced` |
+| Public development health aliases expose liveness only; detailed readiness requires owner authentication | `SqliteAndWebSmokeTests.DevelopmentHealthEndpointsExposeOnlyPublicLiveness` |
 | Direct test-profile startup requires isolated data | `SqliteAndWebSmokeTests.TestProfileRequiresAnExplicitDataDirectory` |
 | Aspire configures Web against its controlled OpenAI-compatible simulator and reports database loss after startup | `AspireSimulatorTests.SimulatorStartsWebAndDiscoversDeterministicManagedEndpoints`, `AspireSimulatorTests.ReadinessReportsDatabaseUnavailableAfterStartup` |
+| Kestrel rejects chunked request bodies that exceed the configured 64 KiB cap | `AspireSimulatorTests.KestrelRejectsOversizedChunkedRequestBodies` |
 | Local and Hybrid use explicit external endpoint configuration | `ExternalEndpointProfileTests.LocalAndHybridProfilesLaunchWithExplicitExternalEndpointReferences` |
-| Browser reaches actual AppHost Web resource | `BrowserSmokeTests.PlaywrightLoadsTheAspireSimulatorPage` |
+| Browser displays a partial TextDelta before terminal completion, prevents conversation navigation while a turn is active, reports a provider failure, cancels a delayed turn, restarts Aspire, and reopens durable conversation history | `BrowserSmokeTests.PlaywrightSignsInAndStreamsASimulatorChat` |
+| Terminal event committed between SSE event-page and status reads is delivered before the stream closes | `SqliteAndWebSmokeTests.SseDrainsTerminalEventCommittedBetweenEventReadAndStatusRead` |
 | SDK compatibility uses pinned actual runtime | T01 `--contracts` suite, `sdk-contracts-platform` on Linux/macOS |
 | Adapter streams events with explicit local/cloud provider and transcript isolation | `CopilotAgentEngineContractTests.ActualRuntimeStreamsEventsUsesExplicitProviderAndPersistsOrderedTerminalOutcome` |
 | Adapter exposes only the exact registered tool and forwards host outcome; reconnect replay resumes after the observed sequence without redispatching or duplicating the final event | `CopilotAgentEngineContractTests.ActualRuntimeInvokesOnlyRegisteredToolAndForwardsHostOutcome` |

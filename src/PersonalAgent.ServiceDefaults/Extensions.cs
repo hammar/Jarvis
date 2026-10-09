@@ -77,14 +77,17 @@ public static class Extensions
         return builder;
     }
 
-    /// <summary>Maps development-only readiness and liveness endpoints.</summary>
+    /// <summary>Maps development-only liveness endpoints without exposing readiness details.</summary>
     /// <param name="app">Web application to configure.</param>
     /// <returns>The same application for further configuration.</returns>
     public static WebApplication MapDefaultEndpoints(this WebApplication app)
     {
         if (app.Environment.IsDevelopment())
         {
-            app.MapHealthChecks(HealthEndpointPath);
+            app.MapHealthChecks(HealthEndpointPath, new HealthCheckOptions
+            {
+                Predicate = result => result.Tags.Contains("live")
+            });
             app.MapHealthChecks(AlivenessEndpointPath, new HealthCheckOptions
             {
                 Predicate = result => result.Tags.Contains("live")
