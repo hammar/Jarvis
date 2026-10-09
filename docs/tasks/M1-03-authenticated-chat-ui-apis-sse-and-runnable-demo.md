@@ -133,6 +133,41 @@ and unexercised live behavior.
 
 ## Final handoff
 
+Latest summary-review follow-up (F51–F57) owns the browser navigation/login
+script, settings live-status markup, atomic Infrastructure retention read,
+real SQLite/browser regressions, and related architecture/testing/Web docs.
+It adds no schema, contract or dependency change. Independent review of
+`2054b76..82d9fd8` read the instructions, applicable spec/ADR, complete
+F1–F56 ledger and changed production/tests/docs and reported F57's stale-save
+error gap. The guarded error path and held-save browser regression resolve
+it; the reviewer did not independently execute the suites. Status-region
+semantics are machine-verified; assistive-technology speech remains
+unexercised, not a claim of a live screen-reader run.
+
+F51–F57 validation on October 9, 2026: the first serial sequence passed
+build and unit (91/91), then stalled in coverage collection before
+integration results were published. That attempt and one unchanged rerun
+were stopped, not counted as passes. Process sampling showed file-copy
+activity against 2,715 numbered DLL/PDB duplicates in the generated
+integration output directory. Rebuilding only that directory restored
+normal execution; the origin of the duplicate files was not established.
+No test, collector configuration, coverage exclusion or threshold changed.
+
+After the F57 production/test correction, the unchanged script selectors
+`integration && architecture && sdk-contracts && coverage && aspire-e2e &&
+browser-e2e && build && docs` all passed serially: integration 134/134,
+architecture 6/6, SDK 25/25 plus the actual pinned runtime contract harness,
+Aspire API 7/7, browser 2/2 and the expected failing browser probe, and
+Release formatting/analyzers/build and internal Markdown links. Coverage
+used the current unit 91/91 report and new integration report; changed
+executable lines are 98.2% (801/816), Infrastructure is 92.5% lines
+(2484/2684) and 75.6% branches (575/761), and Web is 98.6% lines (682/692)
+and 80.9% branches (110/136). All thresholds and invalid-report/discovery
+fixtures passed. The final build ran after every executable edit; docs was
+rerun after this evidence update. The cumulative F1–F57 dispositions remain
+retained. Native macOS evidence does not replace required new-head Linux
+CI, and no merge is authorized.
+
 Latest CI follow-up: on `256ef93`, all reported checks except Aspire E2E
 passed, including native macOS SDK contracts. The Linux Aspire failure was
 the invalid JSON size fixture recorded as F50, not a bypassed size limit.
@@ -182,6 +217,7 @@ the new revision remains required and is not inferred from this native run.
 | F54 | Previously missed: retention architecture wording implied Interrupted conversations were deletable. Low. | Documentation now names only Completed/Failed/Cancelled and explicitly preserves Interrupted recovery state under ADR 0003. No retention semantics changed. |
 | F55 | Previously missed: two autocommit reads could return a retention pair never saved during concurrent update. Medium. | Read both values/defaults in one SQLite statement/snapshot. Real SQLite concurrent readers/writers assert only committed pairs and preserve independent default handling for a missing setting. |
 | F56 | Previously missed: wrong passphrases displayed session-expiry text instead of the login failure. Low. | Excluded login from protected-request expiry handling, preserving its `Sign-in failed.` problem title. First-run/re-login browser scenario checks a failed passphrase then succeeds using the same form. |
+| F57 | Independent review of `82d9fd8`: stale retention-save failures could show an obsolete alert after navigation even though stale successful saves were ignored. Medium. | Applied the same captured-generation guard to save errors. Browser holds a save, navigates to Activity, returns a controlled 500, awaits the stale handler and asserts the newer view remains with no obsolete alert. |
 
 Follow-up validation on October 9, 2026: `tools/validate.sh build`,
 `integration` (126/126), `browser-e2e` (1/1 plus expected failing probe),

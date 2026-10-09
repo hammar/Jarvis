@@ -432,9 +432,10 @@ async function openSettings() {
 
 document.getElementById("settings-button").addEventListener("click", openSettings);
 
-document.getElementById("retention-form").addEventListener("submit", async event => {
+async function saveRetention(event) {
     event.preventDefault();
     const selectionGeneration = conversationSelectionGeneration;
+    clearError();
     try {
         const settings = await api("/api/settings/retention", {
             method: "PUT",
@@ -448,9 +449,11 @@ document.getElementById("retention-form").addEventListener("submit", async event
         document.getElementById("settings-status").textContent =
             `Saved: conversations ${settings.conversationDays} days; audit ${settings.auditDays} days.`;
     } catch (error) {
-        showError(error.message);
+        if (selectionGeneration === conversationSelectionGeneration) showError(error.message);
     }
-});
+}
+
+document.getElementById("retention-form").addEventListener("submit", saveRetention);
 
 async function openActivity() {
     if (activeTurnId || turnSubmissionInFlight || conversationCreationInFlight) return;

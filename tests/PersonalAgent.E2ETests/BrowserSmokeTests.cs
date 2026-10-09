@@ -456,6 +456,37 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
             Assert.True(await page.Locator("#conversation").IsVisibleAsync());
             Assert.True(await page.Locator("#settings").IsHiddenAsync());
             Assert.True(await page.Locator("#activity").IsHiddenAsync());
+            await page.Locator("#settings-button").ClickAsync();
+            await page.Locator("#settings").WaitForAsync();
+            var saveReady = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseSave = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            await page.RouteAsync("**/api/settings/retention", async route =>
+            {
+                saveReady.TrySetResult();
+                await releaseSave.Task.WaitAsync(TimeSpan.FromSeconds(15));
+                await route.FulfillAsync(new RouteFulfillOptions
+                {
+                    Status = 500,
+                    ContentType = "application/problem+json",
+                    Body = "{\"title\":\"Controlled stale save failure.\"}"
+                });
+            });
+            await page.EvaluateAsync("() => { window.__pendingRetentionSave = saveRetention({ preventDefault() {} }); }");
+            await saveReady.Task.WaitAsync(TimeSpan.FromSeconds(15));
+            try
+            {
+                await page.Locator("#activity-button").ClickAsync();
+                await page.Locator("#activity").WaitForAsync();
+            }
+            finally
+            {
+                releaseSave.TrySetResult();
+            }
+            await page.EvaluateAsync("() => window.__pendingRetentionSave");
+            await page.UnrouteAsync("**/api/settings/retention");
+            Assert.True(await page.GetByRole(AriaRole.Alert).IsHiddenAsync());
+            Assert.True(await page.Locator("#activity").IsVisibleAsync());
+            Assert.True(await page.Locator("#settings").IsHiddenAsync());
             await fixture.RestartAsync();
             await page.GotoAsync(fixture.WebClient.BaseAddress!.ToString());
             await page.WaitForFunctionAsync(
