@@ -267,7 +267,12 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
             {
                 statusRequestReady.TrySetResult();
                 await releaseStatusRequest.Task.WaitAsync(TimeSpan.FromSeconds(15));
-                await route.ContinueAsync();
+                await route.FulfillAsync(new RouteFulfillOptions
+                {
+                    Status = 500,
+                    ContentType = "application/problem+json",
+                    Body = "{\"title\":\"Controlled recovery status failure.\"}"
+                });
             });
             await page.ReloadAsync();
             await statusRequestReady.Task.WaitAsync(TimeSpan.FromSeconds(15));
@@ -282,6 +287,10 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
                 releaseStatusRequest.TrySetResult();
             }
             await page.WaitForFunctionAsync("() => conversationId === activeTurnConversationId");
+            await page.GetByRole(AriaRole.Alert).Filter(new LocatorFilterOptions { HasText = "Controlled recovery status failure." })
+                .WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible });
+            Assert.True(await page.Locator("#conversation").IsVisibleAsync());
+            await page.WaitForFunctionAsync("() => eventSource !== null");
             await page.UnrouteAsync("**/api/status");
             await cancelButton.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible });
             Assert.Equal(acceptedTurnId, await page.EvaluateAsync<string>("activeTurnId"));

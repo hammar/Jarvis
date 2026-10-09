@@ -55,6 +55,10 @@ navigation lock, and cancellation target. It is cleared after a terminal
 event or a definitive non-retryable client error; it remains available after
 an ambiguous failure.
 This is browser-local recovery state, not a telemetry or logging channel.
+Recovered running turns expose cancellation before startup status/history
+reads, so a failed ancillary read does not hide the cancellation or SSE output
+surface. Conversation creation is guarded until selection and list refresh
+complete to prevent duplicate requests from repeated clicks.
 
 Conversation and turn lookups are owner-scoped in persistence before data is
 returned or cancellation is requested. API errors use safe problem details;

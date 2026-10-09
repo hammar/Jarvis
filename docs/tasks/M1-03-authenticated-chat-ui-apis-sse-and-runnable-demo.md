@@ -151,6 +151,7 @@ and unexercised live behavior.
 | F35 | Previously missed: expired-cookie 401 retained identity-bound antiforgery state. | Fixed by refreshing anonymous CSRF state before presenting the authentication error; browser signs out through HTTP and signs back in without reload. |
 | F36 | Previously missed: concurrent New conversation clicks created multiple durable roots. | Fixed with a creation-in-flight guard and locked controls until creation/selection/list refresh finishes; browser holds creation and dispatches a second click, verifying only one POST. |
 | F37 | Regression validation: repeated reload/CSRF reads exhausted the shared authentication limiter and blocked accepted-turn startup with 503. | Fixed by limiting password-bearing bootstrap/login attempts, not status/CSRF reads or logout; rejected attempts return 429. Integration verifies reads cannot exhaust the 20-attempt/minute limit and attempts remain bounded. |
+| F38 | Independent review of `ad5e79f`: a failed startup status/list read reconnected SSE but left the conversation ancestor hidden, hiding cancellation and streamed output. Medium. | Fixed by restoring the selected conversation and visible recovery/cancellation surface before startup reads; browser holds then fails startup status for a saved running turn, verifies visible cancellation and SSE, and successfully cancels the same turn. |
 
 Follow-up validation on October 9, 2026: `tools/validate.sh build`,
 `integration` (126/126), `browser-e2e` (1/1 plus expected failing probe),
@@ -183,6 +184,17 @@ The preceding CI docs failure was a remote GitHub link-check 503/504 on
 unchanged SDK documentation URLs; its failed jobs were rerun without
 removing links or weakening the check. Local docs validates internal links,
 not availability of those remote URLs.
+
+Independent follow-up review inspected `2f8e065..ad5e79f` against the complete
+F1–F37 ledger and task/spec/ADR requirements. It reported the medium-severity
+F38 recovery-surface defect and exercised it with the actual JavaScript in a
+focused harness; it did not rerun the long suites or credentialed providers.
+F38 is dispositioned above and verified by the final browser regression with
+a saved running turn and failed startup status. After that correction,
+build, browser E2E (1/1 plus expected failing probe), coverage, and docs passed
+again; integration/architecture results remain those recorded above.
+All F1–F38 dispositions remain in the cumulative ledger. These automated
+checks and focused independent review do not certify unexercised live behavior.
 
 - Acceptance: M1-03 scope and scenarios listed above, including the conditional
   owner-verifier upgrade follow-up; no additional schema change.

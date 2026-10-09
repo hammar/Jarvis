@@ -162,6 +162,10 @@ async function showChat() {
     if (pendingTurnSubmission?.turnId) {
         activeTurnId = pendingTurnSubmission.turnId;
         activeTurnConversationId = pendingTurnSubmission.conversationId;
+        conversationId = activeTurnConversationId;
+        document.getElementById("conversation-title").textContent = "Recovering conversation";
+        document.getElementById("prompt").value = pendingTurnSubmission.text;
+        document.getElementById("conversation").hidden = false;
         setTurnNavigationLocked(true);
         document.getElementById("send-turn").disabled = true;
         document.getElementById("cancel-turn").hidden = false;
@@ -378,6 +382,7 @@ function connectEvents(turnId, lastSequence) {
 
 document.getElementById("cancel-turn").addEventListener("click", async () => {
     if (!activeTurnId) return;
+    clearError();
     try {
         await api(`/api/turns/${encodeURIComponent(activeTurnId)}/cancel`, { method: "POST" });
     } catch (error) {
