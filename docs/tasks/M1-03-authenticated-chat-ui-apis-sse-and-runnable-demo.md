@@ -172,6 +172,17 @@ The formatting gate initially failed on browser whitespace, corrected with
 dotnet format. The F65 browser failure is retained, not counted as a pass.
 No schema/contracts/dependencies changed; new-head CI remains separate.
 
+Independent follow-up reviewed the F64 correction over `ed89456` (committed
+as `2b19726`), held-404 browser regression, isolated fixture lifecycle and
+ledger. Five focused checks executing current JavaScript under JavaScriptCore
+passed: newer selection/replacement recovery preservation, accepted 404
+clearing without SSE, and accepted 500/network recovery with locks/reconnect.
+It found no remaining significant issues and substantiated the four SSE
+theory cases' bounded-page, blocked-I/O, durable outcome and disconnect
+assertions. It did not independently run full suites; browser stubs and
+TestServer do not establish TCP socket-buffer bounds, load behavior or live
+provider compatibility. All F1–F65 dispositions remain retained.
+
 F58 follow-up owns authentication cookie registration in `ChatApi.cs`,
 the shared-cookie SQLite/HTTP regression, and development/testing/Web docs.
 Objective: isolate Local and Simulator browser sessions when their separate
