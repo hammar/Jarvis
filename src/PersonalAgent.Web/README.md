@@ -44,8 +44,10 @@ profile; normal Simulator, Local, and Hybrid hosts generate a fresh token.
 Before sending a turn, the browser temporarily stores its text, conversation,
 and request ID in tab-scoped `sessionStorage`. This lets an owner safely retry
 with the same idempotency key after a lost response or page reload. The record
-is cleared when the server accepts the turn or returns a definitive
-non-retryable client error; it remains available after an ambiguous failure.
+is augmented with the accepted turn ID so reload restores the SSE stream,
+navigation lock, and cancellation target. It is cleared after a terminal
+event or a definitive non-retryable client error; it remains available after
+an ambiguous failure.
 This is browser-local recovery state, not a telemetry or logging channel.
 
 Conversation and turn lookups are owner-scoped in persistence before data is

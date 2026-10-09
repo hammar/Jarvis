@@ -31,6 +31,20 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
             await page.GetByLabel("Passphrase").FillAsync(SimulatorHostFixture.OwnerPassphrase);
             await page.GetByRole(AriaRole.Button, new PageGetByRoleOptions { Name = "Sign in" }).ClickAsync();
             await page.GetByRole(AriaRole.Button, new PageGetByRoleOptions { Name = "New conversation" }).WaitForAsync();
+            Assert.Contains("simulator-model", await page.Locator("#route-status").InnerTextAsync(), StringComparison.Ordinal);
+            await page.RouteAsync("**/api/status", route => route.FulfillAsync(new RouteFulfillOptions
+            {
+                Status = 500,
+                ContentType = "application/problem+json",
+                Body = "{\"title\":\"Controlled status failure.\"}"
+            }));
+            await page.ReloadAsync();
+            await page.GetByRole(AriaRole.Alert).Filter(new LocatorFilterOptions { HasText = "Controlled status failure." })
+                .WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible });
+            Assert.True(await page.Locator("#auth").IsHiddenAsync());
+            await page.UnrouteAsync("**/api/status");
+            await page.ReloadAsync();
+            await page.Locator("#new-conversation").WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible });
             await page.Locator("#new-conversation").ClickAsync();
             await page.WaitForFunctionAsync("() => conversationId !== ''");
             var firstConversationId = await page.EvaluateAsync<string>("conversationId");
@@ -206,6 +220,12 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
             using var delayedStream = await fixture.ModelClient.GetAsync(
                 "/fixture/control/wait-for-delayed-stream");
             delayedStream.EnsureSuccessStatusCode();
+            var acceptedTurnId = await page.EvaluateAsync<string>("activeTurnId");
+            await page.ReloadAsync();
+            await cancelButton.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible });
+            Assert.Equal(acceptedTurnId, await page.EvaluateAsync<string>("activeTurnId"));
+            Assert.True(await page.Locator("#new-conversation").IsDisabledAsync());
+            Assert.True(await page.Locator("#send-turn").IsDisabledAsync());
             await cancelButton.ClickAsync();
             await cancelButton.WaitForAsync(
                 new LocatorWaitForOptions { State = WaitForSelectorState.Hidden, Timeout = 15_000 });

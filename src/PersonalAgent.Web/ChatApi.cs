@@ -82,7 +82,9 @@ internal static class ChatApi
             ILocalTurnCoordinator readiness) =>
         {
             var endpoint = configuration["JARVIS_OLLAMA_BASE_URL"];
-            var model = configuration["JARVIS_OLLAMA_MODEL"];
+            var model = configuration["JARVIS_PROFILE"] is "Simulator" or "E2E"
+                ? "simulator-model"
+                : configuration["JARVIS_OLLAMA_MODEL"];
             return Results.Ok(new
             {
                 route = "Local",

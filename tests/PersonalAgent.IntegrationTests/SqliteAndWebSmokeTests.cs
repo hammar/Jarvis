@@ -248,6 +248,11 @@ public sealed class SqliteAndWebSmokeTests
             new { bootstrapToken = auth.BootstrapToken, passphrase = "an-owner-passphrase" });
         Assert.Equal(HttpStatusCode.BadRequest, rejected.StatusCode);
 
+        for (var attempt = 0; attempt < 5; attempt++)
+        {
+            Assert.False(await auth.BootstrapAsync("incorrect-token", "a-long-owner-passphrase", CancellationToken.None));
+        }
+
         using var bootstrap = await client.PostAsJsonAsync(
             "/api/auth/bootstrap",
             new { bootstrapToken = auth.BootstrapToken, passphrase = "a-long-owner-passphrase", rememberMe = false });

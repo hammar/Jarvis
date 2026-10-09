@@ -16,7 +16,6 @@ public sealed class OwnerAuthenticationService
     private readonly IPasswordHasher<OwnerIdentity> passwordHasher;
     private readonly IClock clock;
     private readonly string bootstrapToken;
-    private int failedBootstrapAttempts;
 
     /// <summary>Creates a process-local one-time setup token; the token is consumed by durable owner creation.</summary>
     /// <param name="accounts">Application-owned owner account persistence.</param>
@@ -54,12 +53,10 @@ public sealed class OwnerAuthenticationService
         string passphrase,
         CancellationToken cancellationToken)
     {
-        if (Interlocked.CompareExchange(ref failedBootstrapAttempts, 0, 0) >= 5
-            || !FixedTimeEquals(bootstrapToken, providedToken)
+        if (!FixedTimeEquals(bootstrapToken, providedToken)
             || !ValidPassphrase(passphrase)
             || await accounts.IsConfiguredAsync(cancellationToken))
         {
-            Interlocked.Increment(ref failedBootstrapAttempts);
             return false;
         }
 

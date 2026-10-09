@@ -141,12 +141,25 @@ and unexercised live behavior.
 | F25 | Empty successful cancellation responses were parsed as JSON and reported as failures. | Fixed by reading successful response text and returning null for an empty body; browser cancellation asserts no error alert. |
 | F26 | Terminal history refresh unlocked navigation before its asynchronous operations finished. | Fixed by retaining the active-turn lock through refresh and releasing it in finally with explicit error reporting; browser holds the terminal list refresh and verifies navigation/send stay disabled. |
 | F27 | Browser waited for an already-existing list item instead of completion of third-conversation creation. | Fixed by waiting for the selected ID to change and the list count to reach three before continuing. |
+| F28 | Accepted turns lost their SSE subscription, cancellation target, and navigation lock after reload. | Fixed by retaining accepted turn IDs in tab recovery state until terminal delivery and restoring the stream and controls on startup; browser reloads a running delayed turn and cancels the same ID. |
+| F29 | Previously missed: Simulator status omitted the configured model. | Fixed by reporting the composed simulator model for Simulator/E2E; browser verifies the visible model label. |
+| F30 | Previously missed: five invalid bootstrap attempts permanently disabled setup until restart. | Fixed by removing the permanent counter and retaining the existing bounded HTTP rate limiter; integration makes five invalid service attempts and then successfully bootstraps using the correct token. |
+| F31 | Previously missed: startup treated non-authentication API failures as sign-out. | Fixed by retaining explicit 401 status on authentication errors and showing other runtime failures without sign-in UI; browser injects a status 500 and verifies its alert and hidden authentication form. |
 
 Follow-up validation on October 9, 2026: `tools/validate.sh build`,
 `integration` (126/126), `browser-e2e` (1/1 plus expected failing probe),
 `coverage` (all thresholds passed), and `docs` passed serially after F24–F27.
 The base was fetched and remains unchanged from the implementation base.
 GitHub checks on the preceding head were passing; new-head CI is separate.
+
+The same targeted gate sequence passed again after F28–F31: build,
+integration 126/126, browser E2E 1/1 with expected failure probe, coverage,
+and docs. Changed executable lines reached 97.9% (731/747).
+Accepted-turn recovery now extends the earlier F18/F22 behavior: records
+remain until terminal event delivery, rather than being cleared on acceptance.
+All eleven reported GitHub checks passed on the preceding `282de20` head;
+required-check configuration was not readable by the app, and new-head CI
+must be evaluated separately.
 
 - Acceptance: M1-03 scope and scenarios listed above; no contract or schema
   changes beyond the previously described owner-authentication/settings

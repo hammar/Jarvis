@@ -60,7 +60,9 @@ async function api(path, options = {}) {
     if (response.status === 401) {
         authSection.hidden = false;
         chatSection.hidden = true;
-        throw new Error("Please sign in again.");
+        const error = new Error("Please sign in again.");
+        error.status = 401;
+        throw error;
     }
     if (!response.ok) {
         const body = await response.json().catch(() => null);
@@ -149,7 +151,8 @@ async function showChat() {
                 const candidate = JSON.parse(stored);
                 if (typeof candidate.conversationId !== "string" ||
                     typeof candidate.text !== "string" ||
-                    typeof candidate.requestId !== "string") {
+                    typeof candidate.requestId !== "string" ||
+                    (candidate.turnId !== undefined && typeof candidate.turnId !== "string")) {
                     throw new Error("The saved request has an invalid format.");
                 }
                 pendingTurnSubmission = candidate;
@@ -161,6 +164,19 @@ async function showChat() {
     }
     if (pendingTurnSubmission) {
         document.getElementById("prompt").value = pendingTurnSubmission.text;
+        if (pendingTurnSubmission.turnId) {
+            activeTurnId = pendingTurnSubmission.turnId;
+            activeTurnConversationId = pendingTurnSubmission.conversationId;
+            setTurnNavigationLocked(true);
+            document.getElementById("send-turn").disabled = true;
+            document.getElementById("cancel-turn").hidden = false;
+            try {
+                await openConversation(activeTurnConversationId);
+            } finally {
+                connectEvents(activeTurnId, 0);
+            }
+            return;
+        }
         await openConversation(pendingTurnSubmission.conversationId);
         showError("A previous send may have been accepted. Resend the unchanged message to safely recover it.");
     }
@@ -175,7 +191,11 @@ async function start() {
     try {
         await refreshStatus();
         await showChat();
-    } catch {
+    } catch (error) {
+        if (error.status !== 401) {
+            showError(error.message);
+            return;
+        }
         authSection.hidden = false;
         chatSection.hidden = true;
         document.getElementById("auth-title").textContent = status.bootstrapRequired ? "Set up owner account" : "Owner sign-in";
@@ -271,8 +291,13 @@ document.getElementById("turn-form").addEventListener("submit", async event => {
         showError(error.message);
         return;
     }
-    clearPendingTurn();
     activeTurnId = result.turnId.value || result.turnId;
+    pendingTurnSubmission.turnId = activeTurnId;
+    try {
+        sessionStorage.setItem(pendingTurnStorageKey, JSON.stringify(pendingTurnSubmission));
+    } catch (error) {
+        showError(`Cannot preserve the accepted turn for reload recovery: ${error.message}`);
+    }
     turnSubmissionInFlight = false;
     document.getElementById("cancel-turn").hidden = false;
     try {
@@ -321,6 +346,7 @@ function connectEvents(turnId, lastSequence) {
             } catch (error) {
                 showError(error.message);
             } finally {
+                clearPendingTurn();
                 activeTurnId = "";
                 activeTurnConversationId = "";
                 setTurnNavigationLocked(false);
