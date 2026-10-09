@@ -85,8 +85,10 @@ unlock. Reload retries cleanup after storage becomes available. Terminal and
 definitive-rejection cleanup also preserve the record and removal error.
 After a stream error, the browser checks the owned conversation: confirmed
 404 stops reconnect and runs the same failure-aware missing-history cleanup.
-Existing history and transient/network/server lookup failures retain automatic
-cursor reconnect; transient lookup failures are visible, and stale source or
+Connecting sources retain automatic cursor reconnect; a permanently closed
+source with existing history shows explicit reload-to-resume guidance rather
+than silently leaving navigation locked. Transient lookup failures are visible;
+the matching recovery notice clears on the next delivered event. Stale source or
 navigation results cannot reset newer state.
 Temporary startup network/500 failures retain recovery and reconnect. A definitive submission
 409 clears that request identity so an edited/new request can be sent;

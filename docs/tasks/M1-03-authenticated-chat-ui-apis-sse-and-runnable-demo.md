@@ -331,6 +331,10 @@ the new revision remains required and is not inferred from this native run.
 | F74 | Previously missed: expected errors omit structured correlated Problem Details (404, cursor 400, cookie 401/403, limiter 429 and ad hoc conflict). Medium. | In progress: shared Problem Details customization and expected-status handling, exact HTTP payload/correlation regressions. |
 | F75 | Previously missed: retention after conversation/stream authorization can delete terminal history, ending SSE without terminal output and permanently locking recovery. Medium. | Working-tree correction: on stream error verify the owned conversation, clean missing history via shared failure-aware recovery path, retain automatic reconnect on transient failure and ignore stale source/generation. Browser exercises missing-before-stream, empty stream after deletion, storage-removal failure and transient lookup. Validation pending. |
 | F76 | Previously missed: authenticated chat displays sign-in guidance in the visible profile region. Low. | Working-tree correction: authenticated chat sets signed-in status; 401 restores sign-in guidance. Browser covers login, cookie reload and expired-session transition. Validation pending. |
+| F77 | Independent 44d5039 review: unconditional 401 sign-in mode reset hides first-run bootstrap; signed-in profile set before authenticated call succeeds. High. | Corrected: preserve known bootstrap mode on 401 and set signed-in only after authenticated status success. Existing first-run browser adds bootstrap-field/profile assertions. Validation pending. |
+| F78 | Independent review: transient stream-check error persists after delivered events/completion. Low. | Corrected: source-owned recovery message cleared on next event only when it still matches the alert; unrelated errors untouched. Browser exercises delivered event clearing. |
+| F79 | Independent review speculative: fallback Problem Details may omit framework traceId present in normal JSON. Low. | Not applicable to the accepted response contract: required server correlationId/status/title/content-type are enforced for all Accept modes; optional framework traceId is not a promised field. No privacy defect or required-field inconsistency established. |
+| F80 | Independent review: non-200 SSE can permanently close EventSource even when owned history remains; automatic-reconnect docs overclaim. Low. | Corrected: CLOSED source receives explicit reload-to-resume notice, preserving request state; connecting source keeps automatic cursor reconnect. Browser adds500 stream/200 history case; docs distinguish closed/connecting states. |
 
 Follow-up validation on October 9, 2026: `tools/validate.sh build`,
 `integration` (126/126), `browser-e2e` (1/1 plus expected failing probe),
@@ -582,3 +586,28 @@ cleanup. No schema/Application contract/provider/product expansion.
 Completion: real HTTP expected status/content-type/title/correlation evidence,
 SSE error missing/transient/storage/stale behavior, authentication transitions,
 relevant build/integration/coverage/browser/docs gates and independent review.
+
+F74 implementation uses shared Problem Details customization/status-code
+pages within correlated exception middleware. Default JSON writer handles
+normal Accept; a fallback writer preserves safe correlated JSON for pre-stream
+SSE/HTML Accept errors. Existing payloads/success/started streams are untouched.
+Targeted Release HTTP integration 27/27 (20 new plus seven existing) passed.
+New browser targeted 5/5 plus held-stream lookup 1/1 passed.
+Initial full build rejected three initializer formatting lines; repository
+formatter corrected them and Release build passed. Integration collection
+again encountered 585 numbered generated duplicates; stopped before result,
+rebuilt only integration generated bin output without gate/settings changes.
+Current rerun integration 165/165, architecture 6/6, Aspire 7/7 and merged
+coverage pass. Changed executable lines 888/902 (98.4%); Web 708/717 lines,
+113/140 branches. Coverage uses preceding unchanged Application/Domain unit
+93/93 report; no unit/SDK rerun for Web-only changes. Full browser/docs and
+independent exact44d5039 review pending.
+
+Independent 44d5039 review substantiated middleware ordering, fallback writer,
+safe correlation/title handling and recovery stale-source/object/generation
+guards, but found F77–F80 above. Its actual-script stub DOM probe reproduced
+the first-run regression versus4c99893. It read relevant spec/ledger portions,
+not the full historical ledger/ADRs, and did not run suites. Browser run was
+stopped before result while corrections were applied; not counted as a pass.
+Follow-up preserves first-run mode, delays signed-in status, clears only owned
+recovery alerts on events and explicitly reports CLOSED source reload recovery.

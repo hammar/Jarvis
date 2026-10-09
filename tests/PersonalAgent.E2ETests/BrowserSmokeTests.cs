@@ -88,6 +88,7 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
     [InlineData(200, 404, false)]
     [InlineData(404, 404, true)]
     [InlineData(404, 500, false)]
+    [InlineData(500, 200, false)]
     [Trait("Category", "BrowserE2E")]
     public async Task StreamFailureChecksMissingHistoryWithoutDiscardingTransientOrUnclearableRecovery(
         int streamStatus, int historyStatus, bool removalFails)
@@ -128,8 +129,8 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
             await page.RouteAsync($"**/api/conversations/{conversation}", route => route.FulfillAsync(new RouteFulfillOptions
             {
                 Status = historyStatus,
-                ContentType = "application/problem+json",
-                Body = "{\"title\":\"Controlled recovery lookup.\"}"
+                ContentType = "application/json",
+                Body = historyStatus == 200 ? "{}" : "{\"title\":\"Controlled recovery lookup.\"}"
             }));
             await page.RouteAsync($"**/api/turns/{turn}/events", route => route.FulfillAsync(new RouteFulfillOptions
             {
@@ -138,10 +139,10 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
                 Body = ""
             }));
             await page.EvaluateAsync("turn => connectEvents(turn, 0)", turn);
-            var expected = removalFails ? "could not be cleared" :
+            var expected = historyStatus == 200 ? "Reload this page" : removalFails ? "could not be cleared" :
                 historyStatus == 404 ? "no longer exists" : "Stream recovery could not be checked";
             await page.GetByRole(AriaRole.Alert).Filter(new LocatorFilterOptions { HasText = expected }).WaitForAsync();
-            if (removalFails || historyStatus == 500)
+            if (removalFails || historyStatus is 500 or 200)
             {
                 Assert.Equal(turn, await page.EvaluateAsync<string>("activeTurnId"));
                 Assert.NotNull(await page.EvaluateAsync<string?>("sessionStorage.getItem('jarvis.pending-turn.v1')"));
@@ -153,6 +154,9 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
                 }
                 else
                 {
+                    await page.EvaluateAsync(
+                        "() => eventSource.dispatchEvent(new MessageEvent('TextDelta', { data: '{\"text\":\"Resumed\"}', lastEventId: '1' }))");
+                    Assert.True(await page.GetByRole(AriaRole.Alert).IsHiddenAsync());
                     await page.EvaluateAsync("() => eventSource.close()");
                 }
             }
@@ -664,6 +668,8 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
             await page.UnrouteAsync("**/api/auth/status");
             await page.ReloadAsync();
             await page.GetByRole(AriaRole.Heading, new PageGetByRoleOptions { Name = "Set up owner account" }).WaitForAsync();
+            Assert.Equal("Create the local owner account.", await page.Locator("#profile").InnerTextAsync());
+            Assert.True(await page.Locator("#bootstrap-token").IsVisibleAsync());
             await page.Locator("#bootstrap-token").FillAsync(SimulatorHostFixture.BootstrapToken);
             await page.GetByLabel("Passphrase").FillAsync(SimulatorHostFixture.OwnerPassphrase);
             var requestReady = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);

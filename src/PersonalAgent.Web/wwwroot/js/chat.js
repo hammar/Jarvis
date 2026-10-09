@@ -13,6 +13,7 @@ let authenticationInFlight = false;
 let pendingTurnSubmission = null;
 let conversationSelectionGeneration = 0;
 let eventSource = null;
+let bootstrapRequired = false;
 
 function showError(message) {
     errorBox.textContent = message;
@@ -51,7 +52,8 @@ async function csrf() {
     csrfToken = (await response.json()).token;
 }
 
-function setAuthenticationMode(bootstrapRequired) {
+function setAuthenticationMode(requiresBootstrap) {
+    bootstrapRequired = requiresBootstrap;
     profile.textContent = bootstrapRequired ? "Create the local owner account." : "Sign in to your local assistant.";
     document.getElementById("auth-title").textContent = bootstrapRequired ? "Set up owner account" : "Owner sign-in";
     document.getElementById("bootstrap-token").hidden = !bootstrapRequired;
@@ -75,7 +77,7 @@ async function api(path, options = {}) {
         chatSection.hidden = true;
         authSection.hidden = true;
         await csrf();
-        setAuthenticationMode(false);
+        setAuthenticationMode(bootstrapRequired);
         authSection.hidden = false;
         const error = new Error("Please sign in again.");
         error.status = 401;
@@ -205,13 +207,13 @@ async function showChat() {
     }
     authSection.hidden = true;
     chatSection.hidden = false;
-    profile.textContent = "Signed in to your local assistant.";
     document.getElementById("settings").hidden = true;
     document.getElementById("activity").hidden = true;
     if (activeTurnId) {
         let reconnect = true;
         try {
             await refreshStatus();
+            profile.textContent = "Signed in to your local assistant.";
             await loadConversations();
             reconnect = await restoreConversation(activeTurnConversationId);
         } finally {
@@ -220,6 +222,7 @@ async function showChat() {
         return;
     }
     await refreshStatus();
+    profile.textContent = "Signed in to your local assistant.";
     await loadConversations();
     if (pendingTurnSubmission) {
         document.getElementById("prompt").value = pendingTurnSubmission.text;
@@ -405,7 +408,11 @@ function connectEvents(turnId, lastSequence) {
     const source = new EventSource(`/api/turns/${encodeURIComponent(turnId)}/events`, { withCredentials: true });
     eventSource = source;
     let streamedReply = null;
+    let recoveryError = "";
     const handleEvent = async event => {
+        if (eventSource !== source || activeTurnId !== turnId) return;
+        if (recoveryError && errorBox.textContent === recoveryError) clearError();
+        recoveryError = "";
         lastSequence = Number(event.lastEventId || lastSequence);
         const payload = JSON.parse(event.data);
         if (event.type === "TextDelta" && typeof (payload.text || payload.Text) === "string") {
@@ -457,6 +464,11 @@ function connectEvents(turnId, lastSequence) {
         const recoveryGeneration = conversationSelectionGeneration;
         try {
             await api(`/api/conversations/${encodeURIComponent(activeTurnConversationId)}`);
+            if (eventSource === source && activeTurnId === turnId &&
+                recoveryGeneration === conversationSelectionGeneration && source.readyState === EventSource.CLOSED) {
+                recoveryError = "The stream connection closed. Reload this page to resume the saved request.";
+                showError(recoveryError);
+            }
         } catch (error) {
             if (eventSource !== source || activeTurnId !== turnId ||
                 recoveryGeneration !== conversationSelectionGeneration) return;
@@ -464,12 +476,13 @@ function connectEvents(turnId, lastSequence) {
                 source.close();
                 clearMissingRecovery(recoveredSubmission, recoveryGeneration);
             } else {
-                showError(`Stream recovery could not be checked: ${error.message}`);
+                recoveryError = `Stream recovery could not be checked: ${error.message}`;
+                showError(recoveryError);
             }
         } finally {
             recoveryCheckInFlight = false;
         }
-        // Existing targets and transient failures retain EventSource's automatic cursor reconnect.
+        // Connecting sources retain automatic cursor reconnect; closed sources require reload.
     };
 }
 
