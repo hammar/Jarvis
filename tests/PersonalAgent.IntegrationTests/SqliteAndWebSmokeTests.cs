@@ -626,6 +626,9 @@ public sealed class SqliteAndWebSmokeTests
             web.UseSetting("JARVIS_DATA_DIR", data.Path);
             web.ConfigureTestServices(services =>
             {
+                services.RemoveAll<IAgentEngine>();
+                services.AddSingleton<PausedDurableEngine>();
+                services.AddSingleton<IAgentEngine>(provider => provider.GetRequiredService<PausedDurableEngine>());
                 services.RemoveAll<IConversationStore>();
                 services.RemoveAll<IAtomicTurnOutcomeStore>();
                 services.AddSingleton<SqliteConversationStore>();

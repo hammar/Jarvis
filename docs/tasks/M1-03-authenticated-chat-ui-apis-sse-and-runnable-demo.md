@@ -322,10 +322,10 @@ the new revision remains required and is not inferred from this native run.
 | F65 | F64 browser run exposed cross-test fixture contamination: a new default-titled conversation made an existing locator ambiguous. | New recovery tests now own isolated host/data fixtures, preserving the existing scenario rather than weakening its assertions or depending on execution order. |
 | F66 | Inline review: malformed/obsolete sessionStorage recovery records returned before revealing auth/chat and survived every reload. Medium. | Remove invalid records with a visible notice and continue initialization; removal failure remains an explicit blocking error. Browser covers malformed JSON, invalid shape and null with injected removal failure, anonymous sign-in and authenticated chat, then verifies usable controls and clean subsequent reload. |
 | F67 | Independent review minor observation: browser JSON parse error text can include a short stored-text snippet. | Not applicable as a telemetry/privacy disclosure defect: notice is rendered via textContent only in the same owner's tab, with no logging or transmission. It explains the locally corrupt record; no new data recipient or execution surface is introduced. |
-| F68 | Previously missed: retention can delete a root after the Web ownership check, then submission recreates it without its history/title. | In progress: validate required existing owner inside the durable submission transaction; preserve explicit internal implicit-root callers. Deterministic retention/submission and ownership regressions required. |
-| F69 | Previously missed: recent-conversation clicks discard the open promise, hiding 404/500/network errors. | Fixed in working tree: catch click errors only for the current selection generation. Browser regression covers current errors and held stale failures after Settings navigation, with no unhandled rejection. Validation pending. |
-| F70 | Previously missed: recovery string-only validation accepts malformed/empty identifiers and locks chat around an invalid SSE URL. | Fixed in working tree: require nonempty GUID conversation/request/optional turn IDs and nonblank text within 8,000 characters before restoring state. Browser checks invalid values with a real conversation, cleared record, unlocked controls and no event requests. Validation pending. |
-| F71 | Independent review of a93ba39: terminal duplicate pre-read can return an expired root's turn directly; retention after the read deletes it before 202, leaving a missing accepted SSE target. Medium. | In progress: owner-scoped duplicate acceptance must validate and refresh retention activity transactionally; deterministic terminal-duplicate race regression required. |
+| F68 | Previously missed: retention can delete a root after the Web ownership check, then submission recreates it without its history/title. Medium. | Fixed a93ba39/ba2403e: required existing owner checked inside immediate durable submission transaction, including duplicate acceptance; trusted owner-less implicit-root callers preserved. Release integration 145/145 covers deterministic deletion and wrong-owner/no-write behavior. |
+| F69 | Previously missed: recent-conversation clicks discard the open promise, hiding 404/500/network errors. Medium. | Fixed a93ba39: catch click errors only for the current selection generation. Targeted browser 3/3 and full browser 12/12 cover current errors and held stale failures after Settings navigation, with no unhandled rejection. |
+| F70 | Previously missed: recovery string-only validation accepts malformed/empty identifiers and locks chat around an invalid SSE URL. Medium. | Fixed a93ba39: nonempty GUID conversation/request/optional turn IDs and nonblank text within 8,000 characters required before restoring state. Targeted and full browser 12/12 pass invalid values with a real root, cleared record, unlocked controls and no event requests. |
+| F71 | Independent review of a93ba39: terminal duplicate pre-read can return an expired root's turn directly; retention after the read deletes it before 202, leaving a missing accepted SSE target. Medium. | Fixed ba2403e: owner-scoped duplicate acceptance revalidates/touches activity in the immediate transaction, full queue does not reject duplicates, owner-less duplicates remain read-only. Release integration 145/145 and unit 93/93 cover cleanup before/after acceptance, original ID/readable terminal SSE, monotonic activity and capacity. Independent follow-up substantiated correction. |
 
 Follow-up validation on October 9, 2026: `tools/validate.sh build`,
 `integration` (126/126), `browser-e2e` (1/1 plus expected failing probe),
@@ -492,3 +492,45 @@ rebuilt only `tests/PersonalAgent.IntegrationTests/bin/Release/net10.0`.
 No collector configuration, thresholds or validation gate changed. Full
 remaining gates pending. Independent a93ba39 review substantiated F68–F70
 and identified F71; no independent suite execution.
+
+F71 correction ba2403e extends activity/recent-list ordering only for
+authenticated duplicate retries; it does not re-execute inference or alter
+trusted owner-less duplicates. Optional required-owner fields on Application
+request/submission contracts and lookup are the contract impact; no schema or
+dependency change. Two integration race cases initially failed before
+startup because the plain store proxy did not satisfy the default engine's
+atomic-outcome interface. The fixture now uses the existing deliberate
+PausedDurableEngine adapter (production coordinator and real SQLite retained);
+targeted Debug integration 6/6 and unit 2/2 passed, followed by Release build,
+integration 145/145 and coverage gate. No assertion/gate weakened.
+
+Current gates: build passes; unit 93/93; integration 145/145; architecture
+6/6; SDK 25/25 plus actual pinned runtime controlled-loopback harness; Aspire
+7/7; merged coverage and negative report/discovery fixtures pass.
+Changed executable lines 870/886 (98.2%); Application 947/961 lines and
+304/323 branches; Infrastructure 2515/2716 lines and 594/781 branches;
+Web 690/701 lines and 111/138 branches. Browser 12/12 plus expected failing
+probe, discovery and docs passed; browser/Aspire not counted as in-process
+coverage.
+
+Independent follow-up review of ba2403e against a93ba39 plus the test-only
+engine injection found no additional significant issue. It traced immediate
+transaction owner-before-key validation, monotonic duplicate activity commit,
+cleanup-winning 404 versus acceptance-winning retained SSE, full-queue
+duplicate slot release and defensive missing-key terminal rejection, trusted
+owner-less semantics, and inspected deterministic API/store/unit assertions.
+It did not independently execute suites. Deterministic ordering is not
+multi-process stress/load evidence; no provider/device/household credentials
+used. Main refreshed again: zero commits behind.
+
+Commands actually run for final evidence: `tools/validate.sh build`, `unit`,
+`integration`, `architecture`, `sdk-contracts`, `coverage`, `aspire-e2e`,
+`browser-e2e`, `docs`; all passed as above after the recorded fixture fix.
+Unit/architecture/SDK/Aspire/browser apply to ba2403e production revision;
+the final build/integration/coverage include the test-only engine injection.
+Final docs and whitespace checks rerun before push. Full F1–F71 ledger
+retained with explicit dispositions. Required new-head CI remains separate
+and is not represented by preceding-head green checks. No merge performed.
+The larger follow-up diff is cohesive: optional owner contract plumbing
+requires updating all store fakes, and most added lines are deterministic
+race/browser regression fixtures, not speculative production features.
