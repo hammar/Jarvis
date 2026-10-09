@@ -207,6 +207,7 @@ async function showChat() {
     }
     authSection.hidden = true;
     chatSection.hidden = false;
+    profile.textContent = "Checking your local assistant session.";
     document.getElementById("settings").hidden = true;
     document.getElementById("activity").hidden = true;
     if (activeTurnId) {
@@ -476,7 +477,9 @@ function connectEvents(turnId, lastSequence) {
                 source.close();
                 clearMissingRecovery(recoveredSubmission, recoveryGeneration);
             } else {
-                recoveryError = `Stream recovery could not be checked: ${error.message}`;
+                const resumeGuidance = source.readyState === EventSource.CLOSED
+                    ? " Reload this page to resume the saved request." : "";
+                recoveryError = `Stream recovery could not be checked: ${error.message}${resumeGuidance}`;
                 showError(recoveryError);
             }
         } finally {

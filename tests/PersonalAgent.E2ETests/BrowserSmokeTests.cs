@@ -142,6 +142,8 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
             var expected = historyStatus == 200 ? "Reload this page" : removalFails ? "could not be cleared" :
                 historyStatus == 404 ? "no longer exists" : "Stream recovery could not be checked";
             await page.GetByRole(AriaRole.Alert).Filter(new LocatorFilterOptions { HasText = expected }).WaitForAsync();
+            if (historyStatus == 500)
+                Assert.Contains("Reload this page", await page.GetByRole(AriaRole.Alert).InnerTextAsync());
             if (removalFails || historyStatus is 500 or 200)
             {
                 Assert.Equal(turn, await page.EvaluateAsync<string>("activeTurnId"));
@@ -178,23 +180,43 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
     [Trait("Category", "BrowserE2E")]
     public async Task ProfileGuidanceMatchesSignInReloadAndExpiredSession()
     {
-        using var playwright = await Playwright.CreateAsync();
-        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
-        var page = await browser.NewPageAsync();
-        await page.GotoAsync(fixture.WebClient.BaseAddress!.ToString());
-        await page.Locator("#auth").WaitForAsync();
-        Assert.Equal("Sign in to your local assistant.", await page.Locator("#profile").InnerTextAsync());
-        await page.GetByLabel("Passphrase").FillAsync(SimulatorHostFixture.OwnerPassphrase);
-        await page.Locator("#auth-submit").ClickAsync();
-        await page.WaitForFunctionAsync("() => !authenticationInFlight && !document.getElementById('chat').hidden");
-        Assert.Equal("Signed in to your local assistant.", await page.Locator("#profile").InnerTextAsync());
-        await page.ReloadAsync();
-        await page.Locator("#chat").WaitForAsync();
-        Assert.Equal("Signed in to your local assistant.", await page.Locator("#profile").InnerTextAsync());
-        await page.RouteAsync("**/api/settings", route => route.FulfillAsync(new RouteFulfillOptions { Status = 401 }));
-        await page.Locator("#settings-button").ClickAsync();
-        await page.Locator("#auth").WaitForAsync();
-        Assert.Equal("Sign in to your local assistant.", await page.Locator("#profile").InnerTextAsync());
+        var isolated = new SimulatorHostFixture();
+        await isolated.InitializeAsync();
+        try
+        {
+            using var playwright = await Playwright.CreateAsync();
+            await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+            var page = await browser.NewPageAsync();
+            await page.GotoAsync(isolated.WebClient.BaseAddress!.ToString());
+            await page.Locator("#auth").WaitForAsync();
+            Assert.Equal("Sign in to your local assistant.", await page.Locator("#profile").InnerTextAsync());
+            await page.GetByLabel("Passphrase").FillAsync(SimulatorHostFixture.OwnerPassphrase);
+            await page.Locator("#auth-submit").ClickAsync();
+            await page.WaitForFunctionAsync("() => !authenticationInFlight && !document.getElementById('chat').hidden");
+            Assert.Equal("Signed in to your local assistant.", await page.Locator("#profile").InnerTextAsync());
+            await page.RouteAsync("**/api/status", route => route.FulfillAsync(new RouteFulfillOptions
+            {
+                Status = 500,
+                ContentType = "application/problem+json",
+                Body = "{\"title\":\"Controlled status failure.\"}"
+            }));
+            await page.ReloadAsync();
+            await page.GetByRole(AriaRole.Alert).Filter(new LocatorFilterOptions { HasText = "Controlled status failure." }).WaitForAsync();
+            Assert.Equal("Checking your local assistant session.", await page.Locator("#profile").InnerTextAsync());
+            Assert.True(await page.Locator("#chat").IsVisibleAsync());
+            await page.UnrouteAsync("**/api/status");
+            await page.ReloadAsync();
+            await page.Locator("#chat").WaitForAsync();
+            Assert.Equal("Signed in to your local assistant.", await page.Locator("#profile").InnerTextAsync());
+            await page.RouteAsync("**/api/settings", route => route.FulfillAsync(new RouteFulfillOptions { Status = 401 }));
+            await page.Locator("#settings-button").ClickAsync();
+            await page.Locator("#auth").WaitForAsync();
+            Assert.Equal("Sign in to your local assistant.", await page.Locator("#profile").InnerTextAsync());
+        }
+        finally
+        {
+            await isolated.DisposeAsync();
+        }
     }
 
     [Theory]

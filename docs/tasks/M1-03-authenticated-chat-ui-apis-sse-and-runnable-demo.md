@@ -335,6 +335,8 @@ the new revision remains required and is not inferred from this native run.
 | F78 | Independent review: transient stream-check error persists after delivered events/completion. Low. | Corrected: source-owned recovery message cleared on next event only when it still matches the alert; unrelated errors untouched. Browser exercises delivered event clearing. |
 | F79 | Independent review speculative: fallback Problem Details may omit framework traceId present in normal JSON. Low. | Not applicable to the accepted response contract: required server correlationId/status/title/content-type are enforced for all Accept modes; optional framework traceId is not a promised field. No privacy defect or required-field inconsistency established. |
 | F80 | Independent review: non-200 SSE can permanently close EventSource even when owned history remains; automatic-reconnect docs overclaim. Low. | Corrected: CLOSED source receives explicit reload-to-resume notice, preserving request state; connecting source keeps automatic cursor reconnect. Browser adds500 stream/200 history case; docs distinguish closed/connecting states. |
+| F81 | Follow-up review: CLOSED stream plus failed root lookup lacks reload guidance. Low. | Corrected: non404 lookup error appends reload guidance whenever source is CLOSED. Browser failed-lookup asserts guidance; connecting cases retain reconnect. |
+| F82 | Follow-up review: status500 leaves visible authenticated chat with sign-in profile guidance. Low. | Corrected: neutral checking-session status before authenticated status lookup, signed-in only after success. Browser asserts neutral chat during500 and signed-in after recovered reload. |
 
 Follow-up validation on October 9, 2026: `tools/validate.sh build`,
 `integration` (126/126), `browser-e2e` (1/1 plus expected failing probe),
@@ -611,3 +613,17 @@ not the full historical ledger/ADRs, and did not run suites. Browser run was
 stopped before result while corrections were applied; not counted as a pass.
 Follow-up preserves first-run mode, delays signed-in status, clears only owned
 recovery alerts on events and explicitly reports CLOSED source reload recovery.
+
+Follow-up exact6d99f6e review reproduced F77 fix, F78 matching-alert clearing
+without erasing unrelated alerts, and CLOSED successful-lookup guidance using
+actual-script stub DOM/EventSource probes. F79 accepted not applicable against
+spec12 correlated safe-error requirement. It identified minor F81/F82, now
+corrected as above. Applicable AGENTS/fullledger/spec sections read; ADR
+reconnect/interruption relevance searched rather than every ADR line reread.
+No independent suites. Script-dispatched TextDelta checks alert handler
+behavior, not real delivery on a permanently closed stream.
+An intermediate browser run failed the existing simulator scenario at a
+post-status500 reload (chat hidden) before completing; the added profile
+scenario now owns isolated host/data to avoid shared authentication/rate
+budget interference. Cause not independently established; no gate/assertion
+weakened and full rerun required.
