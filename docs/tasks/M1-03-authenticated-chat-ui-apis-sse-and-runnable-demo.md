@@ -328,15 +328,16 @@ the new revision remains required and is not inferred from this native run.
 | F71 | Independent review of a93ba39: terminal duplicate pre-read can return an expired root's turn directly; retention after the read deletes it before 202, leaving a missing accepted SSE target. Medium. | Fixed ba2403e: owner-scoped duplicate acceptance revalidates/touches activity in the immediate transaction, full queue does not reject duplicates, owner-less duplicates remain read-only. Release integration 145/145 and unit 93/93 cover cleanup before/after acceptance, original ID/readable terminal SSE, monotonic activity and capacity. Independent follow-up substantiated correction. |
 | F72 | Inline review: dark-scheme error red fails 4.5:1 contrast on common dark canvases. Medium. | Fixed 8cf22fd: explicit light/dark canvas and foreground, preserve light error red and use lighter dark red. Full browser 16/16 computes actual foreground/canvas contrast and requires at least 4.5:1 in both schemes. Independent calculation: 4.572873 light, 7.980275 dark. |
 | F73 | Inline review: failed pending-record removal nulls memory, hides recovery and overwrites the storage error with a missing-conversation notice. Medium. | Fixed 8cf22fd: memory cleared only after removal succeeds; boolean failure stops missing recovery reset/reconnect and preserves error/state. Terminal/rejection callers honor failure. Full browser 16/16 covers accepted/unaccepted blocked removal across reload and successful cleanup; independent actual-script probes cover all callers. |
-| F74 | Previously missed: expected errors omit structured correlated Problem Details (404, cursor 400, cookie 401/403, limiter 429 and ad hoc conflict). Medium. | In progress: shared Problem Details customization and expected-status handling, exact HTTP payload/correlation regressions. |
-| F75 | Previously missed: retention after conversation/stream authorization can delete terminal history, ending SSE without terminal output and permanently locking recovery. Medium. | Working-tree correction: on stream error verify the owned conversation, clean missing history via shared failure-aware recovery path, retain automatic reconnect on transient failure and ignore stale source/generation. Browser exercises missing-before-stream, empty stream after deletion, storage-removal failure and transient lookup. Validation pending. |
-| F76 | Previously missed: authenticated chat displays sign-in guidance in the visible profile region. Low. | Working-tree correction: authenticated chat sets signed-in status; 401 restores sign-in guidance. Browser covers login, cookie reload and expired-session transition. Validation pending. |
-| F77 | Independent 44d5039 review: unconditional 401 sign-in mode reset hides first-run bootstrap; signed-in profile set before authenticated call succeeds. High. | Corrected: preserve known bootstrap mode on 401 and set signed-in only after authenticated status success. Existing first-run browser adds bootstrap-field/profile assertions. Validation pending. |
+| F74 | Previously missed: expected errors omit structured correlated Problem Details (404, cursor 400, cookie 401/403, limiter 429 and ad hoc conflict). Medium. | Fixed 44d5039: shared customization/status handling with Accept-independent fallback; Release integration165/165 including20 new exact HTTP response regressions, coverage pass. |
+| F75 | Previously missed: retention after conversation/stream authorization can delete terminal history, ending SSE without terminal output and permanently locking recovery. Medium. | Fixed 44d5039/6d99f6e/1f37040: verify owned history on stream error, failure-aware404 cleanup, connecting reconnect versus CLOSED reload guidance, stale source/turn/generation guards. Full browser23/23 covers missing/empty stream, failed storage, transient lookup and late lookup after newer selection. |
+| F76 | Previously missed: authenticated chat displays sign-in guidance in the visible profile region. Low. | Fixed 44d5039/6d99f6e/1f37040: neutral checking-session then signed-in on success;401 preserves bootstrap or restores sign-in. Browser23/23 covers login/reload/status500/401 transitions. |
+| F77 | Independent 44d5039 review: unconditional 401 sign-in mode reset hides first-run bootstrap; signed-in profile set before authenticated call succeeds. High. | Fixed6d99f6e/1f37040: preserve bootstrap on401, signed-in only after authenticated status success. Full browser23/23 verifies first-run bootstrap fields/profile and normal authentication. |
 | F78 | Independent review: transient stream-check error persists after delivered events/completion. Low. | Corrected: source-owned recovery message cleared on next event only when it still matches the alert; unrelated errors untouched. Browser exercises delivered event clearing. |
 | F79 | Independent review speculative: fallback Problem Details may omit framework traceId present in normal JSON. Low. | Not applicable to the accepted response contract: required server correlationId/status/title/content-type are enforced for all Accept modes; optional framework traceId is not a promised field. No privacy defect or required-field inconsistency established. |
 | F80 | Independent review: non-200 SSE can permanently close EventSource even when owned history remains; automatic-reconnect docs overclaim. Low. | Corrected: CLOSED source receives explicit reload-to-resume notice, preserving request state; connecting source keeps automatic cursor reconnect. Browser adds500 stream/200 history case; docs distinguish closed/connecting states. |
 | F81 | Follow-up review: CLOSED stream plus failed root lookup lacks reload guidance. Low. | Corrected: non404 lookup error appends reload guidance whenever source is CLOSED. Browser failed-lookup asserts guidance; connecting cases retain reconnect. |
 | F82 | Follow-up review: status500 leaves visible authenticated chat with sign-in profile guidance. Low. | Corrected: neutral checking-session status before authenticated status lookup, signed-in only after success. Browser asserts neutral chat during500 and signed-in after recovered reload. |
+| F83 | Final bounded review: F74–F77 ledger dispositions still pending before validation completes. Low/process. | Fixed final evidence revision: F74–F77 now record fixing commits and passing checks; all F1–F83 retained with explicit dispositions. |
 
 Follow-up validation on October 9, 2026: `tools/validate.sh build`,
 `integration` (126/126), `browser-e2e` (1/1 plus expected failing probe),
@@ -627,3 +628,27 @@ post-status500 reload (chat hidden) before completing; the added profile
 scenario now owns isolated host/data to avoid shared authentication/rate
 budget interference. Cause not independently established; no gate/assertion
 weakened and full rerun required.
+
+Final bounded exact1f37040 against6d99f6e review verifies F81/F82 using
+actual-script stub DOM/fetch/EventSource probes: CLOSED+500/network appends
+reload guidance and preserves turn; CONNECTING+500 retains automatic
+reconnect without reload text; CLOSED+200 guidance remains; matching-alert
+clearing works. Status500 shows neutral checking-session text, success
+signed-in, first-run401 preserves setup form/profile. No further code
+findings; F83 is pending-ledger finalization. It confirmed all82 preceding
+rows exist without gaps/duplicates and inspected F74–F82 dispositions;
+prior fullledger read reused for earlier findings. No independent suites,
+Chromium timing or fixture-failure cause investigation. Final browser result
+still pending; no failing/unrun check represented as success.
+
+Final F74–F83 evidence: Release build and full browser23/23 plus discovery,
+expected failing probe and docs passed on1f37040. Earlier integration165/165,
+coverage (changed888/902,98.4%), architecture6/6 and Aspire7/7 passed on
+44d5039; later revisions only JS/browser/docs, so those results are retained
+without claiming rerun. Unit93/93 and SDK25/25 plus actual controlled runtime
+harness are preceding evidence, not rerun for these Web changes. Final docs
+and whitespace rerun before push. No schema/dependency/Application contract
+changes. Full cumulative F1–F83 ledger dispositioned; F79 optional traceId
+not applicable to required correlated response contract. No merge performed;
+fresh-head CI remains required. Closed streams with existing history require
+explicit reload, preserving request identity; no arbitrary browser retry loop.
