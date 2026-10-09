@@ -75,6 +75,10 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
             await page.GetByRole(AriaRole.Heading, new PageGetByRoleOptions { Name = "Owner sign-in" }).WaitForAsync();
             Assert.True(await page.Locator("#bootstrap-token").IsHiddenAsync());
             Assert.True(await page.Locator("#bootstrap-token-label").IsHiddenAsync());
+            await page.GetByLabel("Passphrase").FillAsync("incorrect-owner-passphrase");
+            await page.Locator("#auth-submit").ClickAsync();
+            await page.GetByRole(AriaRole.Alert).Filter(new LocatorFilterOptions { HasText = "Sign-in failed." }).WaitForAsync();
+            await page.WaitForFunctionAsync("() => !authenticationInFlight");
             await page.GetByLabel("Passphrase").FillAsync(SimulatorHostFixture.OwnerPassphrase);
             await page.Locator("#auth-submit").ClickAsync();
             await page.WaitForFunctionAsync("() => !authenticationInFlight && !document.getElementById('chat').hidden");
@@ -390,6 +394,68 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
             await page.Locator("#conversation-list button").Nth(1).ClickAsync();
             await page.GetByText("Controlled streaming response", new PageGetByTextOptions { Exact = false })
                 .WaitForAsync(new LocatorWaitForOptions { Timeout = 15_000 });
+            Assert.True(await page.Locator("#activity").IsHiddenAsync());
+            Assert.True(await page.Locator("#settings").IsHiddenAsync());
+            var persistedConversationId = await page.EvaluateAsync<string>("conversationId");
+            await page.Locator("#settings-button").ClickAsync();
+            await page.Locator("#settings").WaitForAsync();
+            Assert.Equal("status", await page.Locator("#settings-status").GetAttributeAsync("role"));
+            await page.Locator("#retention-form").GetByRole(AriaRole.Button, new LocatorGetByRoleOptions { Name = "Save settings" }).ClickAsync();
+            await page.GetByRole(AriaRole.Status).Filter(new LocatorFilterOptions { HasText = "Saved:" }).WaitForAsync();
+            await page.Locator("#new-conversation").ClickAsync();
+            await page.WaitForFunctionAsync("() => !conversationCreationInFlight && !document.getElementById('conversation').hidden");
+            Assert.True(await page.Locator("#settings").IsHiddenAsync());
+            Assert.True(await page.Locator("#activity").IsHiddenAsync());
+
+            var slowSettingsReady = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseSettings = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            await page.RouteAsync("**/api/settings", async route =>
+            {
+                var response = await route.FetchAsync();
+                slowSettingsReady.TrySetResult();
+                await releaseSettings.Task.WaitAsync(TimeSpan.FromSeconds(15));
+                await route.FulfillAsync(new RouteFulfillOptions { Response = response });
+            });
+            await page.EvaluateAsync("() => { window.__pendingSettingsNavigation = openSettings(); }");
+            await slowSettingsReady.Task.WaitAsync(TimeSpan.FromSeconds(15));
+            try
+            {
+                await page.Locator("#activity-button").ClickAsync();
+                await page.Locator("#activity").WaitForAsync();
+            }
+            finally
+            {
+                releaseSettings.TrySetResult();
+            }
+            await page.EvaluateAsync("() => window.__pendingSettingsNavigation");
+            await page.UnrouteAsync("**/api/settings");
+            Assert.True(await page.Locator("#settings").IsHiddenAsync());
+            Assert.True(await page.Locator("#activity").IsVisibleAsync());
+            var slowActivityReady = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseActivity = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            await page.RouteAsync("**/api/activity", async route =>
+            {
+                var response = await route.FetchAsync();
+                slowActivityReady.TrySetResult();
+                await releaseActivity.Task.WaitAsync(TimeSpan.FromSeconds(15));
+                await route.FulfillAsync(new RouteFulfillOptions { Response = response });
+            });
+            await page.EvaluateAsync("() => { window.__pendingActivityNavigation = openActivity(); }");
+            await slowActivityReady.Task.WaitAsync(TimeSpan.FromSeconds(15));
+            try
+            {
+                await page.EvaluateAsync("id => openConversation(id)", persistedConversationId);
+                await page.Locator("#conversation").WaitForAsync();
+            }
+            finally
+            {
+                releaseActivity.TrySetResult();
+            }
+            await page.EvaluateAsync("() => window.__pendingActivityNavigation");
+            await page.UnrouteAsync("**/api/activity");
+            Assert.True(await page.Locator("#conversation").IsVisibleAsync());
+            Assert.True(await page.Locator("#settings").IsHiddenAsync());
+            Assert.True(await page.Locator("#activity").IsHiddenAsync());
             await fixture.RestartAsync();
             await page.GotoAsync(fixture.WebClient.BaseAddress!.ToString());
             await page.WaitForFunctionAsync(
@@ -400,7 +466,7 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
                 .Nth(1);
             await savedConversation.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible });
             Assert.True(await page.Locator("#auth").IsHiddenAsync());
-            await savedConversation.ClickAsync();
+            await page.EvaluateAsync("id => openConversation(id)", persistedConversationId);
             await page.GetByText("Controlled streaming response", new PageGetByTextOptions { Exact = false })
                 .WaitForAsync(new LocatorWaitForOptions { Timeout = 15_000 });
             Assert.Equal(1, await page.Locator("#messages li")

@@ -83,17 +83,17 @@ public sealed class SqliteOwnerStateStore(SqliteDatabase database) : IOwnerAccou
         ArgumentNullException.ThrowIfNull(defaults);
         defaults.Validate();
         await using var connection = await database.OpenConnectionAsync(cancellationToken);
-        var conversationDays = await ReadSettingAsync(
-            connection,
-            "conversation_retention_days",
-            defaults.ConversationDays,
-            cancellationToken);
-        var auditDays = await ReadSettingAsync(
-            connection,
-            "audit_retention_days",
-            defaults.AuditDays,
-            cancellationToken);
-        return new RetentionSettings(conversationDays, auditDays);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT
+                COALESCE((SELECT setting_value FROM owner_settings WHERE setting_key = 'conversation_retention_days'), $conversationDefault),
+                COALESCE((SELECT setting_value FROM owner_settings WHERE setting_key = 'audit_retention_days'), $auditDefault);
+            """;
+        command.Parameters.AddWithValue("$conversationDefault", defaults.ConversationDays);
+        command.Parameters.AddWithValue("$auditDefault", defaults.AuditDays);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await reader.ReadAsync(cancellationToken);
+        return new RetentionSettings(reader.GetInt32(0), reader.GetInt32(1));
     }
 
     /// <inheritdoc />
@@ -139,21 +139,6 @@ public sealed class SqliteOwnerStateStore(SqliteDatabase database) : IOwnerAccou
 
         await transaction.CommitAsync(cancellationToken);
         return settings;
-    }
-
-    private static async Task<int> ReadSettingAsync(
-        SqliteConnection connection,
-        string key,
-        int fallback,
-        CancellationToken cancellationToken)
-    {
-        await using var command = connection.CreateCommand();
-        command.CommandText = "SELECT setting_value FROM owner_settings WHERE setting_key = $key;";
-        command.Parameters.AddWithValue("$key", key);
-        var value = await command.ExecuteScalarAsync(cancellationToken);
-        return value is null or DBNull
-            ? fallback
-            : Convert.ToInt32(value, System.Globalization.CultureInfo.InvariantCulture);
     }
 
     private static async Task UpsertSettingAsync(

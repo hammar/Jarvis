@@ -113,6 +113,48 @@ public sealed class SqlitePersistenceTests
 
     [Fact]
     [Trait("Category", "Integration")]
+    public async Task RetentionReadsReturnOnlyCommittedPairsDuringConcurrentUpdates()
+    {
+        using var file = IsolatedDatabaseFile.Create();
+        var database = new SqliteDatabase(file.Path);
+        await database.InitializeAsync();
+        var store = new SqliteOwnerStateStore(database);
+        var first = new RetentionSettings(111, 222);
+        var second = new RetentionSettings(333, 444);
+        await store.UpdateRetentionAsync(first, Now, CancellationToken.None);
+        var start = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var writer = Task.Run(async () =>
+        {
+            await start.Task;
+            for (var i = 0; i < 100; i++)
+            {
+                await store.UpdateRetentionAsync(i % 2 == 0 ? second : first, Now, CancellationToken.None);
+                await Task.Yield();
+            }
+        });
+        var reader = Task.Run(async () =>
+        {
+            await start.Task;
+            for (var i = 0; i < 200; i++)
+            {
+                var settings = await store.GetRetentionAsync(new RetentionSettings(90, 30), CancellationToken.None);
+                Assert.True(settings == first || settings == second, $"Read an uncommitted retention pair: {settings}");
+                await Task.Yield();
+            }
+        });
+        start.SetResult();
+        await Task.WhenAll(writer, reader).WaitAsync(TimeSpan.FromSeconds(10));
+
+        await using var connection = await database.OpenConnectionAsync();
+        await using var remove = connection.CreateCommand();
+        remove.CommandText = "DELETE FROM owner_settings WHERE setting_key = 'audit_retention_days';";
+        await remove.ExecuteNonQueryAsync();
+        Assert.Equal(new RetentionSettings(first.ConversationDays, 30),
+            await store.GetRetentionAsync(new RetentionSettings(90, 30), CancellationToken.None));
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
     public async Task OwnerVerifierAndRetentionSettingsSurviveDatabaseReopen()
     {
         using var file = IsolatedDatabaseFile.Create();

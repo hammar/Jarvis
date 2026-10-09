@@ -28,6 +28,8 @@ Successful bootstrap switches the form to sign-in mode; submissions are
 serialized through post-login initialization, and successful authentication
 immediately clears the passphrase and setup-token inputs. Failed owner-status
 reads show an error instead of guessing an account state.
+Wrong-passphrase login responses retain their sign-in failure message rather
+than presenting an expired-session notice.
 
 The account and conversations survive application upgrades as long as the
 owner keeps the same data directory. A lost passphrase has no recovery path in
@@ -82,10 +84,15 @@ inference.
 
 The root page has Chat, Settings, and Activity surfaces. Settings show only
 provider/model and connection configuration status, never secret values.
+Only the latest selected surface is revealed after asynchronous navigation;
+stale Settings/Activity/conversation reads cannot replace it. Retention
+notices and save confirmations use an accessible status region.
 Retention periods default to 90 conversation days and 30 audit days; the owner
 may save 1–3650 days. Saved values are held in SQLite and survive restarts.
 They override the trusted host defaults from
 `JARVIS_CONVERSATION_RETENTION_DAYS` and `JARVIS_AUDIT_RETENTION_DAYS`.
+Conversation/audit retention settings are read together in one SQLite
+snapshot, matching their atomic updates.
 Lowering a period removes newly expired eligible conversation/audit history
 when saved; conversations with unresolved turns are retained.
 The hourly maintenance worker logs failure type (not private exception text),

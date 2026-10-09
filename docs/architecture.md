@@ -229,7 +229,9 @@ Trusted configuration supplies validated retention defaults at startup:
 `JARVIS_AUDIT_RETENTION_DAYS` defaults to 30 days (each accepts 1–3650 days).
 The owner's saved SQLite value is authoritative across restarts and updates.
 Cleanup deletes old conversation roots and their dependent messages/turn
-events only when turns are terminal, and expired audit events. Startup,
+events only when every associated turn is `Completed`, `Failed`, or
+`Cancelled`, and expired audit events. Interrupted turns retain their
+conversation/recovery state under ADR 0003. Startup,
 settings updates, and a host-owned hourly cleanup worker apply the current
 effective values. The worker uses Application contracts and the Infrastructure
 store, while Web only composes it. Cleanup does not purge durable memory facts,

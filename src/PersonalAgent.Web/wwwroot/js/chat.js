@@ -68,7 +68,8 @@ async function api(path, options = {}) {
         headers,
         credentials: "same-origin"
     });
-    if (response.status === 401) {
+    if (response.status === 401 && path !== "/api/auth/login") {
+        ++conversationSelectionGeneration;
         chatSection.hidden = true;
         authSection.hidden = true;
         await csrf();
@@ -133,6 +134,8 @@ async function openConversation(id) {
     conversationId = data.conversation.id.value || data.conversation.id;
     document.getElementById("conversation-title").textContent = data.conversation.title || "Conversation";
     renderMessages(data.messages);
+    document.getElementById("settings").hidden = true;
+    document.getElementById("activity").hidden = true;
     document.getElementById("conversation").hidden = false;
 }
 
@@ -145,6 +148,7 @@ async function refreshStatus() {
 }
 
 async function showChat() {
+    ++conversationSelectionGeneration;
     if (!pendingTurnSubmission) {
         let stored;
         try {
@@ -258,6 +262,7 @@ document.getElementById("new-conversation").addEventListener("click", async () =
     if (activeTurnId || turnSubmissionInFlight || conversationCreationInFlight) return;
     clearError();
     conversationCreationInFlight = true;
+    ++conversationSelectionGeneration;
     setTurnNavigationLocked(true);
     document.getElementById("send-turn").disabled = true;
     try {
@@ -406,12 +411,14 @@ document.getElementById("cancel-turn").addEventListener("click", async () => {
     }
 });
 
-document.getElementById("settings-button").addEventListener("click", async () => {
-    if (activeTurnId || turnSubmissionInFlight) return;
+async function openSettings() {
+    if (activeTurnId || turnSubmissionInFlight || conversationCreationInFlight) return;
+    const selectionGeneration = ++conversationSelectionGeneration;
     clearError();
     try {
         const settings = await api("/api/settings");
-        if (activeTurnId || turnSubmissionInFlight) return;
+        if (selectionGeneration !== conversationSelectionGeneration ||
+            activeTurnId || turnSubmissionInFlight || conversationCreationInFlight) return;
         document.getElementById("conversation-days").value = settings.conversationDays;
         document.getElementById("audit-days").value = settings.auditDays;
         document.getElementById("settings-status").textContent = "Local profile settings. Provider keys are not displayed.";
@@ -419,12 +426,15 @@ document.getElementById("settings-button").addEventListener("click", async () =>
         document.getElementById("activity").hidden = true;
         document.getElementById("conversation").hidden = true;
     } catch (error) {
-        showError(error.message);
+        if (selectionGeneration === conversationSelectionGeneration) showError(error.message);
     }
-});
+}
+
+document.getElementById("settings-button").addEventListener("click", openSettings);
 
 document.getElementById("retention-form").addEventListener("submit", async event => {
     event.preventDefault();
+    const selectionGeneration = conversationSelectionGeneration;
     try {
         const settings = await api("/api/settings/retention", {
             method: "PUT",
@@ -434,6 +444,7 @@ document.getElementById("retention-form").addEventListener("submit", async event
                 auditDays: Number(document.getElementById("audit-days").value)
             })
         });
+        if (selectionGeneration !== conversationSelectionGeneration) return;
         document.getElementById("settings-status").textContent =
             `Saved: conversations ${settings.conversationDays} days; audit ${settings.auditDays} days.`;
     } catch (error) {
@@ -441,12 +452,14 @@ document.getElementById("retention-form").addEventListener("submit", async event
     }
 });
 
-document.getElementById("activity-button").addEventListener("click", async () => {
-    if (activeTurnId || turnSubmissionInFlight) return;
+async function openActivity() {
+    if (activeTurnId || turnSubmissionInFlight || conversationCreationInFlight) return;
+    const selectionGeneration = ++conversationSelectionGeneration;
     clearError();
     try {
         const turns = await api("/api/activity");
-        if (activeTurnId || turnSubmissionInFlight) return;
+        if (selectionGeneration !== conversationSelectionGeneration ||
+            activeTurnId || turnSubmissionInFlight || conversationCreationInFlight) return;
         const list = document.getElementById("activity-list");
         list.replaceChildren();
         for (const item of turns) {
@@ -458,9 +471,11 @@ document.getElementById("activity-button").addEventListener("click", async () =>
         document.getElementById("settings").hidden = true;
         document.getElementById("conversation").hidden = true;
     } catch (error) {
-        showError(error.message);
+        if (selectionGeneration === conversationSelectionGeneration) showError(error.message);
     }
-});
+}
+
+document.getElementById("activity-button").addEventListener("click", openActivity);
 
 document.getElementById("logout").addEventListener("click", async () => {
     try {
