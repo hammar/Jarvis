@@ -209,14 +209,19 @@ async function showChat() {
 }
 
 async function restoreConversation(id) {
+    const recoveredSubmission = pendingTurnSubmission;
+    const opening = openConversation(id);
+    const recoveryGeneration = conversationSelectionGeneration;
     try {
-        await openConversation(id);
+        await opening;
         return true;
     } catch (error) {
         if (error.status !== 404) throw error;
+        if (pendingTurnSubmission !== recoveredSubmission) return false;
+        clearPendingTurn();
+        if (recoveryGeneration !== conversationSelectionGeneration) return false;
         eventSource?.close();
         eventSource = null;
-        clearPendingTurn();
         activeTurnId = "";
         activeTurnConversationId = "";
         conversationId = "";

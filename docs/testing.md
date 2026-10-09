@@ -212,6 +212,7 @@ authority.
 | Concurrent retention reads return committed conversation/audit pairs with independent defaults for missing rows | `SqlitePersistenceTests.RetentionReadsReturnOnlyCommittedPairsDuringConcurrentUpdates` |
 | Two loopback instances share one browser cookie jar without session/CSRF collisions; signing out one preserves the other, including authenticated mutations after restart | `SqliteAndWebSmokeTests.SeparateInstancesShareBrowserCookieJarWithoutLosingAuthenticationOrCsrfAcrossRestart` |
 | Missing accepted/ambiguous recovered conversations clear tab state and unlock chat without opening missing SSE; definitive conflicts permit a fresh request | `BrowserSmokeTests.MissingRecoveredConversationUnlocksChatAndConflictAllowsANewRequest` |
+| A late recovery 404 cannot hide a newer selected conversation | `BrowserSmokeTests.LateMissingRecoveryDoesNotHideANewerConversation` |
 | Blocked SSE writes/flushes and disconnected requests cannot stall durable turn completion; event-page requests stay bounded without read-ahead during blocked output | `SqliteAndWebSmokeTests.SseUsesBoundedPagesAndCompletesDurablyWhileConsumerIsBlockedOrDisconnected` |
 | Terminal event committed between SSE event-page and status reads is delivered before the stream closes | `SqliteAndWebSmokeTests.SseDrainsTerminalEventCommittedBetweenEventReadAndStatusRead` |
 | SDK compatibility uses pinned actual runtime | T01 `--contracts` suite, `sdk-contracts-platform` on Linux/macOS |

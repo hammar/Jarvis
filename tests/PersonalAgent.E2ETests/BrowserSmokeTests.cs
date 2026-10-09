@@ -7,78 +7,143 @@ namespace PersonalAgent.E2ETests;
 [Collection(SimulatorCollection.Name)]
 public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
 {
+    [Fact]
+    [Trait("Category", "BrowserE2E")]
+    public async Task LateMissingRecoveryDoesNotHideANewerConversation()
+    {
+        var isolated = new SimulatorHostFixture();
+        await isolated.InitializeAsync();
+        try
+        {
+            using var playwright = await Playwright.CreateAsync();
+            await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+            var page = await browser.NewPageAsync();
+            await page.GotoAsync(isolated.WebClient.BaseAddress!.ToString());
+            await page.GetByLabel("Passphrase").FillAsync(SimulatorHostFixture.OwnerPassphrase);
+            await page.Locator("#auth-submit").ClickAsync();
+            await page.WaitForFunctionAsync("() => !authenticationInFlight && !document.getElementById('chat').hidden");
+            var missing = Guid.NewGuid().ToString();
+            await page.EvaluateAsync(
+                """
+            id => {
+                pendingTurnSubmission = { conversationId: id, text: "Old request", requestId: crypto.randomUUID() };
+                sessionStorage.setItem("jarvis.pending-turn.v1", JSON.stringify(pendingTurnSubmission));
+            }
+            """, missing);
+            var reached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            await page.RouteAsync($"**/api/conversations/{missing}", async route =>
+            {
+                reached.TrySetResult();
+                await release.Task.WaitAsync(TimeSpan.FromSeconds(15));
+                await route.FulfillAsync(new RouteFulfillOptions { Status = 404, Body = "{}" });
+            });
+            await page.EvaluateAsync("() => { window.__recovery = showChat(); }");
+            await reached.Task.WaitAsync(TimeSpan.FromSeconds(15));
+            string selected;
+            try
+            {
+                await page.Locator("#new-conversation").ClickAsync();
+                await page.WaitForFunctionAsync("() => conversationId !== '' && !conversationCreationInFlight");
+                selected = await page.EvaluateAsync<string>("conversationId");
+            }
+            finally
+            {
+                release.TrySetResult();
+            }
+            await page.EvaluateAsync("() => window.__recovery");
+            Assert.Equal(selected, await page.EvaluateAsync<string>("conversationId"));
+            Assert.True(await page.Locator("#conversation").IsVisibleAsync());
+            Assert.True(await page.Locator("#send-turn").IsEnabledAsync());
+            Assert.Null(await page.EvaluateAsync<string?>("sessionStorage.getItem('jarvis.pending-turn.v1')"));
+        }
+        finally
+        {
+            await isolated.DisposeAsync();
+        }
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
     [Trait("Category", "BrowserE2E")]
     public async Task MissingRecoveredConversationUnlocksChatAndConflictAllowsANewRequest(bool accepted)
     {
-        using var playwright = await Playwright.CreateAsync();
-        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
-        var page = await browser.NewPageAsync();
-        await page.GotoAsync(fixture.WebClient.BaseAddress!.ToString());
-        await page.GetByLabel("Passphrase").FillAsync(SimulatorHostFixture.OwnerPassphrase);
-        await page.Locator("#auth-submit").ClickAsync();
-        await page.WaitForFunctionAsync("() => !authenticationInFlight && !document.getElementById('chat').hidden");
-        var missingConversation = Guid.NewGuid().ToString();
-        var missingTurn = Guid.NewGuid().ToString();
-        var eventRequests = 0;
-        page.Request += (_, request) =>
+        var isolated = new SimulatorHostFixture();
+        await isolated.InitializeAsync();
+        try
         {
-            if (request.Url.Contains($"/api/turns/{missingTurn}/events", StringComparison.Ordinal))
-                Interlocked.Increment(ref eventRequests);
-        };
-        await page.EvaluateAsync(
-            """
-            record => sessionStorage.setItem("jarvis.pending-turn.v1", JSON.stringify(record))
-            """,
-            new
+            using var playwright = await Playwright.CreateAsync();
+            await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+            var page = await browser.NewPageAsync();
+            await page.GotoAsync(isolated.WebClient.BaseAddress!.ToString());
+            await page.GetByLabel("Passphrase").FillAsync(SimulatorHostFixture.OwnerPassphrase);
+            await page.Locator("#auth-submit").ClickAsync();
+            await page.WaitForFunctionAsync("() => !authenticationInFlight && !document.getElementById('chat').hidden");
+            var missingConversation = Guid.NewGuid().ToString();
+            var missingTurn = Guid.NewGuid().ToString();
+            var eventRequests = 0;
+            page.Request += (_, request) =>
             {
-                conversationId = missingConversation,
-                text = "Old request",
-                requestId = Guid.NewGuid().ToString(),
-                turnId = accepted ? missingTurn : null
-            });
-        if (!accepted)
-        {
+                if (request.Url.Contains($"/api/turns/{missingTurn}/events", StringComparison.Ordinal))
+                    Interlocked.Increment(ref eventRequests);
+            };
             await page.EvaluateAsync(
                 """
+            record => sessionStorage.setItem("jarvis.pending-turn.v1", JSON.stringify(record))
+            """,
+                new
+                {
+                    conversationId = missingConversation,
+                    text = "Old request",
+                    requestId = Guid.NewGuid().ToString(),
+                    turnId = accepted ? missingTurn : null
+                });
+            if (!accepted)
+            {
+                await page.EvaluateAsync(
+                    """
                 () => {
                     const record = JSON.parse(sessionStorage.getItem("jarvis.pending-turn.v1"));
                     delete record.turnId;
                     sessionStorage.setItem("jarvis.pending-turn.v1", JSON.stringify(record));
                 }
                 """);
-        }
-        await page.ReloadAsync();
-        await page.GetByRole(AriaRole.Alert).Filter(new LocatorFilterOptions { HasText = "no longer exists" }).WaitForAsync();
-        Assert.Null(await page.EvaluateAsync<string?>("sessionStorage.getItem('jarvis.pending-turn.v1')"));
-        Assert.Equal("", await page.EvaluateAsync<string>("activeTurnId"));
-        Assert.True(await page.Locator("#cancel-turn").IsHiddenAsync());
-        Assert.True(await page.Locator("#new-conversation").IsEnabledAsync());
-        Assert.Equal(0, Volatile.Read(ref eventRequests));
-        await page.Locator("#new-conversation").ClickAsync();
-        await page.WaitForFunctionAsync("() => conversationId !== '' && !conversationCreationInFlight");
-        var requestIds = new List<string>();
-        await page.RouteAsync("**/api/conversations/*/turns", async route =>
-        {
-            using var body = JsonDocument.Parse(route.Request.PostData!);
-            requestIds.Add(body.RootElement.GetProperty("requestId").GetString()!);
-            await route.FulfillAsync(new RouteFulfillOptions
+            }
+            await page.ReloadAsync();
+            await page.GetByRole(AriaRole.Alert).Filter(new LocatorFilterOptions { HasText = "no longer exists" }).WaitForAsync();
+            Assert.Null(await page.EvaluateAsync<string?>("sessionStorage.getItem('jarvis.pending-turn.v1')"));
+            Assert.Equal("", await page.EvaluateAsync<string>("activeTurnId"));
+            Assert.True(await page.Locator("#cancel-turn").IsHiddenAsync());
+            Assert.True(await page.Locator("#new-conversation").IsEnabledAsync());
+            Assert.Equal(0, Volatile.Read(ref eventRequests));
+            await page.Locator("#new-conversation").ClickAsync();
+            await page.WaitForFunctionAsync("() => conversationId !== '' && !conversationCreationInFlight");
+            var requestIds = new List<string>();
+            await page.RouteAsync("**/api/conversations/*/turns", async route =>
             {
-                Status = requestIds.Count == 1 ? 409 : 400,
-                ContentType = "application/problem+json",
-                Body = "{\"title\":\"Controlled definitive rejection.\"}"
+                using var body = JsonDocument.Parse(route.Request.PostData!);
+                requestIds.Add(body.RootElement.GetProperty("requestId").GetString()!);
+                await route.FulfillAsync(new RouteFulfillOptions
+                {
+                    Status = requestIds.Count == 1 ? 409 : 400,
+                    ContentType = "application/problem+json",
+                    Body = "{\"title\":\"Controlled definitive rejection.\"}"
+                });
             });
-        });
-        await page.GetByLabel("Message").FillAsync("Conflicting request");
-        await page.Locator("#send-turn").ClickAsync();
-        await page.WaitForFunctionAsync("() => !turnSubmissionInFlight && pendingTurnSubmission === null");
-        await page.GetByLabel("Message").FillAsync("A different request");
-        await page.Locator("#send-turn").ClickAsync();
-        await page.WaitForFunctionAsync("() => !turnSubmissionInFlight && pendingTurnSubmission === null");
-        Assert.Equal(2, requestIds.Count);
-        Assert.NotEqual(requestIds[0], requestIds[1]);
+            await page.GetByLabel("Message").FillAsync("Conflicting request");
+            await page.Locator("#send-turn").ClickAsync();
+            await page.WaitForFunctionAsync("() => !turnSubmissionInFlight && pendingTurnSubmission === null");
+            await page.GetByLabel("Message").FillAsync("A different request");
+            await page.Locator("#send-turn").ClickAsync();
+            await page.WaitForFunctionAsync("() => !turnSubmissionInFlight && pendingTurnSubmission === null");
+            Assert.Equal(2, requestIds.Count);
+            Assert.NotEqual(requestIds[0], requestIds[1]);
+        }
+        finally
+        {
+            await isolated.DisposeAsync();
+        }
     }
 
     [Fact]

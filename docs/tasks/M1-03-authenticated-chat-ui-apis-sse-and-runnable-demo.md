@@ -145,6 +145,33 @@ accepted/unaccepted stale recovery, conflict retry, blocked/disconnected
 consumer completion, bounded event pages, existing recovery regressions,
 applicable gates and independent review.
 
+F61–F65 evidence (October 9, 2026): `tools/validate.sh build && integration
+&& architecture && coverage && aspire-e2e && browser-e2e && docs` passed
+for `ed89456`: integration 139/139, architecture 6/6, Aspire 7/7, browser
+4/4 plus expected failing probe; all coverage/report/discovery thresholds
+passed with changed lines 98.2% (805/820), Web 98.4% lines (685/696) and
+80.4% branches (111/138). Coverage reused the preceding unit 91/91 report;
+unit and SDK gates were not rerun for this JavaScript/test-only follow-up.
+Independent review reproduced F64 against exact `ed89456` using controlled
+JavaScriptCore fetch/DOM execution and confirmed accepted recovery 404
+clearing and 500 reconnection in that harness. Following F64/F65 fixes,
+build/browser/docs passed again, browser 5/5 plus expected failing probe.
+Docs was rerun after this final evidence update.
+
+SSE evidence uses production Web/coordinator composition, real SQLite and
+a deliberate deterministic engine adapter with a controlled response stream.
+It proves Write/Flush are actually blocked, 100-event page requests do not
+read ahead while blocked, and terminal status/event/answer persist within
+deadlines independently. Disconnect cases prove RequestAborted interrupts
+blocked I/O and request completion before engine release; slow cases verify
+ordered replay after release. It is not an actual TCP slow-reader/memory
+benchmark or live provider/SDK validation. Initial targeted cases failed on
+fixture CSRF identity then TestServer disconnect synchronization; corrected
+without weakening assertions, then passed 4/4 twice and in integration139.
+The formatting gate initially failed on browser whitespace, corrected with
+dotnet format. The F65 browser failure is retained, not counted as a pass.
+No schema/contracts/dependencies changed; new-head CI remains separate.
+
 F58 follow-up owns authentication cookie registration in `ChatApi.cs`,
 the shared-cookie SQLite/HTTP regression, and development/testing/Web docs.
 Objective: isolate Local and Simulator browser sessions when their separate
@@ -280,6 +307,8 @@ the new revision remains required and is not inferred from this native run.
 | F61 | Previously missed: slow/disconnected SSE-consumer completion and boundedness lacked direct acceptance evidence. Medium. | Production-composed blocked-response/disconnect regression added; final execution evidence recorded below. |
 | F62 | Previously missed: a missing recovered conversation opened a permanently retrying missing SSE turn and retained the navigation lock. Medium. | Only a recovered conversation GET 404 clears tab recovery and unlocks/hides obsolete controls; 500/network failures still reconnect. Browser covers accepted and ambiguous-send records referencing missing conversations and asserts no missing-turn EventSource request. |
 | F63 | Review summary: retained 409 conflicts required unchanged retries that could only conflict again. Medium. | Definitive 409 now clears pending submission, retaining 408/429/transport recovery. Browser verifies a changed message submits with a fresh request ID after conflict. |
+| F64 | Independent review of `ed89456`: late ambiguous-recovery 404 cleared/hid a newer conversation selected while recovery was pending. Medium. | Clear only the matching pending record and guard stream/selection/control resets with the captured navigation generation. Held-recovery browser regression creates a newer conversation before releasing 404, then asserts it remains visible and send-enabled. |
+| F65 | F64 browser run exposed cross-test fixture contamination: a new default-titled conversation made an existing locator ambiguous. | New recovery tests now own isolated host/data fixtures, preserving the existing scenario rather than weakening its assertions or depending on execution order. |
 
 Follow-up validation on October 9, 2026: `tools/validate.sh build`,
 `integration` (126/126), `browser-e2e` (1/1 plus expected failing probe),
