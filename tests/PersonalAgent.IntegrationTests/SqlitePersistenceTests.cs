@@ -584,6 +584,61 @@ public sealed class SqlitePersistenceTests
 
     [Fact]
     [Trait("Category", "Integration")]
+    public async Task OwnerScopedDuplicateRefreshesRetentionActivityButTrustedDuplicateDoesNot()
+    {
+        using var file = IsolatedDatabaseFile.Create();
+        var database = new SqliteDatabase(file.Path);
+        await database.InitializeAsync();
+        var past = Now.AddDays(-400);
+        var clock = new MutableClock(past);
+        var store = new SqliteConversationStore(database, clock);
+        var retention = new SqliteRetentionService(database, clock, new SqliteRetentionOptions());
+        const string text = "Completed request";
+        var fingerprint = Convert.ToHexString(
+            System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(text)));
+
+        async Task<(ConversationId Id, SubmittedConversationTurn First)> CompletedConversationAsync()
+        {
+            var conversation = await store.CreateConversationAsync(
+                new ConversationRecord(ConversationId.New(), "owner", "Old", past, past), CancellationToken.None);
+            var first = await store.SubmitTurnAsync(
+                new ConversationTurnSubmission(TurnId.New(), conversation.Id, "retry", fingerprint, Guid.NewGuid(), text, past, "owner"),
+                CancellationToken.None);
+            await store.UpdateTurnStatusAsync(first.Turn.Id, TurnStatus.Completed, first.Turn.Version, past, CancellationToken.None);
+            return (conversation.Id, first);
+        }
+
+        var ownerScoped = await CompletedConversationAsync();
+        var trusted = await CompletedConversationAsync();
+        clock.UtcNow = Now;
+        var ownerRetry = await store.SubmitTurnAsync(
+            new ConversationTurnSubmission(TurnId.New(), ownerScoped.Id, "retry", fingerprint, Guid.NewGuid(), text, Now, "owner"),
+            CancellationToken.None);
+        var trustedRetry = await store.SubmitTurnAsync(
+            new ConversationTurnSubmission(TurnId.New(), trusted.Id, "retry", fingerprint, Guid.NewGuid(), text, Now),
+            CancellationToken.None);
+
+        Assert.True(ownerRetry.IsDuplicate);
+        Assert.Equal(ownerScoped.First.Turn.Id, ownerRetry.Turn.Id);
+        Assert.True(trustedRetry.IsDuplicate);
+        Assert.Equal(Now, (await store.GetConversationAsync(ownerScoped.Id, "owner", CancellationToken.None))!.UpdatedAtUtc);
+        Assert.Equal(past, (await store.GetConversationAsync(trusted.Id, "owner", CancellationToken.None))!.UpdatedAtUtc);
+
+        // Cleanup immediately after acceptance keeps the re-accepted root; the untouched trusted root expires.
+        Assert.Equal(new SqliteRetentionResult(1, 0), await retention.CleanupExpiredAsync(CancellationToken.None));
+        Assert.Equal(TurnStatus.Completed, (await store.GetTurnAsync(ownerRetry.Turn.Id, CancellationToken.None))!.Status);
+        Assert.Null(await store.GetConversationAsync(trusted.Id, "owner", CancellationToken.None));
+
+        // An older duplicate timestamp never moves the activity time backwards.
+        var stale = await store.SubmitTurnAsync(
+            new ConversationTurnSubmission(TurnId.New(), ownerScoped.Id, "retry", fingerprint, Guid.NewGuid(), text, past, "owner"),
+            CancellationToken.None);
+        Assert.True(stale.IsDuplicate);
+        Assert.Equal(Now, (await store.GetConversationAsync(ownerScoped.Id, "owner", CancellationToken.None))!.UpdatedAtUtc);
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
     public async Task TerminalCompletionPersistsItsFinalAssistantMessageAtomicallyOnce()
     {
         using var file = IsolatedDatabaseFile.Create();

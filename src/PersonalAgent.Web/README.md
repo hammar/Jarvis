@@ -94,6 +94,9 @@ durable turn/message insert or duplicate acceptance. If retention deletes
 the root first, submission returns 404 without recreating it; if submission
 wins, the unresolved turn protects its root from retention. Trusted internal
 owner-less submissions retain their implicit-root creation behavior.
+Authenticated duplicate retries refresh the root's activity timestamp
+transactionally, extending retention and recent-list order without
+re-executing inference; trusted owner-less duplicates remain read-only.
 API errors use safe problem details;
 responses include `X-Correlation-ID`. Unhandled request failures return
 generic correlated problem details without

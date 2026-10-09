@@ -687,6 +687,104 @@ public sealed class SqliteAndWebSmokeTests
         Assert.Equal("[]", await activity.Content.ReadAsStringAsync(deadline.Token));
     }
 
+    [Theory]
+    [InlineData(nameof(IConversationStore.FindSubmittedTurnAsync), false)]
+    [InlineData(nameof(IConversationStore.SubmitTurnAsync), true)]
+    [Trait("Category", "Integration")]
+    public async Task DuplicateOfExpiredTerminalTurnIsAcceptedAtomicallyOrReportedMissing(
+        string cleanupAfter, bool retained)
+    {
+        using var data = IsolatedDirectory.Create();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        await using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(web =>
+        {
+            web.UseSetting("JARVIS_PROFILE", "Local");
+            web.UseSetting("JARVIS_DATA_DIR", data.Path);
+            web.ConfigureTestServices(services =>
+            {
+                services.RemoveAll<IAgentEngine>();
+                services.AddSingleton<PausedDurableEngine>();
+                services.AddSingleton<IAgentEngine>(provider => provider.GetRequiredService<PausedDurableEngine>());
+                services.RemoveAll<IConversationStore>();
+                services.RemoveAll<IAtomicTurnOutcomeStore>();
+                services.AddSingleton<SqliteConversationStore>();
+                services.AddSingleton<IAtomicTurnOutcomeStore>(provider =>
+                    provider.GetRequiredService<SqliteConversationStore>());
+                services.AddSingleton<IConversationStore>(provider => CleanupAfterReadProxy.Create(
+                    provider.GetRequiredService<SqliteConversationStore>(),
+                    provider.GetRequiredService<IHistoryRetentionStore>(),
+                    provider.GetRequiredService<RetentionSettings>(),
+                    provider.GetRequiredService<IClock>()));
+            });
+        });
+        using var client = factory.CreateClient();
+        using var csrf = await client.GetAsync("/api/auth/csrf", deadline.Token);
+        csrf.EnsureSuccessStatusCode();
+        using var csrfBody = JsonDocument.Parse(await csrf.Content.ReadAsStringAsync(deadline.Token));
+        client.DefaultRequestHeaders.Add("X-CSRF-TOKEN", csrfBody.RootElement.GetProperty("token").GetString());
+        using var bootstrap = await client.PostAsJsonAsync("/api/auth/bootstrap", new
+        {
+            bootstrapToken = factory.Services.GetRequiredService<OwnerAuthenticationService>().BootstrapToken,
+            passphrase = "a-long-owner-passphrase",
+            rememberMe = false
+        }, deadline.Token);
+        bootstrap.EnsureSuccessStatusCode();
+        using var authenticatedCsrf = await client.GetAsync("/api/auth/csrf", deadline.Token);
+        using var authenticatedCsrfBody = JsonDocument.Parse(await authenticatedCsrf.Content.ReadAsStringAsync(deadline.Token));
+        client.DefaultRequestHeaders.Remove("X-CSRF-TOKEN");
+        client.DefaultRequestHeaders.Add("X-CSRF-TOKEN", authenticatedCsrfBody.RootElement.GetProperty("token").GetString());
+        using var created = await client.PostAsJsonAsync("/api/conversations", new { title = "Retried" }, deadline.Token);
+        created.EnsureSuccessStatusCode();
+        using var createdBody = JsonDocument.Parse(await created.Content.ReadAsStringAsync(deadline.Token));
+        var conversationId = new ConversationId(createdBody.RootElement.GetProperty("id").GetProperty("value").GetGuid());
+        var turnRequest = new { requestId = "terminal-retry", text = "Answer once." };
+        using var first = await client.PostAsJsonAsync(
+            $"/api/conversations/{conversationId.Value:D}/turns", turnRequest, deadline.Token);
+        Assert.Equal(HttpStatusCode.Accepted, first.StatusCode);
+        using var firstBody = JsonDocument.Parse(await first.Content.ReadAsStringAsync(deadline.Token));
+        var turnId = firstBody.RootElement.GetProperty("turnId").GetProperty("value").GetGuid();
+        var engine = factory.Services.GetRequiredService<PausedDurableEngine>();
+        engine.Finish.TrySetResult();
+        await engine.Completed.Task.WaitAsync(deadline.Token);
+
+        // The engine's terminal commit is the last write for this turn; backdating afterwards makes the
+        // conversation expired and cleanup-eligible before the retry arrives.
+        var database = factory.Services.GetRequiredService<SqliteDatabase>();
+        await using (var connection = await database.OpenConnectionAsync(deadline.Token))
+        await using (var backdate = connection.CreateCommand())
+        {
+            backdate.CommandText = "UPDATE conversations SET updated_at_utc = '2000-01-01T00:00:00.0000000+00:00' WHERE id = $id;";
+            backdate.Parameters.AddWithValue("$id", conversationId.Value.ToString("D"));
+            Assert.Equal(1, await backdate.ExecuteNonQueryAsync(deadline.Token));
+        }
+
+        var proxy = (CleanupAfterReadProxy)factory.Services.GetRequiredService<IConversationStore>();
+        proxy.Arm(cleanupAfter, TimeSpan.Zero);
+        using var retry = await client.PostAsJsonAsync(
+            $"/api/conversations/{conversationId.Value:D}/turns", turnRequest, deadline.Token);
+
+        Assert.True(proxy.CleanupRan.Task.IsCompletedSuccessfully);
+        var store = factory.Services.GetRequiredService<SqliteConversationStore>();
+        if (retained)
+        {
+            Assert.Equal(HttpStatusCode.Accepted, retry.StatusCode);
+            using var retryBody = JsonDocument.Parse(await retry.Content.ReadAsStringAsync(deadline.Token));
+            Assert.True(retryBody.RootElement.GetProperty("isDuplicate").GetBoolean());
+            Assert.Equal(turnId, retryBody.RootElement.GetProperty("turnId").GetProperty("value").GetGuid());
+            Assert.NotNull(await store.GetConversationAsync(conversationId, "owner", deadline.Token));
+            Assert.Equal(TurnStatus.Completed, (await store.GetTurnAsync(new TurnId(turnId), deadline.Token))!.Status);
+            using var events = await client.GetAsync($"/api/turns/{turnId:D}/events", deadline.Token);
+            events.EnsureSuccessStatusCode();
+            Assert.Contains(nameof(TurnCompleted), await events.Content.ReadAsStringAsync(deadline.Token), StringComparison.Ordinal);
+        }
+        else
+        {
+            Assert.Equal(HttpStatusCode.NotFound, retry.StatusCode);
+            Assert.Null(await store.GetConversationAsync(conversationId, "owner", deadline.Token));
+            Assert.Null(await store.GetTurnAsync(new TurnId(turnId), deadline.Token));
+        }
+    }
+
     public class CleanupAfterReadProxy : DispatchProxy
     {
         private IConversationStore inner = null!;
@@ -695,6 +793,7 @@ public sealed class SqliteAndWebSmokeTests
         private IClock clock = null!;
         private readonly object sync = new();
         private string? armedMethod;
+        private TimeSpan cleanupOffset;
 
         public TaskCompletionSource CleanupRan { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -710,11 +809,12 @@ public sealed class SqliteAndWebSmokeTests
             return proxy;
         }
 
-        public void Arm(string methodName)
+        public void Arm(string methodName, TimeSpan? cleanupClockOffset = null)
         {
             lock (sync)
             {
                 armedMethod = methodName;
+                cleanupOffset = cleanupClockOffset ?? TimeSpan.FromDays(4000);
             }
         }
 
@@ -722,6 +822,7 @@ public sealed class SqliteAndWebSmokeTests
         {
             ArgumentNullException.ThrowIfNull(targetMethod);
             object? result;
+            TimeSpan offset;
             try
             {
                 result = targetMethod.Invoke(inner, args);
@@ -740,20 +841,27 @@ public sealed class SqliteAndWebSmokeTests
                 }
 
                 armedMethod = null;
+                offset = cleanupOffset;
             }
 
-            return targetMethod.Name == nameof(IConversationStore.GetConversationAsync)
-                ? new ValueTask<ConversationRecord?>(CleanupAfterAsync(((ValueTask<ConversationRecord?>)result!).AsTask()))
-                : new ValueTask<SubmittedConversationTurn?>(
-                    CleanupAfterAsync(((ValueTask<SubmittedConversationTurn?>)result!).AsTask()));
+            return targetMethod.Name switch
+            {
+                nameof(IConversationStore.GetConversationAsync) => new ValueTask<ConversationRecord?>(
+                    CleanupAfterAsync(((ValueTask<ConversationRecord?>)result!).AsTask(), offset)),
+                nameof(IConversationStore.FindSubmittedTurnAsync) => new ValueTask<SubmittedConversationTurn?>(
+                    CleanupAfterAsync(((ValueTask<SubmittedConversationTurn?>)result!).AsTask(), offset)),
+                nameof(IConversationStore.SubmitTurnAsync) => new ValueTask<SubmittedConversationTurn>(
+                    CleanupAfterAsync(((ValueTask<SubmittedConversationTurn>)result!).AsTask(), offset)),
+                _ => throw new InvalidOperationException("The cleanup barrier was armed on an unsupported method.")
+            };
         }
 
-        // Deletes every eligible conversation after the wrapped read has returned, so the request continues
-        // with a stale observation and only the persistence transaction can detect the removal.
-        private async Task<T> CleanupAfterAsync<T>(Task<T> read)
+        // Runs real cleanup after the wrapped call has returned and before the request continues, so the request
+        // proceeds with a stale observation (or an already-committed acceptance) and the race is deterministic.
+        private async Task<T> CleanupAfterAsync<T>(Task<T> read, TimeSpan offset)
         {
             var value = await read;
-            await retention.CleanupExpiredAsync(defaults, clock.UtcNow.AddDays(4000), CancellationToken.None);
+            await retention.CleanupExpiredAsync(defaults, clock.UtcNow + offset, CancellationToken.None);
             CleanupRan.TrySetResult();
             return value;
         }

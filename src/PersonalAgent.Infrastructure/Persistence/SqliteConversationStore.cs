@@ -337,6 +337,21 @@ public sealed class SqliteConversationStore : IConversationStore, IAtomicTurnOut
                     Guid.Parse(reader.GetString(7)),
                     IsDuplicate: true);
                 await reader.DisposeAsync();
+                if (submission.RequiredOwnerId is not null)
+                {
+                    // An owner-scoped duplicate is re-acceptance: refresh retention activity under the same write
+                    // lock so cleanup cannot remove the conversation before the caller receives this turn.
+                    await using var touch = connection.CreateCommand();
+                    touch.Transaction = transaction;
+                    touch.CommandText = """
+                        UPDATE conversations SET updated_at_utc = $updated
+                        WHERE id = $id AND updated_at_utc < $updated;
+                        """;
+                    touch.Parameters.AddWithValue("$id", SqliteValue.Guid(submission.ConversationId.Value));
+                    touch.Parameters.AddWithValue("$updated", createdAt);
+                    await touch.ExecuteNonQueryAsync(cancellationToken);
+                }
+
                 await transaction.CommitAsync(cancellationToken);
                 return result;
             }

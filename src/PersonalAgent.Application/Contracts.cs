@@ -353,6 +353,9 @@ public interface ILocalTurnCoordinator
     /// <exception cref="TurnRequestConflictException">The request ID was reused with different request content.</exception>
     /// <exception cref="ConversationNotFoundException">The request names a required owner and the conversation is
     /// missing or owned by another account; nothing is persisted or queued.</exception>
+    /// <remarks>Owner-scoped duplicates are always re-accepted through the atomic store submission (rechecking
+    /// ownership and refreshing retention activity), and a full queue does not reject them. Owner-less duplicates
+    /// may be returned from a read-only lookup.</remarks>
     ValueTask<SubmittedConversationTurn> SubmitAsync(LocalTurnRequest request, CancellationToken cancellationToken);
 
     /// <summary>Reads a bounded ordered page of persisted events after an exclusive sequence cursor.</summary>
@@ -796,6 +799,10 @@ public interface IConversationStore
     /// <exception cref="TurnRequestConflictException">A request ID already belongs to different input.</exception>
     /// <exception cref="ConversationNotFoundException">A required owner was supplied and the conversation is missing
     /// or belongs to another owner; nothing is written.</exception>
+    /// <remarks>When a required owner is supplied, a matching duplicate is re-accepted: the conversation's UTC update
+    /// time is advanced to <see cref="ConversationTurnSubmission.CreatedAtUtc"/> (never moved backwards) in the same
+    /// transaction, so retention cleanup cannot remove the returned turn immediately after acceptance. Owner-less
+    /// duplicates are read-only.</remarks>
     ValueTask<SubmittedConversationTurn> SubmitTurnAsync(
         ConversationTurnSubmission submission,
         CancellationToken cancellationToken);

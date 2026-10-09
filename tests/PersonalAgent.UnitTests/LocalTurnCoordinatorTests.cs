@@ -246,6 +246,54 @@ public sealed class LocalTurnCoordinatorTests
 
     [Fact]
     [Trait("Category", "Unit")]
+    public async Task OwnerScopedDuplicateIsReacceptedAtomicallyEvenWhenTheQueueIsFull()
+    {
+        var store = new InMemoryConversationStore();
+        var engine = new ControlledEngine(store, block: true);
+        await using var scope = CreateCoordinator(store, engine);
+        await scope.Coordinator.StartAsync(CancellationToken.None);
+        var conversationId = ConversationId.New();
+        var owned = Request(conversationId, "owned-active") with { RequiredOwnerId = "owner" };
+        var active = await scope.Coordinator.SubmitAsync(owned, CancellationToken.None);
+        await engine.Started.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        for (var index = 0; index < 20; index++)
+        {
+            await scope.Coordinator.SubmitAsync(Request(conversationId, $"fill-{index}"), CancellationToken.None);
+        }
+
+        await Assert.ThrowsAsync<TurnQueueFullException>(async () =>
+            await scope.Coordinator.SubmitAsync(
+                Request(conversationId, "overflow") with { RequiredOwnerId = "owner" }, CancellationToken.None));
+
+        var callsBeforeRetry = store.SubmitCalls;
+        var ownerRetry = await scope.Coordinator.SubmitAsync(owned, CancellationToken.None);
+        Assert.True(ownerRetry.IsDuplicate);
+        Assert.Equal(active.Turn.Id, ownerRetry.Turn.Id);
+        Assert.Equal(callsBeforeRetry + 1, store.SubmitCalls);
+        Assert.Equal("owner", store.LastSubmissionOwnerId);
+
+        // Trusted owner-less retries keep the read-only duplicate path.
+        var trustedRetry = await scope.Coordinator.SubmitAsync(Request(conversationId, "fill-0"), CancellationToken.None);
+        Assert.True(trustedRetry.IsDuplicate);
+        Assert.Equal(callsBeforeRetry + 1, store.SubmitCalls);
+
+        // If the key disappears between the pre-read and the write, the new turn has no reserved capacity and
+        // is resolved durably instead of being queued beyond the bound.
+        store.ForgetRequestBeforeSubmission = true;
+        await Assert.ThrowsAsync<TurnQueueFullException>(async () =>
+            await scope.Coordinator.SubmitAsync(owned, CancellationToken.None));
+        var orphan = store.LastSubmittedTurnId;
+        Assert.NotEqual(active.Turn.Id, orphan);
+        Assert.Equal(TurnStatus.Failed, (await store.GetTurnAsync(orphan, CancellationToken.None))!.Status);
+        Assert.Contains(
+            await scope.Coordinator.ReadEventsAfterAsync(orphan, 0, 20, CancellationToken.None),
+            item => item.EventType == nameof(TurnFailed) && item.PayloadJson.Contains("turn_queue_full", StringComparison.Ordinal));
+
+        await scope.Coordinator.StopAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    [Trait("Category", "Unit")]
     public async Task FailedPersistenceReleasesReservedQueueCapacity()
     {
         var store = new InMemoryConversationStore { FailNextSubmission = true };
@@ -2069,6 +2117,8 @@ public sealed class LocalTurnCoordinatorTests
         public TurnId LastSubmittedTurnId { get; private set; }
         public string? ExistingConversationOwnerId { get; set; } = "owner";
         public bool RemoveConversationBeforeSubmission { get; set; }
+        public bool ForgetRequestBeforeSubmission { get; set; }
+        public int SubmitCalls { get; private set; }
         public string? LastFindOwnerId { get; private set; }
         public string? LastSubmissionOwnerId { get; private set; }
 
@@ -2159,6 +2209,12 @@ public sealed class LocalTurnCoordinatorTests
             lock (sync)
             {
                 LastSubmissionOwnerId = submission.RequiredOwnerId;
+                SubmitCalls++;
+                if (ForgetRequestBeforeSubmission)
+                {
+                    ForgetRequestBeforeSubmission = false;
+                    requests.Remove((submission.ConversationId, submission.ClientRequestId));
+                }
                 if (submission.RequiredOwnerId is not null && RemoveConversationBeforeSubmission)
                 {
                     RemoveConversationBeforeSubmission = false;

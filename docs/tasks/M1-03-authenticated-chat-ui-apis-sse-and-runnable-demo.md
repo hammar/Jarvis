@@ -325,6 +325,7 @@ the new revision remains required and is not inferred from this native run.
 | F68 | Previously missed: retention can delete a root after the Web ownership check, then submission recreates it without its history/title. | In progress: validate required existing owner inside the durable submission transaction; preserve explicit internal implicit-root callers. Deterministic retention/submission and ownership regressions required. |
 | F69 | Previously missed: recent-conversation clicks discard the open promise, hiding 404/500/network errors. | Fixed in working tree: catch click errors only for the current selection generation. Browser regression covers current errors and held stale failures after Settings navigation, with no unhandled rejection. Validation pending. |
 | F70 | Previously missed: recovery string-only validation accepts malformed/empty identifiers and locks chat around an invalid SSE URL. | Fixed in working tree: require nonempty GUID conversation/request/optional turn IDs and nonblank text within 8,000 characters before restoring state. Browser checks invalid values with a real conversation, cleared record, unlocked controls and no event requests. Validation pending. |
+| F71 | Independent review of a93ba39: terminal duplicate pre-read can return an expired root's turn directly; retention after the read deletes it before 202, leaving a missing accepted SSE target. Medium. | In progress: owner-scoped duplicate acceptance must validate and refresh retention activity transactionally; deterministic terminal-duplicate race regression required. |
 
 Follow-up validation on October 9, 2026: `tools/validate.sh build`,
 `integration` (126/126), `browser-e2e` (1/1 plus expected failing probe),
@@ -483,3 +484,11 @@ Completion requires deterministic deletion/submission ordering, wrong-owner
 rejection, duplicate behavior, current/stale navigation failure and invalid
 value recovery regressions; relevant build/runtime/coverage/E2E/docs gates,
 independent exact-revision review and complete finding dispositions.
+
+Initial F68–F70 validation: targeted new browser tests 4/4, build and unit
+92/92 passed. Integration collector stalled while processing 942 numbered
+duplicate files in generated integration output; stopped before a result and
+rebuilt only `tests/PersonalAgent.IntegrationTests/bin/Release/net10.0`.
+No collector configuration, thresholds or validation gate changed. Full
+remaining gates pending. Independent a93ba39 review substantiated F68–F70
+and identified F71; no independent suite execution.
