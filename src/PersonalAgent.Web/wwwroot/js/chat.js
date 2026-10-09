@@ -68,7 +68,8 @@ async function api(path, options = {}) {
         error.status = response.status;
         throw error;
     }
-    return response.status === 204 ? null : response.json();
+    const body = await response.text();
+    return body.length === 0 ? null : JSON.parse(body);
 }
 
 function renderMessages(messages) {
@@ -313,13 +314,18 @@ function connectEvents(turnId, lastSequence) {
                 showError("This request was interrupted before completion. Your conversation is saved; you can try again.");
             }
             source.close();
-            activeTurnId = "";
-            activeTurnConversationId = "";
-            setTurnNavigationLocked(false);
             document.getElementById("cancel-turn").hidden = true;
-            document.getElementById("send-turn").disabled = false;
-            await loadConversations();
-            await openConversation(conversationId);
+            try {
+                await loadConversations();
+                await openConversation(activeTurnConversationId);
+            } catch (error) {
+                showError(error.message);
+            } finally {
+                activeTurnId = "";
+                activeTurnConversationId = "";
+                setTurnNavigationLocked(false);
+                document.getElementById("send-turn").disabled = false;
+            }
         }
     };
     for (const type of ["TextDelta", "AssistantMessage", "TurnCompleted", "TurnFailed", "TurnCancelled", "TurnInterrupted"]) {

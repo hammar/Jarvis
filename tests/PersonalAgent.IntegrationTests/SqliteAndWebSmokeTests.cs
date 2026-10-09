@@ -233,6 +233,7 @@ public sealed class SqliteAndWebSmokeTests
 
         using var anonymous = await client.GetAsync("/api/conversations");
         Assert.Equal(HttpStatusCode.Unauthorized, anonymous.StatusCode);
+        Assert.False(string.IsNullOrWhiteSpace(Assert.Single(anonymous.Headers.GetValues("X-Correlation-ID"))));
 
         using var csrfResponse = await client.GetAsync("/api/auth/csrf");
         csrfResponse.EnsureSuccessStatusCode();
@@ -404,6 +405,7 @@ public sealed class SqliteAndWebSmokeTests
 
         Assert.Equal(HttpStatusCode.OK, live.StatusCode);
         Assert.Equal(HttpStatusCode.Unauthorized, ready.StatusCode);
+        Assert.False(string.IsNullOrWhiteSpace(Assert.Single(ready.Headers.GetValues("X-Correlation-ID"))));
     }
 
     [Theory]

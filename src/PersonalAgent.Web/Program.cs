@@ -128,9 +128,6 @@ if (!await authentication.IsOwnerConfiguredAsync(CancellationToken.None))
 
 app.UseStaticFiles();
 app.UseRouting();
-app.UseRateLimiter();
-app.UseAuthentication();
-app.UseAuthorization();
 app.Use(async (context, next) =>
 {
     context.Response.OnStarting(() =>
@@ -152,6 +149,9 @@ app.Use(async (context, next) =>
 
     await next();
 });
+app.UseRateLimiter();
+app.UseAuthentication();
+app.UseAuthorization();
 app.MapRazorPages();
 app.MapHealthChecks("/health/live", new Microsoft.AspNetCore.Diagnostics.HealthChecks.HealthCheckOptions
 {

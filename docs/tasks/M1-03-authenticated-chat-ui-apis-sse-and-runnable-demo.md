@@ -133,6 +133,21 @@ and unexercised live behavior.
 
 ## Final handoff
 
+### PR review follow-up
+
+| Ref | Finding | Disposition and evidence |
+| --- | --- | --- |
+| F24 | Authorization/rate limiting could short-circuit before correlation headers were registered. | Fixed by registering correlation/body-limit middleware before those components; integration assertions verify correlation IDs on anonymous API and readiness responses. |
+| F25 | Empty successful cancellation responses were parsed as JSON and reported as failures. | Fixed by reading successful response text and returning null for an empty body; browser cancellation asserts no error alert. |
+| F26 | Terminal history refresh unlocked navigation before its asynchronous operations finished. | Fixed by retaining the active-turn lock through refresh and releasing it in finally with explicit error reporting; browser holds the terminal list refresh and verifies navigation/send stay disabled. |
+| F27 | Browser waited for an already-existing list item instead of completion of third-conversation creation. | Fixed by waiting for the selected ID to change and the list count to reach three before continuing. |
+
+Follow-up validation on October 9, 2026: `tools/validate.sh build`,
+`integration` (126/126), `browser-e2e` (1/1 plus expected failing probe),
+`coverage` (all thresholds passed), and `docs` passed serially after F24–F27.
+The base was fetched and remains unchanged from the implementation base.
+GitHub checks on the preceding head were passing; new-head CI is separate.
+
 - Acceptance: M1-03 scope and scenarios listed above; no contract or schema
   changes beyond the previously described owner-authentication/settings
   migration and Application-owned retention contract.

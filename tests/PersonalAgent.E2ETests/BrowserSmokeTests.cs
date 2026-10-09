@@ -44,11 +44,21 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
                     let signalReadStarted;
                     window.__staleReadStarted = new Promise(resolve => { signalReadStarted = resolve; });
                     window.__releaseStaleRead = () => releaseRead();
+                    let releaseRefresh;
+                    let signalRefreshStarted;
+                    window.__refreshStarted = new Promise(resolve => { signalRefreshStarted = resolve; });
+                    window.__releaseRefresh = () => releaseRefresh();
+                    window.__holdRefresh = false;
                     const originalFetch = window.fetch.bind(window);
                     window.fetch = async (input, init = {}) => {
                         const url = typeof input === "string" ? input : input.url;
                         const method = (init.method || (input instanceof Request ? input.method : "GET")).toUpperCase();
                         const response = await originalFetch(input, init);
+                        if (window.__holdRefresh && method === "GET" && url === "/api/conversations") {
+                            window.__holdRefresh = false;
+                            signalRefreshStarted();
+                            await new Promise(resolve => { releaseRefresh = resolve; });
+                        }
                         if (method === "GET" && url.includes(id)) {
                             signalReadStarted();
                             await new Promise(resolve => { releaseRead = resolve; });
@@ -117,10 +127,16 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
                 .Filter(new LocatorFilterOptions { HasText = "Controlled streaming " });
             await partialReply.WaitForAsync(new LocatorWaitForOptions { Timeout = 15_000 });
             Assert.DoesNotContain("response", await partialReply.InnerTextAsync(), StringComparison.Ordinal);
+            await page.EvaluateAsync("window.__holdRefresh = true");
             await page.GetByText("Controlled streaming response", new PageGetByTextOptions { Exact = false })
                 .WaitForAsync(new LocatorWaitForOptions { Timeout = 30_000 });
             await page.Locator("#cancel-turn").WaitForAsync(
                 new LocatorWaitForOptions { State = WaitForSelectorState.Hidden, Timeout = 15_000 });
+            await page.EvaluateAsync("window.__refreshStarted");
+            Assert.True(await page.Locator("#new-conversation").IsDisabledAsync());
+            Assert.True(await page.Locator("#send-turn").IsDisabledAsync());
+            await page.EvaluateAsync("window.__releaseRefresh()");
+            await page.WaitForFunctionAsync("() => !document.getElementById('new-conversation').disabled");
             await page.EvaluateAsync("window.__releaseStaleRead()");
             await page.EvaluateAsync("window.__staleOpenPromise");
             Assert.Equal(submittedConversationId, await page.EvaluateAsync<string>("conversationId"));
@@ -129,9 +145,9 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
             Assert.Equal(1, await streamedReplies.CountAsync());
 
             await page.Locator("#new-conversation").ClickAsync();
-            await page.Locator("#conversation-list button").Nth(1)
-                .WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible });
-            Assert.Equal(2, await page.Locator("#conversation-list button").CountAsync());
+            await page.WaitForFunctionAsync("previous => conversationId !== previous", submittedConversationId);
+            await page.WaitForFunctionAsync("() => document.querySelectorAll('#conversation-list button').length === 3");
+            Assert.Equal(3, await page.Locator("#conversation-list button").CountAsync());
             using (var failureControl = await fixture.ModelClient.PostAsync(
                 "/fixture/control/fail-next-stream",
                 content: null))
@@ -193,6 +209,8 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
             await cancelButton.ClickAsync();
             await cancelButton.WaitForAsync(
                 new LocatorWaitForOptions { State = WaitForSelectorState.Hidden, Timeout = 15_000 });
+            await page.WaitForFunctionAsync("() => !document.getElementById('activity-button').disabled");
+            Assert.True(await page.GetByRole(AriaRole.Alert).IsHiddenAsync());
             await page.GetByRole(AriaRole.Button, new PageGetByRoleOptions { Name = "Activity" }).ClickAsync();
             await page.GetByText("Cancelled", new PageGetByTextOptions { Exact = false })
                 .WaitForAsync(new LocatorWaitForOptions { Timeout = 15_000 });
