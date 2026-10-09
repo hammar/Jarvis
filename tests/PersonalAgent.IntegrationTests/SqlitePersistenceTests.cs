@@ -507,6 +507,83 @@ public sealed class SqlitePersistenceTests
 
     [Fact]
     [Trait("Category", "Integration")]
+    public async Task OwnerScopedSubmissionRequiresTheExistingOwnedConversationAtomically()
+    {
+        using var file = IsolatedDatabaseFile.Create();
+        var database = new SqliteDatabase(file.Path);
+        await database.InitializeAsync();
+        var clock = new MutableClock(Now);
+        var store = new SqliteConversationStore(database, clock);
+        var retention = new SqliteRetentionService(database, clock, new SqliteRetentionOptions());
+        const string text = "Owner scoped request";
+        var fingerprint = Convert.ToHexString(
+            System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(text)));
+        ConversationTurnSubmission Submission(ConversationId id, string requestId, string? owner) =>
+            new(TurnId.New(), id, requestId, fingerprint, Guid.NewGuid(), text, Now, owner);
+
+        var missing = ConversationId.New();
+        await Assert.ThrowsAsync<ArgumentException>(async () =>
+            await store.SubmitTurnAsync(Submission(missing, "invalid", " "), CancellationToken.None));
+        await Assert.ThrowsAsync<ArgumentException>(async () =>
+            await store.FindSubmittedTurnAsync(missing, "invalid", fingerprint, CancellationToken.None, new string('o', 129)));
+        await Assert.ThrowsAsync<ConversationNotFoundException>(async () =>
+            await store.SubmitTurnAsync(Submission(missing, "missing", "owner"), CancellationToken.None));
+        await Assert.ThrowsAsync<ConversationNotFoundException>(async () =>
+            await store.FindSubmittedTurnAsync(missing, "missing", fingerprint, CancellationToken.None, "owner"));
+        Assert.Null(await store.GetConversationAsync(missing, "owner", CancellationToken.None));
+
+        var owned = await store.CreateConversationAsync(
+            new ConversationRecord(ConversationId.New(), "owner", "Owned", Now.AddDays(-400), Now.AddDays(-400)),
+            CancellationToken.None);
+        await Assert.ThrowsAsync<ConversationNotFoundException>(async () =>
+            await store.SubmitTurnAsync(Submission(owned.Id, "foreign", "intruder"), CancellationToken.None));
+        Assert.Empty(await store.ReadRecentAsync(owned.Id, 10, CancellationToken.None));
+        Assert.Equal(owned.UpdatedAtUtc, (await store.GetConversationAsync(owned.Id, "owner", CancellationToken.None))!.UpdatedAtUtc);
+
+        var accepted = await store.SubmitTurnAsync(Submission(owned.Id, "accepted", "owner"), CancellationToken.None);
+        Assert.False(accepted.IsDuplicate);
+        var duplicate = await store.SubmitTurnAsync(Submission(owned.Id, "accepted", "owner"), CancellationToken.None);
+        Assert.True(duplicate.IsDuplicate);
+        Assert.Equal(accepted.Turn, duplicate.Turn);
+        Assert.Equal(accepted.Turn, (await store.FindSubmittedTurnAsync(
+            owned.Id, "accepted", fingerprint, CancellationToken.None, "owner"))!.Turn);
+        await Assert.ThrowsAsync<ConversationNotFoundException>(async () =>
+            await store.FindSubmittedTurnAsync(owned.Id, "accepted", fingerprint, CancellationToken.None, "intruder"));
+        await Assert.ThrowsAsync<ConversationNotFoundException>(async () =>
+            await store.SubmitTurnAsync(Submission(owned.Id, "accepted", "intruder"), CancellationToken.None));
+
+        // The accepted nonterminal turn and refreshed update time keep cleanup from removing the conversation.
+        clock.UtcNow = Now.AddDays(3700);
+        Assert.Equal(new SqliteRetentionResult(0, 0), await retention.CleanupExpiredAsync(CancellationToken.None));
+        Assert.NotNull(await store.GetConversationAsync(owned.Id, "owner", CancellationToken.None));
+
+        var expired = await store.CreateConversationAsync(
+            new ConversationRecord(ConversationId.New(), "owner", "Expired", Now.AddDays(-400), Now.AddDays(-400)),
+            CancellationToken.None);
+        Assert.Equal(new SqliteRetentionResult(1, 0), await retention.CleanupExpiredAsync(CancellationToken.None));
+        await Assert.ThrowsAsync<ConversationNotFoundException>(async () =>
+            await store.SubmitTurnAsync(Submission(expired.Id, "after-cleanup", "owner"), CancellationToken.None));
+        await using (var connection = await database.OpenConnectionAsync())
+        await using (var rows = connection.CreateCommand())
+        {
+            rows.CommandText = """
+                SELECT (SELECT COUNT(*) FROM conversations WHERE id = $id)
+                    + (SELECT COUNT(*) FROM turns WHERE conversation_id = $id)
+                    + (SELECT COUNT(*) FROM messages WHERE conversation_id = $id);
+                """;
+            rows.Parameters.AddWithValue("$id", expired.Id.Value.ToString("D"));
+            Assert.Equal(0L, (long)(await rows.ExecuteScalarAsync())!);
+        }
+
+        var implicitRoot = ConversationId.New();
+        var trusted = await store.SubmitTurnAsync(Submission(implicitRoot, "implicit", null), CancellationToken.None);
+        Assert.False(trusted.IsDuplicate);
+        Assert.NotNull(await store.GetConversationAsync(implicitRoot, "owner", CancellationToken.None));
+        Assert.Null(await store.FindSubmittedTurnAsync(implicitRoot, "unused", fingerprint, CancellationToken.None, "owner"));
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
     public async Task TerminalCompletionPersistsItsFinalAssistantMessageAtomicallyOnce()
     {
         using var file = IsolatedDatabaseFile.Create();

@@ -204,11 +204,16 @@ internal static class ChatApi
                         conversationId,
                         request.RequestId,
                         request.Text,
-                        RoutingTaskKind.TextConversation),
+                        RoutingTaskKind.TextConversation,
+                        RequiredOwnerId: owner),
                     ct);
                 return Results.Accepted(
                     $"/api/turns/{submitted.Turn.Id.Value:D}/events",
                     new { turnId = submitted.Turn.Id, submitted.Turn.Status, submitted.IsDuplicate });
+            }
+            catch (ConversationNotFoundException)
+            {
+                return Results.NotFound();
             }
             catch (TurnQueueFullException)
             {

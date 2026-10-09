@@ -72,7 +72,9 @@ navigation lock, and cancellation target. It is cleared after a terminal
 event or a definitive non-retryable client error; it remains available after
 an ambiguous failure.
 This is browser-local recovery state, not a telemetry or logging channel.
-Malformed JSON or invalid recovery shapes are removed with a visible notice
+Malformed JSON, invalid recovery shapes/values (nonempty GUID identifiers,
+including the browser-generated request ID, and nonblank text up to 8,000
+characters are required) are removed with a visible notice
 so sign-in/chat can initialize. If storage removal fails, initialization
 stops with an explicit error rather than silently ignoring the retained record.
 If the recovered conversation GET returns 404, the stale tab record is
@@ -86,7 +88,13 @@ surface. Conversation creation is guarded until selection and list refresh
 complete to prevent duplicate requests from repeated clicks.
 
 Conversation and turn lookups are owner-scoped in persistence before data is
-returned or cancellation is requested. API errors use safe problem details;
+returned or cancellation is requested. Browser turn submission checks the
+existing conversation owner inside the same immediate transaction as the
+durable turn/message insert or duplicate acceptance. If retention deletes
+the root first, submission returns 404 without recreating it; if submission
+wins, the unresolved turn protects its root from retention. Trusted internal
+owner-less submissions retain their implicit-root creation behavior.
+API errors use safe problem details;
 responses include `X-Correlation-ID`. Unhandled request failures return
 generic correlated problem details without
 exposing exception text; requests whose response has already started are
@@ -104,8 +112,10 @@ inference.
 The root page has Chat, Settings, and Activity surfaces. Settings show only
 provider/model and connection configuration status, never secret values.
 Only the latest selected surface is revealed after asynchronous navigation;
-stale Settings/Activity/conversation reads cannot replace it. Retention
-notices and save confirmations use an accessible status region.
+stale Settings/Activity/conversation reads cannot replace it.
+Recent-conversation failures are shown in the alert only while that
+selection is current, including missing history and network/server errors.
+Retention notices and save confirmations use an accessible status region.
 Retention periods default to 90 conversation days and 30 audit days; the owner
 may save 1–3650 days. Saved values are held in SQLite and survive restarts.
 They override the trusted host defaults from

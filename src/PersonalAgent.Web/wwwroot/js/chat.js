@@ -112,7 +112,15 @@ async function loadConversations() {
         button.type = "button";
         button.textContent = item.title || "New conversation";
         button.disabled = activeTurnId !== "" || turnSubmissionInFlight || conversationCreationInFlight;
-        button.addEventListener("click", () => openConversation(item.id.value || item.id));
+        button.addEventListener("click", async () => {
+            const opening = openConversation(item.id.value || item.id);
+            const selectionGeneration = conversationSelectionGeneration;
+            try {
+                await opening;
+            } catch (error) {
+                if (selectionGeneration === conversationSelectionGeneration) showError(error.message);
+            }
+        });
         entry.append(button);
         list.append(entry);
     }
@@ -160,10 +168,13 @@ async function showChat() {
         if (stored) {
             try {
                 const candidate = JSON.parse(stored);
-                if (typeof candidate.conversationId !== "string" ||
-                    typeof candidate.text !== "string" ||
-                    typeof candidate.requestId !== "string" ||
-                    (candidate.turnId !== undefined && typeof candidate.turnId !== "string")) {
+                const isIdentifier = value => typeof value === "string" &&
+                    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value) &&
+                    value !== "00000000-0000-0000-0000-000000000000";
+                if (!candidate || !isIdentifier(candidate.conversationId) ||
+                    typeof candidate.text !== "string" || candidate.text.trim().length === 0 ||
+                    candidate.text.length > 8000 || !isIdentifier(candidate.requestId) ||
+                    (candidate.turnId !== undefined && !isIdentifier(candidate.turnId))) {
                     throw new Error("The saved request has an invalid format.");
                 }
                 pendingTurnSubmission = candidate;

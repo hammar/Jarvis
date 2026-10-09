@@ -322,6 +322,9 @@ the new revision remains required and is not inferred from this native run.
 | F65 | F64 browser run exposed cross-test fixture contamination: a new default-titled conversation made an existing locator ambiguous. | New recovery tests now own isolated host/data fixtures, preserving the existing scenario rather than weakening its assertions or depending on execution order. |
 | F66 | Inline review: malformed/obsolete sessionStorage recovery records returned before revealing auth/chat and survived every reload. Medium. | Remove invalid records with a visible notice and continue initialization; removal failure remains an explicit blocking error. Browser covers malformed JSON, invalid shape and null with injected removal failure, anonymous sign-in and authenticated chat, then verifies usable controls and clean subsequent reload. |
 | F67 | Independent review minor observation: browser JSON parse error text can include a short stored-text snippet. | Not applicable as a telemetry/privacy disclosure defect: notice is rendered via textContent only in the same owner's tab, with no logging or transmission. It explains the locally corrupt record; no new data recipient or execution surface is introduced. |
+| F68 | Previously missed: retention can delete a root after the Web ownership check, then submission recreates it without its history/title. | In progress: validate required existing owner inside the durable submission transaction; preserve explicit internal implicit-root callers. Deterministic retention/submission and ownership regressions required. |
+| F69 | Previously missed: recent-conversation clicks discard the open promise, hiding 404/500/network errors. | Fixed in working tree: catch click errors only for the current selection generation. Browser regression covers current errors and held stale failures after Settings navigation, with no unhandled rejection. Validation pending. |
+| F70 | Previously missed: recovery string-only validation accepts malformed/empty identifiers and locks chat around an invalid SSE URL. | Fixed in working tree: require nonempty GUID conversation/request/optional turn IDs and nonblank text within 8,000 characters before restoring state. Browser checks invalid values with a real conversation, cleared record, unlocked controls and no event requests. Validation pending. |
 
 Follow-up validation on October 9, 2026: `tools/validate.sh build`,
 `integration` (126/126), `browser-e2e` (1/1 plus expected failing probe),
@@ -464,3 +467,19 @@ fixture startup wait. It did not run builds/browser suites independently.
 Its minor observation about local parse-error text is dispositioned as F67.
 All F1–F67 remain retained. Docs reran after final evidence; no schema,
 contract/dependency change, live providers or household credentials.
+
+F68–F70 follow-up scope (owner authorized all fixes): preserve owner-scoped
+submission under concurrent retention and expose only current browser
+navigation failures; reject corrupt recovery values before locking chat.
+Applies specification sections 12, 14, 19 and 20 and the same M1-03
+ownership, durable history, safe error and recovery scenarios. Owned files:
+Application turn request/submission contracts and coordinator, SQLite
+conversation store, Web API/chat script, corresponding integration/unit and
+browser tests, Web/testing documentation and this ledger. No schema,
+dependency, cloud, device or product-scope expansion. Existing M1-02
+coordinator/persistence contracts are prerequisites. Assumption: non-Web
+callers may intentionally create roots implicitly; browser requests must not.
+Completion requires deterministic deletion/submission ordering, wrong-owner
+rejection, duplicate behavior, current/stale navigation failure and invalid
+value recovery regressions; relevant build/runtime/coverage/E2E/docs gates,
+independent exact-revision review and complete finding dispositions.

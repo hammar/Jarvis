@@ -265,7 +265,8 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
                 request.ConversationId,
                 request.ClientRequestId,
                 fingerprint,
-                cancellationToken);
+                cancellationToken,
+                request.RequiredOwnerId);
             if (existing is not null)
             {
                 return existing;
@@ -288,7 +289,8 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
                         fingerprint,
                         messageId,
                         request.Text,
-                        clock.UtcNow),
+                        clock.UtcNow,
+                        request.RequiredOwnerId),
                     cancellationToken);
                 if (submitted.IsDuplicate)
                 {
@@ -872,6 +874,12 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
         if (!Enum.IsDefined(request.TaskKind))
         {
             throw new ArgumentOutOfRangeException(nameof(request), "The host task category is invalid.");
+        }
+
+        if (request.RequiredOwnerId is not null
+            && (string.IsNullOrWhiteSpace(request.RequiredOwnerId) || request.RequiredOwnerId.Length > 128))
+        {
+            throw new ArgumentException("The required owner identifier is invalid.", nameof(request));
         }
     }
 

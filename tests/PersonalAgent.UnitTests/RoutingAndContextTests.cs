@@ -417,7 +417,8 @@ public sealed class RoutingAndContextTests
             ConversationId conversationId,
             string clientRequestId,
             string requestFingerprint,
-            CancellationToken cancellationToken) =>
+            CancellationToken cancellationToken,
+            string? requiredOwnerId = null) =>
             throw new NotSupportedException();
 
         public ValueTask<ConversationTurn> CreateTurnAsync(

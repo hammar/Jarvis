@@ -967,8 +967,9 @@ public sealed class CopilotAgentEngineContractTests
             ConversationId conversationId,
             string clientRequestId,
             string requestFingerprint,
-            CancellationToken cancellationToken) =>
-            inner.FindSubmittedTurnAsync(conversationId, clientRequestId, requestFingerprint, cancellationToken);
+            CancellationToken cancellationToken,
+            string? requiredOwnerId = null) =>
+            inner.FindSubmittedTurnAsync(conversationId, clientRequestId, requestFingerprint, cancellationToken, requiredOwnerId);
 
         public ValueTask<ConversationTurn> CreateTurnAsync(
             TurnId turnId,

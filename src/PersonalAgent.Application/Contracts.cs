@@ -196,6 +196,9 @@ public sealed record ContextBuildRequest(
 /// <param name="UserMessageId">Stable message identifier assigned to the request text.</param>
 /// <param name="Text">Bounded, untrusted user text to persist as the turn's user message.</param>
 /// <param name="CreatedAtUtc">UTC acceptance instant.</param>
+/// <param name="RequiredOwnerId">Optional authenticated owner. When supplied, the conversation must already exist and
+/// belong to this owner; the check runs in the same write transaction as duplicate detection and insertion, so the
+/// submission never recreates a deleted conversation. When null, trusted host callers keep the implicit-root behavior.</param>
 public sealed record ConversationTurnSubmission(
     TurnId TurnId,
     ConversationId ConversationId,
@@ -203,7 +206,8 @@ public sealed record ConversationTurnSubmission(
     string RequestFingerprint,
     Guid UserMessageId,
     string Text,
-    DateTimeOffset CreatedAtUtc);
+    DateTimeOffset CreatedAtUtc,
+    string? RequiredOwnerId = null);
 
 /// <summary>Describes the durable turn returned by an atomic submission.</summary>
 /// <param name="Turn">The original or newly created application-owned turn.</param>
@@ -347,6 +351,8 @@ public interface ILocalTurnCoordinator
     /// <returns>The original or newly accepted durable turn.</returns>
     /// <exception cref="TurnQueueFullException">The bounded queue has no available capacity.</exception>
     /// <exception cref="TurnRequestConflictException">The request ID was reused with different request content.</exception>
+    /// <exception cref="ConversationNotFoundException">The request names a required owner and the conversation is
+    /// missing or owned by another account; nothing is persisted or queued.</exception>
     ValueTask<SubmittedConversationTurn> SubmitAsync(LocalTurnRequest request, CancellationToken cancellationToken);
 
     /// <summary>Reads a bounded ordered page of persisted events after an exclusive sequence cursor.</summary>
@@ -378,12 +384,16 @@ public interface ILocalTurnCoordinator
 /// <param name="Text">Untrusted user text within the local context input bound.</param>
 /// <param name="TaskKind">Host-classified routing category; omitted or ambiguous values clarify safely.</param>
 /// <param name="DeadlineOverride">Optional trusted host override; it is validated against coordinator policy.</param>
+/// <param name="RequiredOwnerId">Optional authenticated owner from the host session, never from model or request
+/// body input. When supplied, the conversation must already exist and belong to this owner at persistence time;
+/// it is not part of the idempotency fingerprint. Null preserves implicit conversation creation for trusted host callers.</param>
 public sealed record LocalTurnRequest(
     ConversationId ConversationId,
     string ClientRequestId,
     string Text,
     RoutingTaskKind TaskKind = RoutingTaskKind.Ambiguous,
-    TimeSpan? DeadlineOverride = null);
+    TimeSpan? DeadlineOverride = null,
+    string? RequiredOwnerId = null);
 
 /// <summary>Defines validated per-process limits for local turn acceptance and execution.</summary>
 /// <param name="InteractiveDeadline">Default end-to-end deadline from acceptance through execution; normally 120 seconds.</param>
@@ -423,6 +433,11 @@ public sealed record LocalTurnCoordinatorOptions(
 
 /// <summary>Reports that a bounded turn queue cannot accept another distinct request.</summary>
 public sealed class TurnQueueFullException() : InvalidOperationException("The local turn queue is full.");
+
+/// <summary>Reports that an owner-scoped submission named a conversation that is missing or owned by another account.</summary>
+/// <remarks>Missing and foreign conversations are deliberately indistinguishable so callers cannot probe ownership.</remarks>
+public sealed class ConversationNotFoundException()
+    : InvalidOperationException("The conversation does not exist for the authenticated owner.");
 
 /// <summary>Reports conflicting reuse of a durable client request ID.</summary>
 public sealed class TurnRequestConflictException()
@@ -779,6 +794,8 @@ public interface IConversationStore
     /// <param name="cancellationToken">Token that cancels before the transaction commits.</param>
     /// <returns>The original matching turn or the newly persisted turn.</returns>
     /// <exception cref="TurnRequestConflictException">A request ID already belongs to different input.</exception>
+    /// <exception cref="ConversationNotFoundException">A required owner was supplied and the conversation is missing
+    /// or belongs to another owner; nothing is written.</exception>
     ValueTask<SubmittedConversationTurn> SubmitTurnAsync(
         ConversationTurnSubmission submission,
         CancellationToken cancellationToken);
@@ -788,13 +805,18 @@ public interface IConversationStore
     /// <param name="clientRequestId">Stable client idempotency key.</param>
     /// <param name="requestFingerprint">SHA-256 fingerprint of the normalized submitted request.</param>
     /// <param name="cancellationToken">Token that cancels the lookup.</param>
+    /// <param name="requiredOwnerId">Optional authenticated owner. When supplied, the conversation must exist and
+    /// belong to this owner in the same read that finds the key.</param>
     /// <returns>The previously accepted turn, or null if no matching key exists.</returns>
     /// <exception cref="TurnRequestConflictException">The key was previously associated with different input.</exception>
+    /// <exception cref="ConversationNotFoundException">A required owner was supplied and the conversation is missing
+    /// or belongs to another owner.</exception>
     ValueTask<SubmittedConversationTurn?> FindSubmittedTurnAsync(
         ConversationId conversationId,
         string clientRequestId,
         string requestFingerprint,
-        CancellationToken cancellationToken);
+        CancellationToken cancellationToken,
+        string? requiredOwnerId = null);
 
     /// <summary>Creates a durable turn in a conversation with the supplied host-owned status.</summary>
     /// <param name="turnId">Stable application turn identifier.</param>

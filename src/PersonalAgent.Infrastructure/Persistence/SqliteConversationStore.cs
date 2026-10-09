@@ -278,10 +278,26 @@ public sealed class SqliteConversationStore : IConversationStore, IAtomicTurnOut
             throw new ArgumentOutOfRangeException(nameof(submission), "Turn text exceeds the fixed local input limit.");
         }
 
+        ValidateRequiredOwner(submission.RequiredOwnerId, nameof(submission));
         var createdAtUtc = submission.CreatedAtUtc.ToUniversalTime();
         var createdAt = SqliteValue.Utc(createdAtUtc);
         await using var connection = await database.OpenConnectionWithDefaultTimeoutAsync(1, cancellationToken);
         await using var transaction = await SqliteDatabase.BeginImmediateTransactionAsync(connection, cancellationToken);
+
+        // The owner check shares the write lock with duplicate detection and insertion. Retention cannot delete the
+        // conversation between the check and the insert, so owner-scoped submissions never resurrect a deleted root.
+        if (submission.RequiredOwnerId is { } requiredOwner)
+        {
+            await using var ownerCheck = connection.CreateCommand();
+            ownerCheck.Transaction = transaction;
+            ownerCheck.CommandText = "SELECT owner_id FROM conversations WHERE id = $id;";
+            ownerCheck.Parameters.AddWithValue("$id", SqliteValue.Guid(submission.ConversationId.Value));
+            var storedOwner = await ownerCheck.ExecuteScalarAsync(cancellationToken) as string;
+            if (!string.Equals(storedOwner, requiredOwner, StringComparison.Ordinal))
+            {
+                throw new ConversationNotFoundException();
+            }
+        }
 
         await using (var existing = connection.CreateCommand())
         {
@@ -412,12 +428,15 @@ public sealed class SqliteConversationStore : IConversationStore, IAtomicTurnOut
         ConversationId conversationId,
         string clientRequestId,
         string requestFingerprint,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? requiredOwnerId = null)
     {
         if (conversationId.Value == Guid.Empty)
         {
             throw new ArgumentException("A nonempty conversation identifier is required.", nameof(conversationId));
         }
+
+        ValidateRequiredOwner(requiredOwnerId, nameof(requiredOwnerId));
 
         ArgumentException.ThrowIfNullOrWhiteSpace(clientRequestId);
         ArgumentException.ThrowIfNullOrWhiteSpace(requestFingerprint);
@@ -430,17 +449,32 @@ public sealed class SqliteConversationStore : IConversationStore, IAtomicTurnOut
 
         await using var connection = await database.OpenConnectionAsync(cancellationToken);
         await using var command = connection.CreateCommand();
+
+        // One statement reads ownership and the request key from the same snapshot, so a duplicate is never
+        // returned for a conversation that is missing or foreign at read time.
         command.CommandText = """
             SELECT t.id, t.conversation_id, t.status, t.created_at_utc, t.updated_at_utc,
-                t.version, t.request_fingerprint, m.message_id
-            FROM turns t
-            LEFT JOIN messages m ON m.turn_id = t.id AND m.role = 'user'
-            WHERE t.conversation_id = $conversation_id AND t.client_request_id = $request_id;
+                t.version, t.request_fingerprint, m.message_id, c.owner_id
+            FROM (SELECT $conversation_id AS id) requested
+            LEFT JOIN conversations c ON c.id = requested.id
+            LEFT JOIN turns t ON t.conversation_id = requested.id AND t.client_request_id = $request_id
+            LEFT JOIN messages m ON m.turn_id = t.id AND m.role = 'user';
             """;
         command.Parameters.AddWithValue("$conversation_id", SqliteValue.Guid(conversationId.Value));
         command.Parameters.AddWithValue("$request_id", clientRequestId);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
+        {
+            throw new InvalidOperationException("The request-key lookup returned no anchor row.");
+        }
+
+        if (requiredOwnerId is not null
+            && (reader.IsDBNull(8) || !string.Equals(reader.GetString(8), requiredOwnerId, StringComparison.Ordinal)))
+        {
+            throw new ConversationNotFoundException();
+        }
+
+        if (reader.IsDBNull(0))
         {
             return null;
         }
@@ -1076,6 +1110,15 @@ public sealed class SqliteConversationStore : IConversationStore, IAtomicTurnOut
             SqliteValue.DateTimeOffset(reader.GetString(3)),
             SqliteValue.DateTimeOffset(reader.GetString(4)),
             reader.GetInt64(5));
+
+    private static void ValidateRequiredOwner(string? requiredOwnerId, string parameterName)
+    {
+        if (requiredOwnerId is not null
+            && (string.IsNullOrWhiteSpace(requiredOwnerId) || requiredOwnerId.Length > 128))
+        {
+            throw new ArgumentException("The required owner identifier is invalid.", parameterName);
+        }
+    }
 
     private static ConversationRecord ReadConversation(SqliteDataReader reader) =>
         new(

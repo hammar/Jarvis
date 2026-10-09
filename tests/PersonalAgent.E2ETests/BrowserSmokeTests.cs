@@ -7,6 +7,151 @@ namespace PersonalAgent.E2ETests;
 [Collection(SimulatorCollection.Name)]
 public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
 {
+    [Fact]
+    [Trait("Category", "BrowserE2E")]
+    public async Task InvalidRecoveryValuesAreClearedBeforeLockingOrRequestingEvents()
+    {
+        var isolated = new SimulatorHostFixture();
+        await isolated.InitializeAsync();
+        try
+        {
+            using var playwright = await Playwright.CreateAsync();
+            await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+            var page = await browser.NewPageAsync();
+            await page.GotoAsync(isolated.WebClient.BaseAddress!.ToString());
+            await page.GetByLabel("Passphrase").FillAsync(SimulatorHostFixture.OwnerPassphrase);
+            await page.Locator("#auth-submit").ClickAsync();
+            await page.WaitForFunctionAsync("() => !authenticationInFlight && !document.getElementById('chat').hidden");
+            await page.Locator("#new-conversation").ClickAsync();
+            await page.WaitForFunctionAsync("() => conversationId !== '' && !conversationCreationInFlight");
+            var conversation = await page.EvaluateAsync<string>("conversationId");
+            var eventRequests = 0;
+            page.Request += (_, request) =>
+            {
+                if (request.Url.Contains("/events", StringComparison.Ordinal))
+                    Interlocked.Increment(ref eventRequests);
+            };
+            foreach (var (field, value) in new[]
+            {
+                ("conversationId", ""),
+                ("conversationId", Guid.Empty.ToString()),
+                ("turnId", "not-a-guid"),
+                ("turnId", ""),
+                ("turnId", Guid.Empty.ToString()),
+                ("requestId", "not-a-guid"),
+                ("requestId", ""),
+                ("text", " "),
+                ("text", new string('x', 8001))
+            })
+            {
+                await page.EvaluateAsync(
+                    """
+                    input => {
+                        const record = { conversationId: input.conversation, text: "Old request",
+                            requestId: crypto.randomUUID(), turnId: crypto.randomUUID() };
+                        record[input.field] = input.value;
+                        sessionStorage.setItem("jarvis.pending-turn.v1", JSON.stringify(record));
+                    }
+                    """, new { conversation, field, value });
+                await page.ReloadAsync();
+                await page.GetByRole(AriaRole.Alert).Filter(new LocatorFilterOptions { HasText = "was cleared" }).WaitForAsync();
+                await page.Locator("#chat").WaitForAsync();
+                Assert.Null(await page.EvaluateAsync<string?>("sessionStorage.getItem('jarvis.pending-turn.v1')"));
+                Assert.Equal("", await page.EvaluateAsync<string>("activeTurnId"));
+                Assert.True(await page.Locator("#new-conversation").IsEnabledAsync());
+                Assert.Equal(0, Volatile.Read(ref eventRequests));
+            }
+        }
+        finally
+        {
+            await isolated.DisposeAsync();
+        }
+    }
+
+    [Theory]
+    [InlineData(404)]
+    [InlineData(500)]
+    [InlineData(0)]
+    [Trait("Category", "BrowserE2E")]
+    public async Task RecentConversationErrorsAreVisibleOnlyForTheCurrentSelection(int status)
+    {
+        var isolated = new SimulatorHostFixture();
+        await isolated.InitializeAsync();
+        try
+        {
+            using var playwright = await Playwright.CreateAsync();
+            await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+            var page = await browser.NewPageAsync();
+            var unhandled = new List<string>();
+            page.PageError += (_, error) => unhandled.Add(error);
+            await page.AddInitScriptAsync(
+                """
+                const originalAddEventListener = EventTarget.prototype.addEventListener;
+                EventTarget.prototype.addEventListener = function(type, listener, options) {
+                    if (type === "click" && this instanceof Element && this.closest("#conversation-list")) {
+                        const original = listener;
+                        listener = function(event) {
+                            window.__selection = original.call(this, event);
+                            return window.__selection;
+                        };
+                    }
+                    return originalAddEventListener.call(this, type, listener, options);
+                };
+                """);
+            await page.GotoAsync(isolated.WebClient.BaseAddress!.ToString());
+            await page.GetByLabel("Passphrase").FillAsync(SimulatorHostFixture.OwnerPassphrase);
+            await page.Locator("#auth-submit").ClickAsync();
+            await page.WaitForFunctionAsync("() => !authenticationInFlight && !document.getElementById('chat').hidden");
+            await page.Locator("#new-conversation").ClickAsync();
+            await page.WaitForFunctionAsync("() => conversationId !== '' && !conversationCreationInFlight");
+            var id = await page.EvaluateAsync<string>("conversationId");
+            var pattern = $"**/api/conversations/{id}";
+            var reached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var requests = 0;
+            await page.RouteAsync(pattern, async route =>
+            {
+                if (Interlocked.Increment(ref requests) == 2)
+                {
+                    reached.TrySetResult();
+                    await release.Task.WaitAsync(TimeSpan.FromSeconds(15));
+                }
+                if (status == 0) await route.AbortAsync("failed");
+                else await route.FulfillAsync(new RouteFulfillOptions
+                {
+                    Status = status,
+                    ContentType = "application/problem+json",
+                    Body = "{\"title\":\"Controlled conversation failure.\"}"
+                });
+            });
+            await page.Locator("#conversation-list button").ClickAsync();
+            await page.GetByRole(AriaRole.Alert).WaitForAsync();
+            Assert.Contains(status == 0 ? "fetch" : "Controlled conversation failure.",
+                await page.GetByRole(AriaRole.Alert).InnerTextAsync(), StringComparison.OrdinalIgnoreCase);
+            await page.EvaluateAsync("() => clearError()");
+            await page.Locator("#conversation-list button").ClickAsync();
+            await reached.Task.WaitAsync(TimeSpan.FromSeconds(15));
+            try
+            {
+                await page.Locator("#settings-button").ClickAsync();
+                await page.Locator("#settings").WaitForAsync();
+            }
+            finally
+            {
+                release.TrySetResult();
+            }
+            await page.UnrouteAllAsync(new PageUnrouteAllOptions { Behavior = UnrouteBehavior.Wait });
+            await page.EvaluateAsync("() => window.__selection");
+            Assert.True(await page.GetByRole(AriaRole.Alert).IsHiddenAsync());
+            Assert.True(await page.Locator("#settings").IsVisibleAsync());
+            Assert.Empty(unhandled);
+        }
+        finally
+        {
+            await isolated.DisposeAsync();
+        }
+    }
+
     [Theory]
     [InlineData("{", false)]
     [InlineData("{\"conversationId\":7}", false)]

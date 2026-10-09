@@ -205,6 +205,47 @@ public sealed class LocalTurnCoordinatorTests
 
     [Fact]
     [Trait("Category", "Unit")]
+    public async Task OwnerScopedSubmissionThreadsOwnerAndRejectsMissingConversationWithoutQueueing()
+    {
+        var store = new InMemoryConversationStore();
+        var engine = new ControlledEngine(store);
+        await using var scope = CreateCoordinator(store, engine);
+        await scope.Coordinator.StartAsync(CancellationToken.None);
+
+        await Assert.ThrowsAsync<ArgumentException>(async () =>
+            await scope.Coordinator.SubmitAsync(Request() with { RequiredOwnerId = " " }, CancellationToken.None));
+        await Assert.ThrowsAsync<ArgumentException>(async () =>
+            await scope.Coordinator.SubmitAsync(
+                Request() with { RequiredOwnerId = new string('o', 129) }, CancellationToken.None));
+
+        var owned = Request(requestId: "owned") with { RequiredOwnerId = "owner" };
+        var accepted = await scope.Coordinator.SubmitAsync(owned, CancellationToken.None);
+        Assert.False(accepted.IsDuplicate);
+        Assert.Equal("owner", store.LastFindOwnerId);
+        Assert.Equal("owner", store.LastSubmissionOwnerId);
+        await engine.Completed.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.True((await scope.Coordinator.SubmitAsync(owned, CancellationToken.None)).IsDuplicate);
+
+        await Assert.ThrowsAsync<ConversationNotFoundException>(async () =>
+            await scope.Coordinator.SubmitAsync(owned with { RequiredOwnerId = "intruder" }, CancellationToken.None));
+
+        store.RemoveConversationBeforeSubmission = true;
+        var turnsBefore = store.Messages.Count;
+        await Assert.ThrowsAsync<ConversationNotFoundException>(async () =>
+            await scope.Coordinator.SubmitAsync(
+                Request(requestId: "removed") with { RequiredOwnerId = "owner" }, CancellationToken.None));
+        Assert.Equal(turnsBefore, store.Messages.Count);
+        Assert.Equal("owner", store.LastSubmissionOwnerId);
+
+        store.ExistingConversationOwnerId = "owner";
+        var trusted = await scope.Coordinator.SubmitAsync(Request(requestId: "trusted"), CancellationToken.None);
+        Assert.False(trusted.IsDuplicate);
+        Assert.Null(store.LastFindOwnerId);
+        Assert.Null(store.LastSubmissionOwnerId);
+    }
+
+    [Fact]
+    [Trait("Category", "Unit")]
     public async Task FailedPersistenceReleasesReservedQueueCapacity()
     {
         var store = new InMemoryConversationStore { FailNextSubmission = true };
@@ -2026,6 +2067,10 @@ public sealed class LocalTurnCoordinatorTests
         public TaskCompletionSource SubmissionStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource ContinueSubmission { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TurnId LastSubmittedTurnId { get; private set; }
+        public string? ExistingConversationOwnerId { get; set; } = "owner";
+        public bool RemoveConversationBeforeSubmission { get; set; }
+        public string? LastFindOwnerId { get; private set; }
+        public string? LastSubmissionOwnerId { get; private set; }
 
         public TaskCompletionSource WatchNextRead(TurnId turnId)
         {
@@ -2113,6 +2158,18 @@ public sealed class LocalTurnCoordinatorTests
             cancellationToken.ThrowIfCancellationRequested();
             lock (sync)
             {
+                LastSubmissionOwnerId = submission.RequiredOwnerId;
+                if (submission.RequiredOwnerId is not null && RemoveConversationBeforeSubmission)
+                {
+                    RemoveConversationBeforeSubmission = false;
+                    ExistingConversationOwnerId = null;
+                }
+
+                if (submission.RequiredOwnerId is not null && submission.RequiredOwnerId != ExistingConversationOwnerId)
+                {
+                    throw new ConversationNotFoundException();
+                }
+
                 LastSubmittedTurnId = submission.TurnId;
                 var key = (submission.ConversationId, submission.ClientRequestId);
                 if (requests.TryGetValue(key, out var prior))
@@ -2152,11 +2209,18 @@ public sealed class LocalTurnCoordinatorTests
             ConversationId conversationId,
             string clientRequestId,
             string requestFingerprint,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            string? requiredOwnerId = null)
         {
             cancellationToken.ThrowIfCancellationRequested();
             lock (sync)
             {
+                LastFindOwnerId = requiredOwnerId;
+                if (requiredOwnerId is not null && requiredOwnerId != ExistingConversationOwnerId)
+                {
+                    throw new ConversationNotFoundException();
+                }
+
                 if (HideExistingRequests)
                 {
                     return ValueTask.FromResult<SubmittedConversationTurn?>(null);
