@@ -326,6 +326,8 @@ the new revision remains required and is not inferred from this native run.
 | F69 | Previously missed: recent-conversation clicks discard the open promise, hiding 404/500/network errors. Medium. | Fixed a93ba39: catch click errors only for the current selection generation. Targeted browser 3/3 and full browser 12/12 cover current errors and held stale failures after Settings navigation, with no unhandled rejection. |
 | F70 | Previously missed: recovery string-only validation accepts malformed/empty identifiers and locks chat around an invalid SSE URL. Medium. | Fixed a93ba39: nonempty GUID conversation/request/optional turn IDs and nonblank text within 8,000 characters required before restoring state. Targeted and full browser 12/12 pass invalid values with a real root, cleared record, unlocked controls and no event requests. |
 | F71 | Independent review of a93ba39: terminal duplicate pre-read can return an expired root's turn directly; retention after the read deletes it before 202, leaving a missing accepted SSE target. Medium. | Fixed ba2403e: owner-scoped duplicate acceptance revalidates/touches activity in the immediate transaction, full queue does not reject duplicates, owner-less duplicates remain read-only. Release integration 145/145 and unit 93/93 cover cleanup before/after acceptance, original ID/readable terminal SSE, monotonic activity and capacity. Independent follow-up substantiated correction. |
+| F72 | Inline review: dark-scheme error red fails 4.5:1 contrast on common dark canvases. Medium. | Working-tree correction: explicit light/dark canvas and foreground, preserve light error red and use lighter dark red. Browser computes actual foreground/canvas luminance in both schemes and requires at least 4.5:1. Validation pending. |
+| F73 | Inline review: failed pending-record removal nulls memory, hides recovery and overwrites the storage error with a missing-conversation notice. Medium. | Working-tree correction: clear memory only after successful removal; report boolean failure, stop missing recovery reset/reconnect and preserve error/state. Definitive rejection and terminal callers also honor failure. Accepted/unaccepted missing-root browser cases cover blocked removal across reload and successful cleanup after storage recovers. Validation pending. |
 
 Follow-up validation on October 9, 2026: `tools/validate.sh build`,
 `integration` (126/126), `browser-e2e` (1/1 plus expected failing probe),
@@ -534,3 +536,15 @@ and is not represented by preceding-head green checks. No merge performed.
 The larger follow-up diff is cohesive: optional owner contract plumbing
 requires updating all store fakes, and most added lines are deterministic
 race/browser regression fixtures, not speculative production features.
+
+F72–F73 follow-up objective: accessible error contrast and explicit,
+recoverable storage-removal failure without pretending cleanup succeeded.
+Applies spec host UI/error/recovery acceptance, sections 12, 14, 19 and 20.
+Owned files: Web chat script/CSS, BrowserSmokeTests, Web README, testing matrix
+and this brief. Dependencies: existing M1-03 recovery/navigation and isolated
+browser fixture. No C# contract/schema/dependency or provider scope change.
+Completion: both color schemes meet measurable 4.5:1 contrast; missing
+accepted/unaccepted records preserve state/error and avoid SSE on failed
+removal; resumed storage permits cleanup/unlock; build/browser/docs and
+independent review. Prior ad3216d CI now reports all eleven checks SUCCESS,
+contradicting the earlier injected pending state; fresh-head CI still required.

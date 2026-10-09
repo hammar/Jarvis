@@ -78,8 +78,12 @@ characters are required) are removed with a visible notice
 so sign-in/chat can initialize. If storage removal fails, initialization
 stops with an explicit error rather than silently ignoring the retained record.
 If the recovered conversation GET returns 404, the stale tab record is
-cleared and navigation unlocked with an explicit notice. Temporary startup
-network/500 failures retain recovery and reconnect. A definitive submission
+cleared and navigation unlocked with an explicit notice.
+If removal fails, the record and recovery state remain intact with the storage
+error visible; missing-root recovery does not reconnect SSE or pretend to
+unlock. Reload retries cleanup after storage becomes available. Terminal and
+definitive-rejection cleanup also preserve the record and removal error.
+Temporary startup network/500 failures retain recovery and reconnect. A definitive submission
 409 clears that request identity so an edited/new request can be sent;
 408/429 and ambiguous transport failures retain the unchanged retry identity.
 Recovered running turns expose cancellation before startup status/history
@@ -114,6 +118,8 @@ inference.
 
 The root page has Chat, Settings, and Activity surfaces. Settings show only
 provider/model and connection configuration status, never secret values.
+Explicit light/dark canvases and scheme-specific error colors keep error
+text at least 4.5:1 contrast in both supported color schemes.
 Only the latest selected surface is revealed after asynchronous navigation;
 stale Settings/Activity/conversation reads cannot replace it.
 Recent-conversation failures are shown in the alert only while that

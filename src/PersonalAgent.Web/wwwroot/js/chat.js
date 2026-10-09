@@ -25,11 +25,13 @@ function clearError() {
 }
 
 function clearPendingTurn() {
-    pendingTurnSubmission = null;
     try {
         sessionStorage.removeItem(pendingTurnStorageKey);
+        pendingTurnSubmission = null;
+        return true;
     } catch (error) {
-        showError(`The completed request could not be cleared from this tab's recovery state: ${error.message}`);
+        showError(`The request could not be cleared from this tab's recovery state: ${error.message}`);
+        return false;
     }
 }
 
@@ -205,12 +207,13 @@ async function showChat() {
     document.getElementById("settings").hidden = true;
     document.getElementById("activity").hidden = true;
     if (activeTurnId) {
+        let reconnect = true;
         try {
             await refreshStatus();
             await loadConversations();
-            await restoreConversation(activeTurnConversationId);
+            reconnect = await restoreConversation(activeTurnConversationId);
         } finally {
-            if (!chatSection.hidden && activeTurnId) connectEvents(activeTurnId, 0);
+            if (reconnect && !chatSection.hidden && activeTurnId) connectEvents(activeTurnId, 0);
         }
         return;
     }
@@ -234,7 +237,7 @@ async function restoreConversation(id) {
     } catch (error) {
         if (error.status !== 404) throw error;
         if (pendingTurnSubmission !== recoveredSubmission) return false;
-        clearPendingTurn();
+        if (!clearPendingTurn()) return false;
         if (recoveryGeneration !== conversationSelectionGeneration) return false;
         eventSource?.close();
         eventSource = null;
@@ -368,7 +371,7 @@ document.getElementById("turn-form").addEventListener("submit", async event => {
         setTurnNavigationLocked(false);
         document.getElementById("send-turn").disabled = false;
         if (error.status >= 400 && error.status < 500 && ![408, 429].includes(error.status)) {
-            clearPendingTurn();
+            if (!clearPendingTurn()) return;
         }
         showError(error.message);
         return;
@@ -428,11 +431,12 @@ function connectEvents(turnId, lastSequence) {
             } catch (error) {
                 showError(error.message);
             } finally {
-                clearPendingTurn();
-                activeTurnId = "";
-                activeTurnConversationId = "";
-                setTurnNavigationLocked(false);
-                document.getElementById("send-turn").disabled = false;
+                if (clearPendingTurn()) {
+                    activeTurnId = "";
+                    activeTurnConversationId = "";
+                    setTurnNavigationLocked(false);
+                    document.getElementById("send-turn").disabled = false;
+                }
             }
         }
     };

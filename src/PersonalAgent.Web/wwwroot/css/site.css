@@ -2,6 +2,8 @@
     color-scheme: light dark;
     font-family: system-ui, sans-serif;
     line-height: 1.5;
+    color: #202020;
+    background-color: #ffffff;
 }
 
 [hidden] {
@@ -50,6 +52,17 @@ textarea {
 
 #error {
     color: #d04444;
+}
+
+@media (prefers-color-scheme: dark) {
+    :root {
+        color: #ededed;
+        background-color: #121212;
+    }
+
+    #error {
+        color: #ff8585;
+    }
 }
 
 .remember {

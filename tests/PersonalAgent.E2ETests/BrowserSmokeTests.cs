@@ -7,6 +7,102 @@ namespace PersonalAgent.E2ETests;
 [Collection(SimulatorCollection.Name)]
 public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("Category", "BrowserE2E")]
+    public async Task MissingRecoveryRemovalFailurePreservesStateAndStopsReconnect(bool accepted)
+    {
+        var isolated = new SimulatorHostFixture();
+        await isolated.InitializeAsync();
+        try
+        {
+            using var playwright = await Playwright.CreateAsync();
+            await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+            var page = await browser.NewPageAsync();
+            await page.GotoAsync(isolated.WebClient.BaseAddress!.ToString());
+            await page.GetByLabel("Passphrase").FillAsync(SimulatorHostFixture.OwnerPassphrase);
+            await page.Locator("#auth-submit").ClickAsync();
+            await page.WaitForFunctionAsync("() => !authenticationInFlight && !document.getElementById('chat').hidden");
+            var missing = Guid.NewGuid().ToString();
+            await page.EvaluateAsync(
+                """
+                input => {
+                    const record = { conversationId: input.missing, text: "Old request", requestId: crypto.randomUUID() };
+                    if (input.accepted) record.turnId = crypto.randomUUID();
+                    sessionStorage.setItem("jarvis.pending-turn.v1", JSON.stringify(record));
+                    sessionStorage.setItem("fixture.blockRemoval", "true");
+                }
+                """, new { missing, accepted });
+            var record = await page.EvaluateAsync<string>("sessionStorage.getItem('jarvis.pending-turn.v1')");
+            await page.AddInitScriptAsync(
+                """
+                const originalRemoveItem = Storage.prototype.removeItem;
+                Storage.prototype.removeItem = function(key) {
+                    if (this === sessionStorage && key === "jarvis.pending-turn.v1" &&
+                        sessionStorage.getItem("fixture.blockRemoval") === "true") throw new Error("Controlled removal failure.");
+                    return originalRemoveItem.call(this, key);
+                };
+                """);
+            var eventRequests = 0;
+            page.Request += (_, request) =>
+            {
+                if (request.Url.Contains("/events", StringComparison.Ordinal)) Interlocked.Increment(ref eventRequests);
+            };
+            await page.ReloadAsync();
+            await page.GetByRole(AriaRole.Alert).Filter(new LocatorFilterOptions { HasText = "could not be cleared" }).WaitForAsync();
+            await page.WaitForFunctionAsync("() => pendingTurnSubmission !== null && eventSource === null");
+            Assert.Equal(record, await page.EvaluateAsync<string>("sessionStorage.getItem('jarvis.pending-turn.v1')"));
+            Assert.Equal(missing, await page.EvaluateAsync<string>("pendingTurnSubmission.conversationId"));
+            Assert.Equal(accepted, await page.Locator("#new-conversation").IsDisabledAsync());
+            Assert.Equal(0, Volatile.Read(ref eventRequests));
+            Assert.DoesNotContain("no longer exists", await page.GetByRole(AriaRole.Alert).InnerTextAsync());
+            await page.ReloadAsync();
+            await page.GetByRole(AriaRole.Alert).Filter(new LocatorFilterOptions { HasText = "could not be cleared" }).WaitForAsync();
+            Assert.Equal(record, await page.EvaluateAsync<string>("sessionStorage.getItem('jarvis.pending-turn.v1')"));
+            await page.EvaluateAsync("sessionStorage.removeItem('fixture.blockRemoval')");
+            await page.ReloadAsync();
+            await page.GetByRole(AriaRole.Alert).Filter(new LocatorFilterOptions { HasText = "no longer exists" }).WaitForAsync();
+            Assert.Null(await page.EvaluateAsync<string?>("sessionStorage.getItem('jarvis.pending-turn.v1')"));
+            Assert.Equal("", await page.EvaluateAsync<string>("activeTurnId"));
+            Assert.True(await page.Locator("#new-conversation").IsEnabledAsync());
+            Assert.Equal(0, Volatile.Read(ref eventRequests));
+        }
+        finally
+        {
+            await isolated.DisposeAsync();
+        }
+    }
+
+    [Theory]
+    [InlineData(ColorScheme.Light)]
+    [InlineData(ColorScheme.Dark)]
+    [Trait("Category", "BrowserE2E")]
+    public async Task ErrorTextMeetsContrastInBothColorSchemes(ColorScheme scheme)
+    {
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+        var page = await browser.NewPageAsync(new BrowserNewPageOptions { ColorScheme = scheme });
+        await page.GotoAsync(fixture.WebClient.BaseAddress!.ToString());
+        await page.EvaluateAsync("() => showError('Contrast fixture')");
+        var contrast = await page.EvaluateAsync<double>(
+            """
+            () => {
+                const luminance = color => {
+                    const channels = color.match(/\d+/g).slice(0, 3).map(Number).map(x => {
+                        const v = x / 255;
+                        return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+                    });
+                    return channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722;
+                };
+                const foreground = luminance(getComputedStyle(document.getElementById("error")).color);
+                const background = luminance(getComputedStyle(document.documentElement).backgroundColor);
+                return (Math.max(foreground, background) + 0.05) / (Math.min(foreground, background) + 0.05);
+            }
+            """);
+        Assert.True(contrast >= 4.5, $"Error text contrast {contrast:F2}:1 is below 4.5:1 in {scheme}.");
+    }
+
     [Fact]
     [Trait("Category", "BrowserE2E")]
     public async Task InvalidRecoveryValuesAreClearedBeforeLockingOrRequestingEvents()
