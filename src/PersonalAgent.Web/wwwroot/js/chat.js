@@ -168,8 +168,13 @@ async function showChat() {
                 }
                 pendingTurnSubmission = candidate;
             } catch (error) {
-                showError(`A previous request could not be restored: ${error.message}`);
-                return;
+                try {
+                    sessionStorage.removeItem(pendingTurnStorageKey);
+                } catch (storageError) {
+                    showError(`Invalid request recovery state could not be cleared: ${storageError.message}`);
+                    return;
+                }
+                showError(`Invalid request recovery state was cleared: ${error.message}`);
             }
         }
     }

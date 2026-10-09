@@ -72,6 +72,9 @@ navigation lock, and cancellation target. It is cleared after a terminal
 event or a definitive non-retryable client error; it remains available after
 an ambiguous failure.
 This is browser-local recovery state, not a telemetry or logging channel.
+Malformed JSON or invalid recovery shapes are removed with a visible notice
+so sign-in/chat can initialize. If storage removal fails, initialization
+stops with an explicit error rather than silently ignoring the retained record.
 If the recovered conversation GET returns 404, the stale tab record is
 cleared and navigation unlocked with an explicit notice. Temporary startup
 network/500 failures retain recovery and reconnect. A definitive submission

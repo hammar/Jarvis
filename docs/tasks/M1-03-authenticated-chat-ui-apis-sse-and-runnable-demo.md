@@ -320,6 +320,7 @@ the new revision remains required and is not inferred from this native run.
 | F63 | Review summary: retained 409 conflicts required unchanged retries that could only conflict again. Medium. | Definitive 409 now clears pending submission, retaining 408/429/transport recovery. Browser verifies a changed message submits with a fresh request ID after conflict. |
 | F64 | Independent review of `ed89456`: late ambiguous-recovery 404 cleared/hid a newer conversation selected while recovery was pending. Medium. | Clear only the matching pending record and guard stream/selection/control resets with the captured navigation generation. Held-recovery browser regression creates a newer conversation before releasing 404, then asserts it remains visible and send-enabled. |
 | F65 | F64 browser run exposed cross-test fixture contamination: a new default-titled conversation made an existing locator ambiguous. | New recovery tests now own isolated host/data fixtures, preserving the existing scenario rather than weakening its assertions or depending on execution order. |
+| F66 | Inline review: malformed/obsolete sessionStorage recovery records returned before revealing auth/chat and survived every reload. Medium. | Remove invalid records with a visible notice and continue initialization; removal failure remains an explicit blocking error. Browser covers malformed JSON, invalid shape and null with injected removal failure, anonymous sign-in and authenticated chat, then verifies usable controls and clean subsequent reload. |
 
 Follow-up validation on October 9, 2026: `tools/validate.sh build`,
 `integration` (126/126), `browser-e2e` (1/1 plus expected failing probe),
@@ -435,3 +436,11 @@ checks and focused independent review do not certify unexercised live behavior.
 - Limitations: simulator/E2E fixtures establish deterministic composition and
   UI behavior only. Native Ollama/provider and real Home Assistant/device
   behavior are excluded from this milestone and were not exercised.
+F66 follow-up scope: chat recovery parsing/removal, isolated browser
+regressions and Web/testing documentation. Objective is to restore access
+after malformed or obsolete tab records without silently ignoring storage
+errors. Invalid JSON/shape records are removed with an explicit notice;
+failed removal stops initialization with an error and retains the record.
+No schema, contract or dependency change. Completion requires anonymous and
+authenticated recovery, failed-removal retention, subsequent reload access,
+build/browser/docs gates and independent review.
