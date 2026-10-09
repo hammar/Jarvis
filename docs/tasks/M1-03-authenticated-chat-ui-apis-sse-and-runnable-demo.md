@@ -133,6 +133,18 @@ and unexercised live behavior.
 
 ## Final handoff
 
+Latest CI follow-up: on `256ef93`, all reported checks except Aspire E2E
+passed, including native macOS SDK contracts. The Linux Aspire failure was
+the invalid JSON size fixture recorded as F50, not a bypassed size limit.
+Only the E2E fixture and directly related docs changed: build and
+`tools/validate.sh aspire-e2e` (7/7) and docs passed on macOS after the fix,
+and `git diff --check` passed. The valid payload regressions retain mandatory
+HTTP 413 for oversized bodies while adding a positive processing boundary.
+Kestrel's observed chunk-framing accounting was verified against its
+`Http1ChunkedEncodingMessageBody` implementation. The preceding full-suite,
+independent-review and production evidence below is unchanged; Linux CI on
+the new revision remains required and is not inferred from this native run.
+
 ### PR review follow-up
 
 | Ref | Finding | Disposition and evidence |
@@ -163,6 +175,7 @@ and unexercised live behavior.
 | F47 | Independent test review of `cd3f0e9`: store cancellation signal alone did not distinguish shutdown propagation from maintenance-error handling. Medium. | Added post-stop assertions that worker health remains healthy and its execution task is cancelled, so swallowing shutdown as a failed pass fails the regression. |
 | F48 | Independent test review of `cd3f0e9`: direct worker probe and NullLogger did not verify Web readiness composition or privacy-safe failure logging. Medium. | Added WebApplicationFactory regression using production health registration/HTTP writer and controlled cleanup; asserts authenticated readiness HTTP 200 with `history-cleanup: Degraded`, continued Web lifetime, failure type/interval logging and no private exception message/exception object. Aspire `ReadinessReportsDatabaseUnavailableAfterStartup` covers unhealthy readiness HTTP 503. |
 | F49 | Independent test review of `cd3f0e9`: hidden-label and reload-free reauthentication claims needed observable assertions. Low. | Browser now asserts the setup label stays hidden alongside its input and a window marker survives the sign-out/401/login sequence. |
+| F50 | Linux CI on `256ef93`: the chunked-body size fixture used NUL bytes, allowing JSON parsing to reject an early chunk with HTTP 400 before reaching Kestrel's byte cap. | Replaced invalid JSON with valid padded JSON. The theory requires authentication rejection (401) at the 65,536-byte Content-Length cap and 413 one byte over, plus below-cap and oversized chunked cases with correlation headers. Kestrel includes chunk framing in its observed-byte cap, so a 65,536-byte chunked payload is not an accepted boundary; the initial exact-payload chunked assertion exposed this distinction. No production limit or oversized assertion was relaxed. |
 
 Follow-up validation on October 9, 2026: `tools/validate.sh build`,
 `integration` (126/126), `browser-e2e` (1/1 plus expected failing probe),

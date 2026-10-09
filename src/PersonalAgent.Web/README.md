@@ -73,8 +73,11 @@ aborted, and request cancellation is not converted into a server error.
 JSON request bodies are capped at 64 KiB, turn text at the Application
 boundary's 8,000-character limit, and client request IDs at 128 characters by
 default. Kestrel also enforces the body cap for requests without
-`Content-Length`. SSE reads persisted events in pages of up to 100, drains
-terminal backlogs before closing, and does not hold a worker while waiting for
+`Content-Length`.
+For HTTP/1.1 chunked requests Kestrel counts chunk framing toward its byte
+limit, so the maximum usable JSON payload may be slightly smaller than 64 KiB.
+SSE reads persisted events in pages of up to 100, drains terminal backlogs
+before closing, and does not hold a worker while waiting for
 inference.
 
 The root page has Chat, Settings, and Activity surfaces. Settings show only

@@ -112,19 +112,28 @@ public sealed class AspireSimulatorTests(SimulatorHostFixture fixture)
             JsonDocument.Parse(home).RootElement[0].GetProperty("entityId").GetString());
     }
 
-    [Fact]
+    [Theory]
+    [InlineData(65_536, false, HttpStatusCode.Unauthorized)]
+    [InlineData(65_537, false, HttpStatusCode.RequestEntityTooLarge)]
+    [InlineData(64_000, true, HttpStatusCode.Unauthorized)]
+    [InlineData(65_537, true, HttpStatusCode.RequestEntityTooLarge)]
     [Trait("Category", "AspireE2E")]
-    public async Task KestrelRejectsOversizedChunkedRequestBodies()
+    public async Task RequestSizeLimitAcceptsValidJsonAndRejectsOversizedBodies(
+        int bodyLength, bool chunked, HttpStatusCode expectedStatus)
     {
+        const string json = "{\"passphrase\":\"incorrect-owner-passphrase\"}";
+        var body = System.Text.Encoding.UTF8.GetBytes(json.PadRight(bodyLength));
         using var request = new HttpRequestMessage(HttpMethod.Post, "/api/auth/login")
         {
-            Content = new UnknownLengthContent(new byte[65_537])
+            Content = chunked ? new UnknownLengthContent(body) : new ByteArrayContent(body)
         };
-        request.Headers.TransferEncodingChunked = true;
+        request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+        request.Headers.TransferEncodingChunked = chunked;
 
         using var response = await fixture.WebClient.SendAsync(request);
 
-        Assert.Equal(HttpStatusCode.RequestEntityTooLarge, response.StatusCode);
+        Assert.Equal(expectedStatus, response.StatusCode);
+        Assert.NotEmpty(response.Headers.GetValues("X-Correlation-ID"));
     }
 
     private sealed class UnknownLengthContent : HttpContent
