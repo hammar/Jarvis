@@ -921,6 +921,8 @@ public sealed class SqlitePersistenceTests
             await host.StopAsync();
         }
         Assert.True(store.ShutdownCancelled.Task.IsCompletedSuccessfully);
+        Assert.Equal(HealthStatus.Healthy, (await worker.CheckHealthAsync(new HealthCheckContext())).Status);
+        Assert.True(worker.ExecuteTask!.IsCanceled);
     }
 
     private sealed class ControlledCleanupStore : IHistoryRetentionStore

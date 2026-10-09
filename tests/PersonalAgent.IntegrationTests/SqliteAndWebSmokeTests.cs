@@ -5,6 +5,7 @@ using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using System.Net;
 using System.Net.Http.Json;
@@ -26,6 +27,78 @@ namespace PersonalAgent.IntegrationTests;
 [Collection("Copilot runtime process isolation")]
 public sealed class SqliteAndWebSmokeTests
 {
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task CleanupFailureAppearsInAuthenticatedWebReadinessWithSafeLogging()
+    {
+        using var data = IsolatedDirectory.Create();
+        var store = new FailingCleanupStore();
+        var logger = new MaintenanceLogger();
+        await using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(web =>
+        {
+            web.UseSetting("JARVIS_PROFILE", "Local");
+            web.UseSetting("JARVIS_DATA_DIR", data.Path);
+            web.ConfigureTestServices(services =>
+            {
+                services.RemoveAll<RetentionCleanupService>();
+                services.AddSingleton(provider => new RetentionCleanupService(
+                    store, provider.GetRequiredService<IClock>(), new RetentionSettings(1, 1),
+                    TimeSpan.FromMilliseconds(20), logger));
+            });
+        });
+        using var client = factory.CreateClient();
+        using var csrf = await client.GetAsync("/api/auth/csrf");
+        csrf.EnsureSuccessStatusCode();
+        using var token = JsonDocument.Parse(await csrf.Content.ReadAsStringAsync());
+        client.DefaultRequestHeaders.Add("X-CSRF-TOKEN", token.RootElement.GetProperty("token").GetString());
+        using var bootstrap = await client.PostAsJsonAsync("/api/auth/bootstrap", new
+        {
+            bootstrapToken = factory.Services.GetRequiredService<OwnerAuthenticationService>().BootstrapToken,
+            passphrase = "a-long-owner-passphrase",
+            rememberMe = false
+        });
+        bootstrap.EnsureSuccessStatusCode();
+        await store.RetryStarted.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        using var ready = await client.GetAsync("/health/ready");
+        Assert.Equal(HttpStatusCode.OK, ready.StatusCode);
+        using var report = JsonDocument.Parse(await ready.Content.ReadAsStringAsync());
+        Assert.Equal("Degraded", report.RootElement.GetProperty("checks").GetProperty("history-cleanup").GetProperty("status").GetString());
+        var message = await logger.Failure.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        Assert.Contains("InvalidOperationException", message, StringComparison.Ordinal);
+        Assert.Contains(TimeSpan.FromMilliseconds(20).ToString(), message, StringComparison.Ordinal);
+        Assert.DoesNotContain("private-maintenance-detail", message, StringComparison.Ordinal);
+        Assert.False(factory.Services.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping.IsCancellationRequested);
+    }
+
+    private sealed class FailingCleanupStore : IHistoryRetentionStore
+    {
+        private int attempts;
+        public TaskCompletionSource RetryStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async ValueTask CleanupExpiredAsync(RetentionSettings defaults, DateTimeOffset nowUtc, CancellationToken cancellationToken)
+        {
+            if (Interlocked.Increment(ref attempts) == 1)
+            {
+                throw new InvalidOperationException("private-maintenance-detail");
+            }
+            RetryStarted.TrySetResult();
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+        }
+    }
+
+    private sealed class MaintenanceLogger : ILogger<RetentionCleanupService>
+    {
+        public TaskCompletionSource<string> Failure { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            Assert.Null(exception);
+            Assert.Equal(LogLevel.Error, logLevel);
+            Failure.TrySetResult(formatter(state, exception));
+        }
+    }
+
     [Fact]
     [Trait("Category", "Integration")]
     public async Task AuthenticationReadsDoNotConsumePasswordAttemptLimit()

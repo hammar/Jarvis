@@ -189,6 +189,7 @@ authority.
 | Running, approval-waiting, and interrupted turns preserve expired conversations; Completed, Failed, and Cancelled turns do not block retention | `SqlitePersistenceTests.RetentionUsesDefaultAndOverrideWindowsAndKeepsDurableState` |
 | Retention cleanup runs during host uptime using durable settings | `SqlitePersistenceTests.HostedRetentionCleanupAppliesExpiredHistoryDuringUptime` |
 | Cleanup failure degrades readiness without stopping the host, next pass recovers, and shutdown cancellation propagates | `SqlitePersistenceTests.CleanupFailureDegradesReadinessWithoutStoppingHostAndRecoversOnNextPass` |
+| Web readiness includes degraded `history-cleanup` with HTTP 200 and safe failure-type/interval logging without private exception data | `SqliteAndWebSmokeTests.CleanupFailureAppearsInAuthenticatedWebReadinessWithSafeLogging` |
 | Razor host works without external services | `SqliteAndWebSmokeTests.RazorHostServesTheConfiguredProfileWithoutExternalServices` |
 | Bootstrap creates only one owner verifier; sign-in, sign-out, CSRF checks and owner-only chat APIs are enforced | `SqliteAndWebSmokeTests.OwnerBootstrapSignInCsrfAndConversationAuthorizationAreEnforced` |
 | Readiness is authenticated while process liveness remains public | `SqliteAndWebSmokeTests.ReadinessRequiresOwnerSessionWhileLivenessRemainsPublic` |

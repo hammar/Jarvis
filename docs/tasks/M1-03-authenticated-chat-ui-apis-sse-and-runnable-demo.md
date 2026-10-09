@@ -160,6 +160,9 @@ and unexercised live behavior.
 | F44 | Previously missed: plaintext passphrase/setup token stayed in hidden inputs after authentication. Medium. | Both values are cleared immediately on successful authentication before CSRF/status initialization. Browser verifies empty inputs after actual bootstrap and sign-in. |
 | F45 | Previously missed: browser restart fallback login masked failed persistent-cookie validation. Medium. | Removed fallback login; browser must reach persisted conversation controls with the authentication form hidden after host restart using the existing cookie. |
 | F46 | First-run regression exposed author CSS overriding hidden attributes on setup inputs/labels. | Fixed with a standard explicit `[hidden]` rule so sign-in mode actually conceals setup controls; the bootstrap/401 regression asserts their rendered visibility. |
+| F47 | Independent test review of `cd3f0e9`: store cancellation signal alone did not distinguish shutdown propagation from maintenance-error handling. Medium. | Added post-stop assertions that worker health remains healthy and its execution task is cancelled, so swallowing shutdown as a failed pass fails the regression. |
+| F48 | Independent test review of `cd3f0e9`: direct worker probe and NullLogger did not verify Web readiness composition or privacy-safe failure logging. Medium. | Added WebApplicationFactory regression using production health registration/HTTP writer and controlled cleanup; asserts authenticated readiness HTTP 200 with `history-cleanup: Degraded`, continued Web lifetime, failure type/interval logging and no private exception message/exception object. Aspire `ReadinessReportsDatabaseUnavailableAfterStartup` covers unhealthy readiness HTTP 503. |
+| F49 | Independent test review of `cd3f0e9`: hidden-label and reload-free reauthentication claims needed observable assertions. Low. | Browser now asserts the setup label stays hidden alongside its input and a window marker survives the sign-out/401/login sequence. |
 
 Follow-up validation on October 9, 2026: `tools/validate.sh build`,
 `integration` (126/126), `browser-e2e` (1/1 plus expected failing probe),
@@ -183,6 +186,41 @@ Conversation resolution is required; force pushes/deletions are disabled;
 no approving-review-count requirement is configured. This supersedes the
 earlier configuration-access limitation, but is configuration evidence, not
 a negative branch-protection enforcement demonstration.
+
+After F39–F49, the complete serial command
+`tools/validate.sh build && tools/validate.sh unit &&
+tools/validate.sh integration && tools/validate.sh architecture &&
+tools/validate.sh sdk-contracts && tools/validate.sh coverage &&
+tools/validate.sh aspire-e2e && tools/validate.sh browser-e2e &&
+tools/validate.sh docs` passed against the final production revision
+`cd3f0e9`. Results: build/formatting/analyzers passed, unit 91/91,
+integration 132/132, architecture 6/6, SDK contracts 25/25 plus the actual
+pinned runtime contract harness, Aspire API E2E 4/4, browser 2/2 plus the
+expected failing probe, coverage/report/discovery negative fixtures, and docs.
+Independent-review follow-up changed tests/docs only; build/integration
+(133/133)/coverage/docs were rerun successfully. The complete run's browser
+stage included the strengthened hidden-label/page-marker assertions.
+Final changed-line coverage is 98.2% (809/824); Web is 98.6% lines (682/692)
+and 80.9% branches (110/136). No gate was disabled, and out-of-process E2E
+is not included in the in-process coverage totals.
+
+Independent static production review of `70dc9da..cd3f0e9` found no significant
+production defects and substantiated the cleanup/health/auth/CSS/fixture
+changes, but explicitly omitted test bodies and task/spec/ledger context.
+A narrowly scoped independent acceptance-test/documentation review then
+verified the first-run, duplicate-submit, secret-clearing, cookie-restart and
+cleanup-recovery assertions and reported F47–F49 evidence gaps.
+Their verifying test changes and passing runs are recorded above; neither
+review independently ran the long suites or exercised live providers.
+All F1–F49 findings have explicit retained dispositions. The earlier browser
+failure exposed F46 and was fixed at the CSS root, not by weakening tests.
+
+Follow-up owned files: Web cleanup worker/composition, authentication browser
+script and hidden-state CSS; integration cleanup/health/logging regressions;
+browser first-run/restart tests and isolated fixture; Web README, operations,
+testing matrix and this brief. No new schema or Application contract changes
+in F39–F49. The PR validation table is updated to these current results;
+new-head CI remains a separate gate before merge, and no merge is authorized.
 
 After F32–F37, `tools/validate.sh build`, `integration` (131/131),
 `architecture` (6/6), `browser-e2e` (1/1 plus expected failing probe),

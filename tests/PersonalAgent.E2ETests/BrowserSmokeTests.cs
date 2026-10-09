@@ -61,7 +61,10 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
             Assert.Equal("", await page.Locator("#passphrase").InputValueAsync());
             Assert.Equal("", await page.Locator("#bootstrap-token").InputValueAsync());
             Assert.True(await page.Locator("#bootstrap-token").IsHiddenAsync());
+            Assert.True(await page.Locator("#bootstrap-token-label").IsHiddenAsync());
             Assert.True(await page.GetByRole(AriaRole.Alert).IsHiddenAsync());
+            var pageMarker = Guid.NewGuid().ToString("D");
+            await page.EvaluateAsync("marker => { window.__reauthenticationMarker = marker; }", pageMarker);
             await page.EvaluateAsync(
                 """
                 async () => {
@@ -71,11 +74,13 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
                 """);
             await page.GetByRole(AriaRole.Heading, new PageGetByRoleOptions { Name = "Owner sign-in" }).WaitForAsync();
             Assert.True(await page.Locator("#bootstrap-token").IsHiddenAsync());
+            Assert.True(await page.Locator("#bootstrap-token-label").IsHiddenAsync());
             await page.GetByLabel("Passphrase").FillAsync(SimulatorHostFixture.OwnerPassphrase);
             await page.Locator("#auth-submit").ClickAsync();
             await page.WaitForFunctionAsync("() => !authenticationInFlight && !document.getElementById('chat').hidden");
             Assert.Equal("", await page.Locator("#passphrase").InputValueAsync());
             Assert.True(await page.GetByRole(AriaRole.Alert).IsHiddenAsync());
+            Assert.Equal(pageMarker, await page.EvaluateAsync<string>("window.__reauthenticationMarker"));
             Assert.Equal(1, Volatile.Read(ref bootstrapRequests));
         }
         finally
