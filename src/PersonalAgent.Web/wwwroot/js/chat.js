@@ -192,9 +192,9 @@ async function showChat() {
         try {
             await refreshStatus();
             await loadConversations();
-            await openConversation(activeTurnConversationId);
+            await restoreConversation(activeTurnConversationId);
         } finally {
-            if (!chatSection.hidden) connectEvents(activeTurnId, 0);
+            if (!chatSection.hidden && activeTurnId) connectEvents(activeTurnId, 0);
         }
         return;
     }
@@ -202,8 +202,30 @@ async function showChat() {
     await loadConversations();
     if (pendingTurnSubmission) {
         document.getElementById("prompt").value = pendingTurnSubmission.text;
-        await openConversation(pendingTurnSubmission.conversationId);
-        showError("A previous send may have been accepted. Resend the unchanged message to safely recover it.");
+        if (await restoreConversation(pendingTurnSubmission.conversationId)) {
+            showError("A previous send may have been accepted. Resend the unchanged message to safely recover it.");
+        }
+    }
+}
+
+async function restoreConversation(id) {
+    try {
+        await openConversation(id);
+        return true;
+    } catch (error) {
+        if (error.status !== 404) throw error;
+        eventSource?.close();
+        eventSource = null;
+        clearPendingTurn();
+        activeTurnId = "";
+        activeTurnConversationId = "";
+        conversationId = "";
+        setTurnNavigationLocked(false);
+        document.getElementById("send-turn").disabled = false;
+        document.getElementById("cancel-turn").hidden = true;
+        document.getElementById("conversation").hidden = true;
+        showError("The recovered conversation no longer exists. Start or select another conversation.");
+        return false;
     }
 }
 
@@ -324,7 +346,7 @@ document.getElementById("turn-form").addEventListener("submit", async event => {
         activeTurnConversationId = "";
         setTurnNavigationLocked(false);
         document.getElementById("send-turn").disabled = false;
-        if (error.status >= 400 && error.status < 500 && ![408, 409, 429].includes(error.status)) {
+        if (error.status >= 400 && error.status < 500 && ![408, 429].includes(error.status)) {
             clearPendingTurn();
         }
         showError(error.message);

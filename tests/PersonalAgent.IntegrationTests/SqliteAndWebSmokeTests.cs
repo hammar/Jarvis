@@ -1,5 +1,8 @@
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Configuration;
@@ -10,6 +13,8 @@ using Microsoft.Extensions.DependencyInjection.Extensions;
 using System.Net;
 using System.Net.Http.Json;
 using System.Reflection;
+using System.Runtime.CompilerServices;
+using System.Collections.Concurrent;
 using System.Text.Json;
 using PersonalAgent.Application;
 using PersonalAgent.Application.Context;
@@ -361,6 +366,289 @@ public sealed class SqliteAndWebSmokeTests
         response.EnsureSuccessStatusCode();
         var eventStream = await response.Content.ReadAsStringAsync();
         Assert.Contains("event: TurnCompleted", eventStream, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    [Trait("Category", "Integration")]
+    public async Task SseUsesBoundedPagesAndCompletesDurablyWhileConsumerIsBlockedOrDisconnected(
+        bool blockFlush, bool disconnect)
+    {
+        using var data = IsolatedDirectory.Create();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var responseGate = new SseResponseGate(blockFlush);
+        await using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(web =>
+        {
+            web.UseSetting("JARVIS_PROFILE", "Local");
+            web.UseSetting("JARVIS_DATA_DIR", data.Path);
+            web.ConfigureTestServices(services =>
+            {
+                services.RemoveAll<IAgentEngine>();
+                services.AddSingleton<PausedDurableEngine>();
+                services.AddSingleton<IAgentEngine>(provider => provider.GetRequiredService<PausedDurableEngine>());
+                var registration = services.Single(service => service.ServiceType == typeof(ILocalTurnCoordinator));
+                services.Remove(registration);
+                services.AddSingleton<ILocalTurnCoordinator>(provider =>
+                    SseReadRecordingProxy.Create((ILocalTurnCoordinator)registration.ImplementationFactory!(provider)));
+                services.AddSingleton<IStartupFilter>(responseGate);
+            });
+        });
+        using var client = factory.CreateClient();
+        using var csrf = await client.GetAsync("/api/auth/csrf", deadline.Token);
+        csrf.EnsureSuccessStatusCode();
+        using var csrfBody = JsonDocument.Parse(await csrf.Content.ReadAsStringAsync(deadline.Token));
+        client.DefaultRequestHeaders.Add("X-CSRF-TOKEN", csrfBody.RootElement.GetProperty("token").GetString());
+        using var bootstrap = await client.PostAsJsonAsync("/api/auth/bootstrap", new
+        {
+            bootstrapToken = factory.Services.GetRequiredService<OwnerAuthenticationService>().BootstrapToken,
+            passphrase = "a-long-owner-passphrase",
+            rememberMe = false
+        }, deadline.Token);
+        bootstrap.EnsureSuccessStatusCode();
+        using var authenticatedCsrf = await client.GetAsync("/api/auth/csrf", deadline.Token);
+        authenticatedCsrf.EnsureSuccessStatusCode();
+        using var authenticatedCsrfBody = JsonDocument.Parse(await authenticatedCsrf.Content.ReadAsStringAsync(deadline.Token));
+        client.DefaultRequestHeaders.Remove("X-CSRF-TOKEN");
+        client.DefaultRequestHeaders.Add("X-CSRF-TOKEN", authenticatedCsrfBody.RootElement.GetProperty("token").GetString());
+        using var created = await client.PostAsJsonAsync("/api/conversations", new { title = "Blocked reader" }, deadline.Token);
+        created.EnsureSuccessStatusCode();
+        using var createdBody = JsonDocument.Parse(await created.Content.ReadAsStringAsync(deadline.Token));
+        var conversationId = new ConversationId(createdBody.RootElement.GetProperty("id").GetProperty("value").GetGuid());
+        using var submitted = await client.PostAsJsonAsync($"/api/conversations/{conversationId.Value:D}/turns",
+            new { requestId = "bounded-sse-reader", text = "Return a controlled answer." }, deadline.Token);
+        Assert.Equal(HttpStatusCode.Accepted, submitted.StatusCode);
+        using var submittedBody = JsonDocument.Parse(await submitted.Content.ReadAsStringAsync(deadline.Token));
+        var turnId = new TurnId(submittedBody.RootElement.GetProperty("turnId").GetProperty("value").GetGuid());
+        var engine = factory.Services.GetRequiredService<PausedDurableEngine>();
+        var coordinator = (SseReadRecordingProxy)factory.Services.GetRequiredService<ILocalTurnCoordinator>();
+        var store = factory.Services.GetRequiredService<IConversationStore>();
+        await engine.EventsPersisted.Task.WaitAsync(deadline.Token);
+        using var readerCancellation = CancellationTokenSource.CreateLinkedTokenSource(deadline.Token);
+        var responseTask = client.GetAsync($"/api/turns/{turnId.Value:D}/events",
+            HttpCompletionOption.ResponseHeadersRead, readerCancellation.Token);
+        try
+        {
+            await responseGate.Blocked.Task.WaitAsync(deadline.Token);
+            Assert.False(responseGate.Release.Task.IsCompleted);
+            Assert.Single(coordinator.Reads);
+            Assert.Equal((100, 100), coordinator.Reads.Single());
+            Assert.Equal(TurnStatus.Running, (await store.GetTurnAsync(turnId, deadline.Token))!.Status);
+
+            if (disconnect)
+            {
+                var response = await responseTask.WaitAsync(deadline.Token);
+                readerCancellation.Cancel();
+                response.Dispose();
+                await responseGate.Aborted.Task.WaitAsync(deadline.Token);
+                await responseGate.RequestEnded.Task.WaitAsync(deadline.Token);
+            }
+
+            engine.Finish.TrySetResult();
+            await engine.Completed.Task.WaitAsync(deadline.Token);
+            Assert.Equal(TurnStatus.Completed, (await store.GetTurnAsync(turnId, deadline.Token))!.Status);
+            var events = await store.ReadTurnEventsAfterAsync(turnId, 0, 1000, deadline.Token);
+            Assert.True(events.Count > 100);
+            Assert.Single(events, item => item.EventType == nameof(TurnCompleted));
+            var messages = await store.ReadRecentAsync(conversationId, 200, deadline.Token);
+            Assert.Equal("Controlled durable answer.", Assert.Single(messages, message => message.Role == "assistant").Content);
+
+            if (!disconnect)
+            {
+                // The terminal commit must precede releasing the deliberately blocked response operation.
+                Assert.False(responseGate.Release.Task.IsCompleted);
+                Assert.Single(coordinator.Reads);
+                responseGate.Release.TrySetResult();
+                using var response = await responseTask.WaitAsync(deadline.Token);
+                response.EnsureSuccessStatusCode();
+                var body = await response.Content.ReadAsStringAsync(deadline.Token);
+                await responseGate.RequestEnded.Task.WaitAsync(deadline.Token);
+                var sequences = body.Split('\n')
+                    .Where(line => line.StartsWith("id: ", StringComparison.Ordinal))
+                    .Select(line => long.Parse(line.AsSpan(4), System.Globalization.CultureInfo.InvariantCulture));
+                Assert.Equal(events.Select(item => item.Sequence), sequences);
+                Assert.True(coordinator.Reads.Count > 1);
+            }
+            else
+            {
+                Assert.Single(coordinator.Reads);
+                Assert.True(readerCancellation.IsCancellationRequested);
+                Assert.True(responseGate.Aborted.Task.IsCompletedSuccessfully);
+                Assert.True(responseGate.RequestEnded.Task.IsCompletedSuccessfully);
+            }
+            Assert.All(coordinator.Reads, read =>
+            {
+                Assert.Equal(100, read.Maximum);
+                Assert.InRange(read.Count, 0, 100);
+            });
+        }
+        finally
+        {
+            engine.Finish.TrySetResult();
+            responseGate.Release.TrySetResult();
+            readerCancellation.Cancel();
+        }
+    }
+
+    private sealed class PausedDurableEngine(IConversationStore store, IAtomicTurnOutcomeStore outcomes, IClock clock) : IAgentEngine
+    {
+        public TaskCompletionSource EventsPersisted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Finish { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Completed { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async IAsyncEnumerable<AgentEvent> RunTurnAsync(
+            AgentTurnRequest request, [EnumeratorCancellation] CancellationToken cancellationToken)
+        {
+            var turn = (await store.GetTurnAsync(request.TurnId, cancellationToken))!;
+            await store.UpdateTurnStatusAsync(request.TurnId, TurnStatus.Running, turn.Version, clock.UtcNow, cancellationToken);
+            for (var index = 0; index < 105; index++)
+            {
+                var delta = new TextDelta(request.TurnId, clock.UtcNow, "controlled fragment");
+                await store.AppendTurnEventAsync(request.TurnId, nameof(TextDelta),
+                    JsonSerializer.Serialize(delta), delta.OccurredAtUtc, cancellationToken);
+                yield return delta;
+            }
+            EventsPersisted.TrySetResult();
+            await Finish.Task.WaitAsync(cancellationToken);
+            turn = (await store.GetTurnAsync(request.TurnId, cancellationToken))!;
+            var completed = new TurnCompleted(request.TurnId, clock.UtcNow);
+            await outcomes.UpdateTurnStatusAndAppendEventAsync(request.TurnId, TurnStatus.Completed, turn.Version,
+                clock.UtcNow, nameof(TurnCompleted), JsonSerializer.Serialize(completed), completed.OccurredAtUtc,
+                cancellationToken, new ConversationMessage(Guid.NewGuid(), turn.ConversationId, "assistant",
+                    "Controlled durable answer.", clock.UtcNow));
+            Completed.TrySetResult();
+            yield return completed;
+        }
+
+        public ValueTask CancelAsync(TurnId turnId, CancellationToken cancellationToken) =>
+            ValueTask.CompletedTask;
+
+        public ValueTask StopAsync(TurnId turnId, CancellationToken cancellationToken) =>
+            ValueTask.CompletedTask;
+    }
+
+    private sealed class SseResponseGate(bool blockFlush) : IStartupFilter
+    {
+        public TaskCompletionSource Blocked { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Aborted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource RequestEnded { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public Action<IApplicationBuilder> Configure(Action<IApplicationBuilder> next) => app =>
+        {
+            app.Use(async (context, continuation) =>
+            {
+                if (!context.Request.Path.Value!.EndsWith("/events", StringComparison.Ordinal))
+                {
+                    await continuation(context);
+                    return;
+                }
+                var original = context.Response.Body;
+                var responseFeature = context.Features.Get<IHttpResponseBodyFeature>()!;
+                context.Response.Body = new GatedResponseStream(
+                    original, this, blockFlush, context.RequestAborted, responseFeature.StartAsync);
+                try
+                {
+                    await continuation(context);
+                }
+                finally
+                {
+                    context.Response.Body = original;
+                    RequestEnded.TrySetResult();
+                }
+            });
+            next(app);
+        };
+    }
+
+    private sealed class GatedResponseStream(
+        Stream inner, SseResponseGate gate, bool blockFlush, CancellationToken requestAborted,
+        Func<CancellationToken, Task> startResponse) : Stream
+    {
+        public override bool CanRead => false;
+        public override bool CanSeek => false;
+        public override bool CanWrite => true;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() => throw new NotSupportedException();
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+        public override Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) =>
+            WriteAsync(buffer.AsMemory(offset, count), cancellationToken).AsTask();
+
+        public override async ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            if (!blockFlush) await WaitForReaderAsync(cancellationToken);
+            await inner.WriteAsync(buffer, cancellationToken);
+        }
+
+        public override async Task FlushAsync(CancellationToken cancellationToken)
+        {
+            if (blockFlush) await WaitForReaderAsync(cancellationToken);
+            await inner.FlushAsync(cancellationToken);
+        }
+
+        private async Task WaitForReaderAsync(CancellationToken cancellationToken)
+        {
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, requestAborted);
+            // Publish the endpoint's headers before blocking the original body operation.
+            await startResponse(linked.Token);
+            await inner.FlushAsync(linked.Token);
+            gate.Blocked.TrySetResult();
+            try
+            {
+                await gate.Release.Task.WaitAsync(linked.Token);
+            }
+            catch (OperationCanceledException) when (requestAborted.IsCancellationRequested)
+            {
+                gate.Aborted.TrySetResult();
+                throw;
+            }
+        }
+    }
+
+    public class SseReadRecordingProxy : DispatchProxy
+    {
+        private ILocalTurnCoordinator inner = null!;
+        public ConcurrentQueue<(int Maximum, int Count)> Reads { get; } = new();
+
+        public static ILocalTurnCoordinator Create(ILocalTurnCoordinator coordinator)
+        {
+            Assert.IsType<LocalTurnCoordinator>(coordinator);
+            var proxy = DispatchProxy.Create<ILocalTurnCoordinator, SseReadRecordingProxy>();
+            ((SseReadRecordingProxy)proxy).inner = coordinator;
+            return proxy;
+        }
+
+        protected override object? Invoke(MethodInfo? targetMethod, object?[]? args)
+        {
+            ArgumentNullException.ThrowIfNull(targetMethod);
+            try
+            {
+                var result = targetMethod.Invoke(inner, args);
+                return targetMethod.Name == nameof(ILocalTurnCoordinator.ReadEventsAfterAsync)
+                    ? RecordReadAsync((ValueTask<IReadOnlyList<PersistedTurnEvent>>)result!, (int)args![2]!)
+                    : result;
+            }
+            catch (TargetInvocationException exception) when (exception.InnerException is not null)
+            {
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(exception.InnerException).Throw();
+                throw;
+            }
+        }
+
+        private async ValueTask<IReadOnlyList<PersistedTurnEvent>> RecordReadAsync(
+            ValueTask<IReadOnlyList<PersistedTurnEvent>> read, int maximum)
+        {
+            var events = await read;
+            Reads.Enqueue((maximum, events.Count));
+            return events;
+        }
     }
 
     public class ReadEventBarrierProxy : DispatchProxy

@@ -133,6 +133,18 @@ and unexercised live behavior.
 
 ## Final handoff
 
+F61–F63 recovery/SSE follow-up: objective is to release stale browser recovery
+locks only on a definitive missing-conversation response and prove slow or
+disconnected SSE consumers do not stall durable turn completion. Scope owns
+chat JavaScript, browser recovery regressions, production-composed SSE
+integration regressions and related testing/Web documentation. No schema,
+contract or dependency changes. Temporary 500/network failures retain
+recovery; 408/429 remain retryable, while definitive 409 rejects the submitted
+idempotency payload and permits a new request. Required evidence includes
+accepted/unaccepted stale recovery, conflict retry, blocked/disconnected
+consumer completion, bounded event pages, existing recovery regressions,
+applicable gates and independent review.
+
 F58 follow-up owns authentication cookie registration in `ChatApi.cs`,
 the shared-cookie SQLite/HTTP regression, and development/testing/Web docs.
 Objective: isolate Local and Simulator browser sessions when their separate
@@ -265,6 +277,9 @@ the new revision remains required and is not inferred from this native run.
 | F58 | Previously missed: fixed session and antiforgery cookie names collide between loopback instances because browser cookie scope excludes TCP ports. Medium. | Namespaced both cookies with the same stable hash of the normalized absolute data-directory path. Shared browser-cookie regression checks distinct names, authenticated CSRF mutations on both instances, sign-out isolation and same-path restart with preserved session/token. Existing fixed-name sessions require one sign-in after upgrade. |
 | F59 | F58 regression exposed retention PUT binding registered default settings from DI rather than the request JSON, returning success without applying the owner's submitted values. High. | Explicit body binding restores intended mutation semantics. Shared-cookie regression asserts the exact saved response and durable 12/34-day pair after restart, and rejects a submitted out-of-range period with HTTP 400. Earlier status-only/default-value assertions did not establish this behavior. |
 | F60 | Independent review of `3e40728`: restarted regression saved the pair again before reading it, so that GET alone did not prove pre-restart persistence. Low evidence gap. | Moved the restarted GET/exact pair assertion before any restarted mutation; then separately verifies the preserved CSRF token still authorizes a save. Existing real SQLite reopen coverage remains retained. |
+| F61 | Previously missed: slow/disconnected SSE-consumer completion and boundedness lacked direct acceptance evidence. Medium. | Production-composed blocked-response/disconnect regression added; final execution evidence recorded below. |
+| F62 | Previously missed: a missing recovered conversation opened a permanently retrying missing SSE turn and retained the navigation lock. Medium. | Only a recovered conversation GET 404 clears tab recovery and unlocks/hides obsolete controls; 500/network failures still reconnect. Browser covers accepted and ambiguous-send records referencing missing conversations and asserts no missing-turn EventSource request. |
+| F63 | Review summary: retained 409 conflicts required unchanged retries that could only conflict again. Medium. | Definitive 409 now clears pending submission, retaining 408/429/transport recovery. Browser verifies a changed message submits with a fresh request ID after conflict. |
 
 Follow-up validation on October 9, 2026: `tools/validate.sh build`,
 `integration` (126/126), `browser-e2e` (1/1 plus expected failing probe),

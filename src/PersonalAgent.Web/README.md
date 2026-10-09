@@ -72,6 +72,11 @@ navigation lock, and cancellation target. It is cleared after a terminal
 event or a definitive non-retryable client error; it remains available after
 an ambiguous failure.
 This is browser-local recovery state, not a telemetry or logging channel.
+If the recovered conversation GET returns 404, the stale tab record is
+cleared and navigation unlocked with an explicit notice. Temporary startup
+network/500 failures retain recovery and reconnect. A definitive submission
+409 clears that request identity so an edited/new request can be sent;
+408/429 and ambiguous transport failures retain the unchanged retry identity.
 Recovered running turns expose cancellation before startup status/history
 reads, so a failed ancillary read does not hide the cancellation or SSE output
 surface. Conversation creation is guarded until selection and list refresh
