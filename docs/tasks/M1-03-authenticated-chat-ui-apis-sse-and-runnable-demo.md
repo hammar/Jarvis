@@ -321,6 +321,7 @@ the new revision remains required and is not inferred from this native run.
 | F64 | Independent review of `ed89456`: late ambiguous-recovery 404 cleared/hid a newer conversation selected while recovery was pending. Medium. | Clear only the matching pending record and guard stream/selection/control resets with the captured navigation generation. Held-recovery browser regression creates a newer conversation before releasing 404, then asserts it remains visible and send-enabled. |
 | F65 | F64 browser run exposed cross-test fixture contamination: a new default-titled conversation made an existing locator ambiguous. | New recovery tests now own isolated host/data fixtures, preserving the existing scenario rather than weakening its assertions or depending on execution order. |
 | F66 | Inline review: malformed/obsolete sessionStorage recovery records returned before revealing auth/chat and survived every reload. Medium. | Remove invalid records with a visible notice and continue initialization; removal failure remains an explicit blocking error. Browser covers malformed JSON, invalid shape and null with injected removal failure, anonymous sign-in and authenticated chat, then verifies usable controls and clean subsequent reload. |
+| F67 | Independent review minor observation: browser JSON parse error text can include a short stored-text snippet. | Not applicable as a telemetry/privacy disclosure defect: notice is rendered via textContent only in the same owner's tab, with no logging or transmission. It explains the locally corrupt record; no new data recipient or execution surface is introduced. |
 
 Follow-up validation on October 9, 2026: `tools/validate.sh build`,
 `integration` (126/126), `browser-e2e` (1/1 plus expected failing probe),
@@ -444,3 +445,22 @@ failed removal stops initialization with an error and retains the record.
 No schema, contract or dependency change. Completion requires anonymous and
 authenticated recovery, failed-removal retention, subsequent reload access,
 build/browser/docs gates and independent review.
+
+F66 validation: `tools/validate.sh build && browser-e2e && docs` passed on
+`e24d765`: Release formatting/analyzers/build, browser 8/8 plus expected
+failing probe, discovery and internal Markdown links. The first browser run
+was 7/8: the removal-failure fixture seeded data before initial anonymous
+startup finished, allowing that startup to remove it. Waiting for the auth
+surface before seeding fixes the fixture race; no assertion was weakened.
+No C# production changes; unit/integration/architecture/SDK/coverage/Aspire
+were not rerun for this JavaScript/browser-only follow-up, and earlier results
+remain separately recorded. New-head CI remains required.
+
+Independent review of exact `e24d765` against `ca30eca` inspected every
+changed code/test/doc hunk and surrounding recovery/start/auth control flow.
+It found no significant defects and substantiated invalid-record clearing,
+blocking failed-removal behavior, anonymous/authenticated test paths and the
+fixture startup wait. It did not run builds/browser suites independently.
+Its minor observation about local parse-error text is dispositioned as F67.
+All F1–F67 remain retained. Docs reran after final evidence; no schema,
+contract/dependency change, live providers or household credentials.
