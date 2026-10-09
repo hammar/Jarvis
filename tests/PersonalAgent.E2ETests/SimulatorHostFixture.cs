@@ -23,6 +23,9 @@ public sealed class SimulatorHostFixture : IAsyncLifetime
     private IsolatedDirectory? dataDirectory;
     private DistributedApplication? application;
 
+    /// <summary>Gets whether startup bootstraps/signs in the fixture's HTTP client.</summary>
+    public bool AuthenticateOnStart { get; init; } = true;
+
     /// <summary>Gets an HTTP client routed to the managed Web resource.</summary>
     public HttpClient WebClient { get; private set; } = null!;
 
@@ -106,7 +109,10 @@ public sealed class SimulatorHostFixture : IAsyncLifetime
         }
         ModelClient = application.CreateHttpClient("simulator-model");
         HomeAssistantClient = application.CreateHttpClient("simulator-home-assistant");
-        await AuthenticateOwnerAsync();
+        if (AuthenticateOnStart)
+        {
+            await AuthenticateOwnerAsync();
+        }
     }
 
     private async Task AuthenticateOwnerAsync()

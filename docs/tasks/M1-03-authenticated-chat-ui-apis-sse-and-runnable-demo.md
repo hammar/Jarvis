@@ -152,6 +152,14 @@ and unexercised live behavior.
 | F36 | Previously missed: concurrent New conversation clicks created multiple durable roots. | Fixed with a creation-in-flight guard and locked controls until creation/selection/list refresh finishes; browser holds creation and dispatches a second click, verifying only one POST. |
 | F37 | Regression validation: repeated reload/CSRF reads exhausted the shared authentication limiter and blocked accepted-turn startup with 503. | Fixed by limiting password-bearing bootstrap/login attempts, not status/CSRF reads or logout; rejected attempts return 429. Integration verifies reads cannot exhaust the 20-attempt/minute limit and attempts remain bounded. |
 | F38 | Independent review of `ad5e79f`: a failed startup status/list read reconnected SSE but left the conversation ancestor hidden, hiding cancellation and streamed output. Medium. | Fixed by restoring the selected conversation and visible recovery/cancellation surface before startup reads; browser holds then fails startup status for a saved running turn, verifies visible cancellation and SSE, and successfully cancels the same turn. |
+| F39 | Hourly cleanup exceptions stopped the Web host. High. | Fixed with privacy-safe failure logging, degraded `history-cleanup` readiness and next-scheduled-pass retry; shutdown cancellation propagates. Hosted integration holds cleanup after failure, asserts host remains running/degraded, then verifies successful recovery and cancellation. |
+| F40 | Failed owner-status startup responses were consumed as an unconfigured boolean default. High. | Fixed by using common API error handling and validating the status shape; a first-run browser regression injects owner-status 500, asserts both forms stay hidden with an explicit error, then reloads and completes actual bootstrap. |
+| F41 | PR validation claim described a final tree despite later executable edits and omitted reruns. Low. | Completion evidence and PR description are updated with the actual final sequence/counts and limitations, rather than retaining the original-tree claim. |
+| F42 | Previously missed: bootstrap form mode persisted into reload-free reauthentication. Medium. | Successful authentication now switches to explicit sign-in mode; browser performs bootstrap, sign-out/401 and login without reload, asserting the setup input stays hidden and no second bootstrap occurs. |
+| F43 | Previously missed: concurrent authentication submissions raced account creation and initialization. Medium. | Fixed with an in-flight guard and disabled submit until initialization finishes; browser holds a real accepted bootstrap response, dispatches another submit and verifies one request with no misleading error. |
+| F44 | Previously missed: plaintext passphrase/setup token stayed in hidden inputs after authentication. Medium. | Both values are cleared immediately on successful authentication before CSRF/status initialization. Browser verifies empty inputs after actual bootstrap and sign-in. |
+| F45 | Previously missed: browser restart fallback login masked failed persistent-cookie validation. Medium. | Removed fallback login; browser must reach persisted conversation controls with the authentication form hidden after host restart using the existing cookie. |
+| F46 | First-run regression exposed author CSS overriding hidden attributes on setup inputs/labels. | Fixed with a standard explicit `[hidden]` rule so sign-in mode actually conceals setup controls; the bootstrap/401 regression asserts their rendered visibility. |
 
 Follow-up validation on October 9, 2026: `tools/validate.sh build`,
 `integration` (126/126), `browser-e2e` (1/1 plus expected failing probe),
@@ -167,6 +175,14 @@ remain until terminal event delivery, rather than being cleared on acceptance.
 All eleven reported GitHub checks passed on the preceding `282de20` head;
 required-check configuration was not readable by the app, and new-head CI
 must be evaluated separately.
+On the subsequent October 9 follow-up, authenticated REST retrieval of
+`branches/main/protection` succeeded: strict/up-to-date checks require
+`build-and-analyzers`, `architecture`, `unit-tests`, `integration-tests`,
+`sdk-contracts`, `coverage`, `aspire-e2e`, `browser-e2e`, and `docs`.
+Conversation resolution is required; force pushes/deletions are disabled;
+no approving-review-count requirement is configured. This supersedes the
+earlier configuration-access limitation, but is configuration evidence, not
+a negative branch-protection enforcement demonstration.
 
 After F32–F37, `tools/validate.sh build`, `integration` (131/131),
 `architecture` (6/6), `browser-e2e` (1/1 plus expected failing probe),

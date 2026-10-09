@@ -1,6 +1,10 @@
 using Microsoft.Data.Sqlite;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Diagnostics.HealthChecks;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using PersonalAgent.Application;
 using PersonalAgent.Domain;
 using PersonalAgent.Infrastructure.Persistence;
@@ -893,6 +897,66 @@ public sealed class SqlitePersistenceTests
 
     [Fact]
     [Trait("Category", "Integration")]
+    public async Task CleanupFailureDegradesReadinessWithoutStoppingHostAndRecoversOnNextPass()
+    {
+        var store = new ControlledCleanupStore();
+        var worker = new RetentionCleanupService(
+            store, new MutableClock(Now), new RetentionSettings(1, 1),
+            TimeSpan.FromMilliseconds(20), NullLogger<RetentionCleanupService>.Instance);
+        using var host = new HostBuilder().ConfigureServices(services => services.AddSingleton<IHostedService>(worker)).Build();
+        await host.StartAsync();
+        try
+        {
+            await store.SecondPass.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            Assert.False(host.Services.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping.IsCancellationRequested);
+            Assert.Equal(HealthStatus.Degraded, (await worker.CheckHealthAsync(new HealthCheckContext())).Status);
+            store.AllowSuccess.TrySetResult();
+            await store.ThirdPass.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            Assert.Equal(HealthStatus.Healthy, (await worker.CheckHealthAsync(new HealthCheckContext())).Status);
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+                worker.CheckHealthAsync(new HealthCheckContext(), new CancellationToken(true)));
+        }
+        finally
+        {
+            await host.StopAsync();
+        }
+        Assert.True(store.ShutdownCancelled.Task.IsCompletedSuccessfully);
+    }
+
+    private sealed class ControlledCleanupStore : IHistoryRetentionStore
+    {
+        public TaskCompletionSource SecondPass { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource AllowSuccess { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource ThirdPass { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource ShutdownCancelled { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int passes;
+
+        public async ValueTask CleanupExpiredAsync(
+            RetentionSettings defaults, DateTimeOffset nowUtc, CancellationToken cancellationToken)
+        {
+            var pass = Interlocked.Increment(ref passes);
+            if (pass == 1) throw new InvalidOperationException("private-maintenance-detail");
+            if (pass == 2)
+            {
+                SecondPass.TrySetResult();
+                await AllowSuccess.Task.WaitAsync(cancellationToken);
+                return;
+            }
+            ThirdPass.TrySetResult();
+            try
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                ShutdownCancelled.TrySetResult();
+                throw;
+            }
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
     public async Task HostedRetentionCleanupAppliesExpiredHistoryDuringUptime()
     {
         using var file = IsolatedDatabaseFile.Create();
@@ -912,7 +976,8 @@ public sealed class SqlitePersistenceTests
             new SqliteRetentionService(database, clock, new SqliteRetentionOptions()),
             clock,
             new RetentionSettings(1, 1),
-            TimeSpan.FromMilliseconds(20));
+            TimeSpan.FromMilliseconds(20),
+            NullLogger<RetentionCleanupService>.Instance);
         await cleanup.StartAsync(CancellationToken.None);
         try
         {

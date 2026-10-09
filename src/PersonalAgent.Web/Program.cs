@@ -63,12 +63,15 @@ builder.Services.AddSingleton<IOwnerAccountStore>(ownerStateStore);
 builder.Services.AddSingleton<IOwnerSettingsService>(ownerStateStore);
 builder.Services.AddSingleton<IHistoryRetentionStore>(
     new SqliteRetentionService(database, clock, retentionOptions));
-builder.Services.AddHostedService<RetentionCleanupService>(services =>
+builder.Services.AddSingleton<RetentionCleanupService>(services =>
     new RetentionCleanupService(
         services.GetRequiredService<IHistoryRetentionStore>(),
         clock,
         retentionDefaults,
-        TimeSpan.FromHours(1)));
+        TimeSpan.FromHours(1),
+        services.GetRequiredService<ILogger<RetentionCleanupService>>()));
+builder.Services.AddHostedService(services => services.GetRequiredService<RetentionCleanupService>());
+builder.Services.AddHealthChecks().AddCheck<RetentionCleanupService>("history-cleanup", tags: ["ready"]);
 builder.Services.AddSingleton<OwnerAuthenticationService>(services => new OwnerAuthenticationService(
     services.GetRequiredService<IOwnerAccountStore>(),
     services.GetRequiredService<Microsoft.AspNetCore.Identity.IPasswordHasher<OwnerIdentity>>(),

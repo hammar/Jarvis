@@ -188,6 +188,7 @@ authority.
 | Independent workers race on optimistic writes and startup migrations | `SqlitePersistenceTests.ConcurrentMemoryWritersAllowOnlyOneExpectedVersionUpdate`, `SqlitePersistenceTests.SimultaneousStartupAppliesEachMigrationOnlyOnce` |
 | Running, approval-waiting, and interrupted turns preserve expired conversations; Completed, Failed, and Cancelled turns do not block retention | `SqlitePersistenceTests.RetentionUsesDefaultAndOverrideWindowsAndKeepsDurableState` |
 | Retention cleanup runs during host uptime using durable settings | `SqlitePersistenceTests.HostedRetentionCleanupAppliesExpiredHistoryDuringUptime` |
+| Cleanup failure degrades readiness without stopping the host, next pass recovers, and shutdown cancellation propagates | `SqlitePersistenceTests.CleanupFailureDegradesReadinessWithoutStoppingHostAndRecoversOnNextPass` |
 | Razor host works without external services | `SqliteAndWebSmokeTests.RazorHostServesTheConfiguredProfileWithoutExternalServices` |
 | Bootstrap creates only one owner verifier; sign-in, sign-out, CSRF checks and owner-only chat APIs are enforced | `SqliteAndWebSmokeTests.OwnerBootstrapSignInCsrfAndConversationAuthorizationAreEnforced` |
 | Readiness is authenticated while process liveness remains public | `SqliteAndWebSmokeTests.ReadinessRequiresOwnerSessionWhileLivenessRemainsPublic` |
@@ -203,7 +204,8 @@ authority.
 | Aspire configures Web against its controlled OpenAI-compatible simulator and reports database loss after startup | `AspireSimulatorTests.SimulatorStartsWebAndDiscoversDeterministicManagedEndpoints`, `AspireSimulatorTests.ReadinessReportsDatabaseUnavailableAfterStartup` |
 | Kestrel rejects chunked request bodies that exceed the configured 64 KiB cap | `AspireSimulatorTests.KestrelRejectsOversizedChunkedRequestBodies` |
 | Local and Hybrid use explicit external endpoint configuration | `ExternalEndpointProfileTests.LocalAndHybridProfilesLaunchWithExplicitExternalEndpointReferences` |
-| Browser displays a partial TextDelta before terminal completion, prevents conversation navigation while a turn is active, reports a provider failure, cancels a delayed turn, restarts Aspire, and reopens durable conversation history | `BrowserSmokeTests.PlaywrightSignsInAndStreamsASimulatorChat` |
+| Browser displays a partial TextDelta before terminal completion, prevents conversation navigation while a turn is active, reports a provider failure, cancels a delayed turn, and reopens durable history after restart using the existing authenticated cookie without login | `BrowserSmokeTests.PlaywrightSignsInAndStreamsASimulatorChat` |
+| First-run owner-status failure is surfaced without guessing account state; bootstrap is serialized, secrets are cleared, and subsequent 401 reauthentication uses login without reloading | `BrowserSmokeTests.FirstRunReportsAuthStatusFailureAndSerializesBootstrapThenReauthenticatesWithoutReload` |
 | Terminal event committed between SSE event-page and status reads is delivered before the stream closes | `SqliteAndWebSmokeTests.SseDrainsTerminalEventCommittedBetweenEventReadAndStatusRead` |
 | SDK compatibility uses pinned actual runtime | T01 `--contracts` suite, `sdk-contracts-platform` on Linux/macOS |
 | Adapter streams events with explicit local/cloud provider and transcript isolation | `CopilotAgentEngineContractTests.ActualRuntimeStreamsEventsUsesExplicitProviderAndPersistsOrderedTerminalOutcome` |

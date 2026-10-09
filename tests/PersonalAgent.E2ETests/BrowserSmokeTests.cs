@@ -9,6 +9,83 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
 {
     [Fact]
     [Trait("Category", "BrowserE2E")]
+    public async Task FirstRunReportsAuthStatusFailureAndSerializesBootstrapThenReauthenticatesWithoutReload()
+    {
+        var firstRun = new SimulatorHostFixture { AuthenticateOnStart = false };
+        await firstRun.InitializeAsync();
+        try
+        {
+            using var playwright = await Playwright.CreateAsync();
+            await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+            var page = await browser.NewPageAsync();
+            await page.RouteAsync("**/api/auth/status", route => route.FulfillAsync(new RouteFulfillOptions
+            {
+                Status = 500,
+                ContentType = "application/problem+json",
+                Body = "{\"title\":\"Controlled owner status failure.\"}"
+            }));
+            await page.GotoAsync(firstRun.WebClient.BaseAddress!.ToString());
+            await page.GetByRole(AriaRole.Alert).Filter(new LocatorFilterOptions { HasText = "Controlled owner status failure." })
+                .WaitForAsync();
+            Assert.True(await page.Locator("#auth").IsHiddenAsync());
+            Assert.True(await page.Locator("#chat").IsHiddenAsync());
+            await page.UnrouteAsync("**/api/auth/status");
+            await page.ReloadAsync();
+            await page.GetByRole(AriaRole.Heading, new PageGetByRoleOptions { Name = "Set up owner account" }).WaitForAsync();
+            await page.Locator("#bootstrap-token").FillAsync(SimulatorHostFixture.BootstrapToken);
+            await page.GetByLabel("Passphrase").FillAsync(SimulatorHostFixture.OwnerPassphrase);
+            var requestReady = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseResponse = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var bootstrapRequests = 0;
+            await page.RouteAsync("**/api/auth/bootstrap", async route =>
+            {
+                Interlocked.Increment(ref bootstrapRequests);
+                var response = await route.FetchAsync();
+                requestReady.TrySetResult();
+                await releaseResponse.Task.WaitAsync(TimeSpan.FromSeconds(15));
+                await route.FulfillAsync(new RouteFulfillOptions { Response = response });
+            });
+            await page.Locator("#auth-submit").ClickAsync();
+            await requestReady.Task.WaitAsync(TimeSpan.FromSeconds(15));
+            try
+            {
+                Assert.True(await page.Locator("#auth-submit").IsDisabledAsync());
+                await page.Locator("#auth-form").DispatchEventAsync("submit");
+                Assert.Equal(1, Volatile.Read(ref bootstrapRequests));
+            }
+            finally
+            {
+                releaseResponse.TrySetResult();
+            }
+            await page.WaitForFunctionAsync("() => !authenticationInFlight && !document.getElementById('chat').hidden");
+            Assert.Equal("", await page.Locator("#passphrase").InputValueAsync());
+            Assert.Equal("", await page.Locator("#bootstrap-token").InputValueAsync());
+            Assert.True(await page.Locator("#bootstrap-token").IsHiddenAsync());
+            Assert.True(await page.GetByRole(AriaRole.Alert).IsHiddenAsync());
+            await page.EvaluateAsync(
+                """
+                async () => {
+                    await api("/api/auth/logout", { method: "POST" });
+                    try { await refreshStatus(); } catch (error) { showError(error.message); }
+                }
+                """);
+            await page.GetByRole(AriaRole.Heading, new PageGetByRoleOptions { Name = "Owner sign-in" }).WaitForAsync();
+            Assert.True(await page.Locator("#bootstrap-token").IsHiddenAsync());
+            await page.GetByLabel("Passphrase").FillAsync(SimulatorHostFixture.OwnerPassphrase);
+            await page.Locator("#auth-submit").ClickAsync();
+            await page.WaitForFunctionAsync("() => !authenticationInFlight && !document.getElementById('chat').hidden");
+            Assert.Equal("", await page.Locator("#passphrase").InputValueAsync());
+            Assert.True(await page.GetByRole(AriaRole.Alert).IsHiddenAsync());
+            Assert.Equal(1, Volatile.Read(ref bootstrapRequests));
+        }
+        finally
+        {
+            await firstRun.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "BrowserE2E")]
     public async Task PlaywrightSignsInAndStreamsASimulatorChat()
     {
         using var playwright = await Playwright.CreateAsync();
@@ -312,16 +389,12 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
             await page.GotoAsync(fixture.WebClient.BaseAddress!.ToString());
             await page.WaitForFunctionAsync(
                 "() => !document.getElementById('auth').hidden || !document.getElementById('chat').hidden");
-            if (await page.Locator("#auth").IsVisibleAsync())
-            {
-                await page.GetByLabel("Passphrase").FillAsync(SimulatorHostFixture.OwnerPassphrase);
-                await page.GetByRole(AriaRole.Button, new PageGetByRoleOptions { Name = "Sign in" }).ClickAsync();
-            }
 
             var savedConversation = page.Locator("#conversation-list")
                 .GetByRole(AriaRole.Button, new LocatorGetByRoleOptions { Name = "New conversation" })
                 .Nth(1);
             await savedConversation.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible });
+            Assert.True(await page.Locator("#auth").IsHiddenAsync());
             await savedConversation.ClickAsync();
             await page.GetByText("Controlled streaming response", new PageGetByTextOptions { Exact = false })
                 .WaitForAsync(new LocatorWaitForOptions { Timeout = 15_000 });

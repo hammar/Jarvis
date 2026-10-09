@@ -24,6 +24,10 @@ cookie-authenticated mutations require an antiforgery token in the
 Successful sign-in upgrades an outdated adaptive verifier with a conditional
 SQLite update. Authentication expiry refreshes anonymous antiforgery state
 so reauthentication does not require reloading the page.
+Successful bootstrap switches the form to sign-in mode; submissions are
+serialized through post-login initialization, and successful authentication
+immediately clears the passphrase and setup-token inputs. Failed owner-status
+reads show an error instead of guessing an account state.
 
 The account and conversations survive application upgrades as long as the
 owner keeps the same data directory. A lost passphrase has no recovery path in
@@ -81,6 +85,12 @@ They override the trusted host defaults from
 `JARVIS_CONVERSATION_RETENTION_DAYS` and `JARVIS_AUDIT_RETENTION_DAYS`.
 Lowering a period removes newly expired eligible conversation/audit history
 when saved; conversations with unresolved turns are retained.
+The hourly maintenance worker logs failure type (not private exception text),
+marks `history-cleanup` readiness degraded, and retries at the next hourly
+pass without stopping the Web host. A successful pass clears degradation;
+shutdown cancellation still stops cleanup. Degraded readiness remains HTTP
+200 under the host's existing readiness policy, with degradation explicit in
+the JSON report.
 
 The E2E-only bootstrap token setting is rejected unless
 `JARVIS_PROFILE=E2E`. Do not configure test controls in Local, Simulator, or

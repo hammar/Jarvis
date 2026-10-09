@@ -9,6 +9,7 @@ let activeTurnId = "";
 let activeTurnConversationId = "";
 let turnSubmissionInFlight = false;
 let conversationCreationInFlight = false;
+let authenticationInFlight = false;
 let pendingTurnSubmission = null;
 let conversationSelectionGeneration = 0;
 let eventSource = null;
@@ -46,6 +47,15 @@ async function csrf() {
     const response = await fetch("/api/auth/csrf", { credentials: "same-origin" });
     if (!response.ok) throw new Error("Could not establish request protection.");
     csrfToken = (await response.json()).token;
+}
+
+function setAuthenticationMode(bootstrapRequired) {
+    profile.textContent = bootstrapRequired ? "Create the local owner account." : "Sign in to your local assistant.";
+    document.getElementById("auth-title").textContent = bootstrapRequired ? "Set up owner account" : "Owner sign-in";
+    document.getElementById("bootstrap-token").hidden = !bootstrapRequired;
+    document.getElementById("bootstrap-token-label").hidden = !bootstrapRequired;
+    document.getElementById("passphrase").autocomplete = bootstrapRequired ? "new-password" : "current-password";
+    document.getElementById("auth-submit").textContent = bootstrapRequired ? "Create owner account" : "Sign in";
 }
 
 async function api(path, options = {}) {
@@ -195,9 +205,11 @@ async function showChat() {
 
 async function start() {
     await csrf();
-    const response = await fetch("/api/auth/status", { credentials: "same-origin" });
-    const status = await response.json();
-    profile.textContent = status.bootstrapRequired ? "Create the local owner account." : "Sign in to your local assistant.";
+    const status = await api("/api/auth/status");
+    if (typeof status?.bootstrapRequired !== "boolean") {
+        throw new Error("The owner authentication status could not be read.");
+    }
+    setAuthenticationMode(status.bootstrapRequired);
 
     try {
         await showChat();
@@ -208,16 +220,14 @@ async function start() {
         }
         authSection.hidden = false;
         chatSection.hidden = true;
-        document.getElementById("auth-title").textContent = status.bootstrapRequired ? "Set up owner account" : "Owner sign-in";
-        document.getElementById("bootstrap-token").hidden = !status.bootstrapRequired;
-        document.getElementById("bootstrap-token-label").hidden = !status.bootstrapRequired;
-        document.getElementById("passphrase").autocomplete = status.bootstrapRequired ? "new-password" : "current-password";
-        document.getElementById("auth-submit").textContent = status.bootstrapRequired ? "Create owner account" : "Sign in";
     }
 }
 
 document.getElementById("auth-form").addEventListener("submit", async event => {
     event.preventDefault();
+    if (authenticationInFlight) return;
+    authenticationInFlight = true;
+    document.getElementById("auth-submit").disabled = true;
     clearError();
     try {
         const bootstrap = !document.getElementById("bootstrap-token").hidden;
@@ -231,10 +241,16 @@ document.getElementById("auth-form").addEventListener("submit", async event => {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(body)
         });
+        document.getElementById("passphrase").value = "";
+        document.getElementById("bootstrap-token").value = "";
+        setAuthenticationMode(false);
         await csrf();
         await showChat();
     } catch (error) {
         showError(error.message);
+    } finally {
+        authenticationInFlight = false;
+        document.getElementById("auth-submit").disabled = false;
     }
 });
 
