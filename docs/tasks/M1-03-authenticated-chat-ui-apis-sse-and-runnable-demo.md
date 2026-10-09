@@ -326,8 +326,8 @@ the new revision remains required and is not inferred from this native run.
 | F69 | Previously missed: recent-conversation clicks discard the open promise, hiding 404/500/network errors. Medium. | Fixed a93ba39: catch click errors only for the current selection generation. Targeted browser 3/3 and full browser 12/12 cover current errors and held stale failures after Settings navigation, with no unhandled rejection. |
 | F70 | Previously missed: recovery string-only validation accepts malformed/empty identifiers and locks chat around an invalid SSE URL. Medium. | Fixed a93ba39: nonempty GUID conversation/request/optional turn IDs and nonblank text within 8,000 characters required before restoring state. Targeted and full browser 12/12 pass invalid values with a real root, cleared record, unlocked controls and no event requests. |
 | F71 | Independent review of a93ba39: terminal duplicate pre-read can return an expired root's turn directly; retention after the read deletes it before 202, leaving a missing accepted SSE target. Medium. | Fixed ba2403e: owner-scoped duplicate acceptance revalidates/touches activity in the immediate transaction, full queue does not reject duplicates, owner-less duplicates remain read-only. Release integration 145/145 and unit 93/93 cover cleanup before/after acceptance, original ID/readable terminal SSE, monotonic activity and capacity. Independent follow-up substantiated correction. |
-| F72 | Inline review: dark-scheme error red fails 4.5:1 contrast on common dark canvases. Medium. | Working-tree correction: explicit light/dark canvas and foreground, preserve light error red and use lighter dark red. Browser computes actual foreground/canvas luminance in both schemes and requires at least 4.5:1. Validation pending. |
-| F73 | Inline review: failed pending-record removal nulls memory, hides recovery and overwrites the storage error with a missing-conversation notice. Medium. | Working-tree correction: clear memory only after successful removal; report boolean failure, stop missing recovery reset/reconnect and preserve error/state. Definitive rejection and terminal callers also honor failure. Accepted/unaccepted missing-root browser cases cover blocked removal across reload and successful cleanup after storage recovers. Validation pending. |
+| F72 | Inline review: dark-scheme error red fails 4.5:1 contrast on common dark canvases. Medium. | Fixed 8cf22fd: explicit light/dark canvas and foreground, preserve light error red and use lighter dark red. Full browser 16/16 computes actual foreground/canvas contrast and requires at least 4.5:1 in both schemes. Independent calculation: 4.572873 light, 7.980275 dark. |
+| F73 | Inline review: failed pending-record removal nulls memory, hides recovery and overwrites the storage error with a missing-conversation notice. Medium. | Fixed 8cf22fd: memory cleared only after removal succeeds; boolean failure stops missing recovery reset/reconnect and preserves error/state. Terminal/rejection callers honor failure. Full browser 16/16 covers accepted/unaccepted blocked removal across reload and successful cleanup; independent actual-script probes cover all callers. |
 
 Follow-up validation on October 9, 2026: `tools/validate.sh build`,
 `integration` (126/126), `browser-e2e` (1/1 plus expected failing probe),
@@ -548,3 +548,23 @@ accepted/unaccepted records preserve state/error and avoid SSE on failed
 removal; resumed storage permits cleanup/unlock; build/browser/docs and
 independent review. Prior ad3216d CI now reports all eleven checks SUCCESS,
 contradicting the earlier injected pending state; fresh-head CI still required.
+
+F72–F73 validation: `tools/validate.sh build && browser-e2e && docs` passed
+for 8cf22fd: Release formatting/analyzers/nullable/warnings-as-errors,
+browser 16/16, discovery, expected failing probe and internal links.
+No C# runtime changes; unit/integration/architecture/SDK/coverage/Aspire
+not rerun for this JS/CSS/browser-only follow-up. Preceding full gate evidence
+remains above; new-head CI is separate.
+
+Independent exact 8cf22fd against ad3216d review read all six changed files,
+surrounding JS/CSS/markup, spec/ADRs/task ledger and tests/docs. No significant
+issues found. It substantiated all three cleanup callers, object/generation
+guards, missing404 false-versus500 reconnect and computed contrast. Six
+JavaScriptCore probes executing the actual script passed accepted/unaccepted
+missing removal failure then success, accepted500 reconnect, terminal failure,
+terminal success and definitive rejection failure then success. No independent
+build/browser execution. Parent browser establishes Chromium computed-style
+contrast and missing-root behavior; terminal/rejection failures have probe,
+not dedicated browser, coverage. Failed-removal late-generation interleaving
+was inspected, not executed; non-Chromium/forced-color/assistive-technology
+behavior remains unverified. Full F1–F73 ledger retained.
