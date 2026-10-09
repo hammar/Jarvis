@@ -145,6 +145,38 @@ history are retained. Moving the directory or changing its symlink alias
 also requires sign-in. Completion requires coexistence/sign-out/CSRF/restart
 regression, applicable validation and independent review; results follow.
 
+F58–F60 final evidence (October 9, 2026): production revision `3e40728`
+passed `tools/validate.sh build`, followed by the serial `unit &&
+integration && architecture && sdk-contracts && coverage && aspire-e2e &&
+browser-e2e && docs` selectors. Results: unit 91/91, integration 135/135,
+architecture 6/6, SDK 25/25 plus the actual pinned runtime harness, Aspire
+API 7/7, browser 2/2 plus the expected failing probe, all coverage/report/
+discovery fixtures and internal Markdown links. The initial unit collection
+attempt was stopped without a result after finding 710 numbered generated
+DLL/PDB duplicates; rebuilding only unit output restored execution, without
+altering collector settings or gates. A preliminary focused regression
+first failed on an empty Cookie header in its fixture, then exposed F59;
+both were corrected before the successful gates.
+
+Independent review of exact `3e40728` against `abaf1e9` examined instructions,
+applicable spec/ADRs, complete F1–F59 ledger, all changed production/tests/docs
+and surrounding auth/composition/persistence. It found no significant
+production defect and identified the F60 evidence gap, now corrected.
+After that test/docs-only correction, `build && integration && coverage &&
+docs` passed again: integration 135/135; changed lines 98.2% (805/820);
+Web 98.4% lines (685/696), 80.4% branches (111/138); all thresholds passed.
+Docs was rerun after this handoff update. The reviewer ran read-only Git
+inspection/diff checks, not the runtime suites.
+
+The shared-cookie regression uses production HTTP composition and real
+SQLite with a browser-style cookie container, not two real Kestrel sockets
+or an actual browser for coexistence. Existing browser/Aspire gates cover
+real-process restart authentication. Windows path case normalization and
+fixed-name-cookie upgrade were not directly exercised; Linux new-head CI
+remains separate. Namespacing avoids collisions, not cookie disclosure to
+other services on the same hostname. Path normalization is lexical, not
+symlink canonicalization. All F1–F60 dispositions remain retained.
+
 Latest summary-review follow-up (F51–F57) owns the browser navigation/login
 script, settings live-status markup, atomic Infrastructure retention read,
 real SQLite/browser regressions, and related architecture/testing/Web docs.
@@ -232,6 +264,7 @@ the new revision remains required and is not inferred from this native run.
 | F57 | Independent review of `82d9fd8`: stale retention-save failures could show an obsolete alert after navigation even though stale successful saves were ignored. Medium. | Applied the same captured-generation guard to save errors. Browser holds a save, navigates to Activity, returns a controlled 500, awaits the stale handler and asserts the newer view remains with no obsolete alert. |
 | F58 | Previously missed: fixed session and antiforgery cookie names collide between loopback instances because browser cookie scope excludes TCP ports. Medium. | Namespaced both cookies with the same stable hash of the normalized absolute data-directory path. Shared browser-cookie regression checks distinct names, authenticated CSRF mutations on both instances, sign-out isolation and same-path restart with preserved session/token. Existing fixed-name sessions require one sign-in after upgrade. |
 | F59 | F58 regression exposed retention PUT binding registered default settings from DI rather than the request JSON, returning success without applying the owner's submitted values. High. | Explicit body binding restores intended mutation semantics. Shared-cookie regression asserts the exact saved response and durable 12/34-day pair after restart, and rejects a submitted out-of-range period with HTTP 400. Earlier status-only/default-value assertions did not establish this behavior. |
+| F60 | Independent review of `3e40728`: restarted regression saved the pair again before reading it, so that GET alone did not prove pre-restart persistence. Low evidence gap. | Moved the restarted GET/exact pair assertion before any restarted mutation; then separately verifies the preserved CSRF token still authorizes a save. Existing real SQLite reopen coverage remains retained. |
 
 Follow-up validation on October 9, 2026: `tools/validate.sh build`,
 `integration` (126/126), `browser-e2e` (1/1 plus expected failing probe),

@@ -28,6 +28,9 @@ of port. Restarts with the same path preserve authentication and antiforgery
 state. Moving the directory or selecting it through another symlink alias
 requires sign-in again, as does upgrading from the original fixed names;
 stored credentials and conversations are unaffected.
+Namespacing prevents cookie collisions, not disclosure to an untrusted
+server on the same hostname: browsers still send applicable cookies across
+ports. Only run trusted loopback services alongside Jarvis.
 
 Successful sign-in upgrades an outdated adaptive verifier with a conditional
 SQLite update. Authentication expiry refreshes anonymous antiforgery state

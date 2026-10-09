@@ -75,12 +75,12 @@ public sealed class SqliteAndWebSmokeTests
             HandleCookies = false,
             BaseAddress = new Uri("http://localhost:5101")
         });
-        await SaveAsync(restartedClient, firstToken);
         using var persisted = await SendAsync(restartedClient, HttpMethod.Get, "/api/settings");
         persisted.EnsureSuccessStatusCode();
         using var settings = JsonDocument.Parse(await persisted.Content.ReadAsStringAsync());
         Assert.Equal(12, settings.RootElement.GetProperty("conversationDays").GetInt32());
         Assert.Equal(34, settings.RootElement.GetProperty("auditDays").GetInt32());
+        await SaveAsync(restartedClient, firstToken);
 
         static WebApplicationFactory<Program> CreateInstance(string path) =>
             new WebApplicationFactory<Program>().WithWebHostBuilder(web =>
