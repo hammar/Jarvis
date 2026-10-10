@@ -45,13 +45,21 @@ internal sealed class CopilotActiveTurn
         lock (sync)
         {
             client = value;
-            clientShutdown = new CopilotClientShutdown(
+            SetClientShutdown(new CopilotClientShutdown(
                 value.ForceStopAsync,
-                () => CopilotAgentEngine.DisposeBoundedAsync(value.DisposeAsync().AsTask()));
+                () => CopilotAgentEngine.DisposeBoundedAsync(value.DisposeAsync().AsTask())));
         }
     }
 
     public void SetSession(CopilotSession value) => Volatile.Write(ref session, value);
+
+    internal void SetClientShutdown(CopilotClientShutdown shutdown)
+    {
+        lock (sync)
+        {
+            clientShutdown = shutdown;
+        }
+    }
 
     public bool CancelByHost()
     {

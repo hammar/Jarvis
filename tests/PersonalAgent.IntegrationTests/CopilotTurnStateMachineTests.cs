@@ -1,3 +1,5 @@
+using System.Collections.Concurrent;
+using System.Threading.Channels;
 using PersonalAgent.Application;
 using PersonalAgent.Domain;
 using PersonalAgent.Infrastructure.AgentEngine.Copilot;
@@ -10,6 +12,61 @@ namespace PersonalAgent.IntegrationTests;
 public sealed class CopilotTurnStateMachineTests
 {
     private static readonly DateTimeOffset Now = new(2026, 10, 5, 12, 0, 0, TimeSpan.Zero);
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task FailedDirectoryCleanupClosesOutputAndPreservesFailure()
+    {
+        var channel = Channel.CreateUnbounded<AgentEvent>();
+        channel.Writer.TryWrite(new TurnInterrupted(TurnId.New(), Now, "runtime_cleanup_failed"));
+        var error = new IOException("synthetic deletion failure");
+        Assert.Same(error, Assert.Throws<IOException>(() =>
+            CopilotAgentEngine.CompleteOutputAfterCleanup(channel.Writer, () => throw error)));
+        var events = new List<AgentEvent>();
+        await foreach (var item in channel.Reader.ReadAllAsync())
+        {
+            events.Add(item);
+        }
+        Assert.Single(events);
+        await channel.Reader.Completion.WaitAsync(TimeSpan.FromSeconds(1));
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task DeferredShutdownMaintenancePreservesUncertainOwnershipThenDeletesWithoutInference()
+    {
+        var finish = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var shutdown = new CopilotClientShutdown(async () =>
+        {
+            entered.TrySetResult();
+            await finish.Task;
+        }, () => Task.CompletedTask, TimeSpan.FromMilliseconds(50));
+        var active = new CopilotActiveTurn(0);
+        active.SetClientShutdown(shutdown);
+        var conversation = ConversationId.New();
+        var registry = new ConcurrentDictionary<ConversationId, CopilotActiveTurn>();
+        registry[conversation] = active;
+        var stopped = shutdown.StopAsync();
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(1));
+        await Assert.ThrowsAsync<TimeoutException>(() => stopped);
+        var deleted = new List<ConversationId>();
+        CopilotAgentEngine.ReconcileDeferredCleanups(registry, _ => false, deleted.Add, CancellationToken.None);
+        Assert.Empty(deleted);
+        Assert.Single(registry);
+        finish.TrySetResult();
+        await shutdown.StopAsync();
+        CopilotAgentEngine.ReconcileDeferredCleanups(registry, _ => true, deleted.Add, CancellationToken.None);
+        Assert.Single(registry);
+        Assert.Empty(deleted);
+        var error = new IOException("synthetic deletion failure");
+        Assert.Same(error, Assert.Throws<IOException>(() => CopilotAgentEngine.ReconcileDeferredCleanups(
+            registry, _ => false, _ => throw error, CancellationToken.None)));
+        Assert.Single(registry);
+        CopilotAgentEngine.ReconcileDeferredCleanups(registry, _ => false, deleted.Add, CancellationToken.None);
+        Assert.Empty(registry);
+        Assert.Equal([conversation], deleted);
+    }
 
     [Fact]
     [Trait("Category", "Integration")]

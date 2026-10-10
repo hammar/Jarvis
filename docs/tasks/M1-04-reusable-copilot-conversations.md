@@ -202,3 +202,47 @@ Prior prompt-reliability finding **R1 — Not applicable** and its rationale rem
 in [the original cumulative record](local-chat-prompt-reliability.md#independent-review-finding-ledger).
 This work neither reopens nor erases it. No residual-risk acceptance, scope
 waiver, PR creation or merge authorization is inferred.
+
+## Independent review round 2 and subsequent fixes
+
+Independent review examined `f3c0bba569e773b22b025cbbe0296b9991037b48` against
+`0d9be55`, independently executing 63 targeted integration checks, all 40 SDK
+contracts, 6 architecture checks and Markdown-link validation. It recommended
+Fixed for M104-R01, R02 (original history bypass only), R03 (with contested
+registration verification gap), R05, and ordinary R06 cleanup; R04 closure still
+needs an engine-level uncertain-shutdown regression. A6 remains blocking.
+
+| Ref | Severity | Finding and disposition |
+| --- | --- | --- |
+| M104-R07 | High | Previously missed: directory deletion in the terminal finally could throw before output completion, stranding enumeration/ownership. Fix implemented after `f3c0bba`: production cleanup uses unconditional channel completion while preserving the exception. `FailedDirectoryCleanupClosesOutputAndPreservesFailure` dynamically injects deletion failure into that production helper and verifies the reader terminates. Full engine/coordinator deletion-failure injection remains unexercised; independent fix review pending. |
+| M104-R08 | Medium | Previously missed: delayed successful shutdown stayed protected forever unless the same conversation submitted another turn. Fix implemented after `f3c0bba`: maintenance reconciles deferred ownership under the gate, removing it only after shutdown confirmation and successful directory deletion. `DeferredShutdownMaintenancePreservesUncertainOwnershipThenDeletesWithoutInference` exercises timeout, later shutdown completion, active preservation, deletion failure retaining ownership and successful removal. Independent fix review pending. |
+
+Round-2 recommendations do not erase earlier findings or verification gaps.
+The original six rows above retain their history; the original prompt R1 is
+unchanged. No owner residual-risk acceptance has occurred.
+
+Subsequent native evidence:
+
+- Explicit synthetic-only `Category=LiveOllama` runs using
+  `JARVIS_OLLAMA_MODEL=gemma3:4b` and `llama3.2:latest`: each 3/3 passed.
+  Both exercise the production context/engine, exact captured-request replay
+  and direct native-role comparison; no tools/cloud/household inputs.
+- Full `tools/validate.sh browser-e2e`: **22/23 passed, gate failed**.
+  `FirstRunReportsAuthStatusFailureAndSerializesBootstrapThenReauthenticatesWithoutReload`
+  failed when Aspire's simulator-model resource failed to start. No root cause
+  is established and no rerun/pass is claimed. The deliberate gate probe did not
+  execute because the required browser suite failed first.
+- After R07/R08 fixes, `tools/validate.sh build` passed; full integration
+  **188/188** passed; coverage passed with changed executable lines **297/308
+  (96.4%)**, Infrastructure 2751/2959 lines and 679/875 branches.
+  `tools/validate.sh docs` passed. The first targeted fix run hit misplaced
+  using directives; corrected before these successful runs.
+
+Current blockers: safe production compaction A6; failed browser gate and its
+uninvestigated simulator startup; current Linux execution; remaining
+engine-level failure/concurrency/maintenance/credential regressions and final
+independent dispositions at the final revision. Earlier green results do not
+waive these. The coherent checkpoint exceeds the roughly 400-line review target
+because it includes actual-runtime capability experiments, recovery,
+context-boundary regressions and their evidence; no unrelated refactor is
+included.

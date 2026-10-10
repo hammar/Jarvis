@@ -516,18 +516,31 @@ public sealed class CopilotAgentEngine : IAgentEngine, IEngineStateMaintenance
         }
         finally
         {
-            if (localSessionDirectory is not null && terminalStatus != TurnStatus.Completed)
+            CompleteOutputAfterCleanup(output, () =>
             {
-                if (active.CanDeleteRuntimeDirectory)
+                if (localSessionDirectory is not null && terminalStatus != TurnStatus.Completed)
                 {
-                    DeleteTurnDirectory(GetLocalSessionRoot(request.ConversationId));
+                    if (active.CanDeleteRuntimeDirectory)
+                    {
+                        DeleteTurnDirectory(GetLocalSessionRoot(request.ConversationId));
+                    }
+                    else
+                    {
+                        unresolvedRuntimeCleanups[request.ConversationId] = active;
+                    }
                 }
-                else
-                {
-                    unresolvedRuntimeCleanups[request.ConversationId] = active;
-                }
-            }
+            });
+        }
+    }
 
+    internal static void CompleteOutputAfterCleanup(ChannelWriter<AgentEvent> output, Action cleanup)
+    {
+        try
+        {
+            cleanup();
+        }
+        finally
+        {
             output.TryComplete();
         }
     }
@@ -792,6 +805,12 @@ public sealed class CopilotAgentEngine : IAgentEngine, IEngineStateMaintenance
 
     private async Task PruneLocalSessionsCoreAsync(CancellationToken cancellationToken)
     {
+        ReconcileDeferredCleanups(
+            unresolvedRuntimeCleanups,
+            id => activeConversations.ContainsKey(id),
+            id => DeleteTurnDirectory(GetLocalSessionRoot(id)),
+            cancellationToken);
+
         if (!Directory.Exists(options.RuntimeDirectory))
         {
             return;
@@ -829,6 +848,23 @@ public sealed class CopilotAgentEngine : IAgentEngine, IEngineStateMaintenance
             .Skip(retainedLimit))
         {
             DeleteTurnDirectory(expired.Directory.FullName);
+        }
+    }
+
+    internal static void ReconcileDeferredCleanups(
+        ConcurrentDictionary<ConversationId, CopilotActiveTurn> deferredCleanups,
+        Func<ConversationId, bool> isActive,
+        Action<ConversationId> deleteDirectory,
+        CancellationToken cancellationToken)
+    {
+        foreach (var deferred in deferredCleanups)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (deferred.Value.CanDeleteRuntimeDirectory && !isActive(deferred.Key))
+            {
+                deleteDirectory(deferred.Key);
+                deferredCleanups.TryRemove(deferred);
+            }
         }
     }
 
