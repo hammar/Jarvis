@@ -124,23 +124,27 @@ do not claim implementation complete.
 
 ## Current implementation and acceptance status
 
-**Incomplete.** Proposed lifecycle/recovery decisions are recorded in
-[ADR 0004](../adr/0004-local-copilot-working-state.md). No production-compaction
-scope reduction is authorized. Required compaction acceptance A6 remains open,
-despite observable runtime capability evidence.
+**Implementation in validation.** Owner-approved lifecycle/recovery and
+SDK-owned compaction decisions are recorded in
+[ADR 0004](../adr/0004-local-copilot-working-state.md). On 2026-10-10 the owner
+explicitly directed us to assume successful SDK auto-compaction, accept the
+observed upstream oversized-summary loss for separate reproduction, and not
+build a workaround. A6 therefore verifies real model-budget propagation,
+SDK-owned compaction and normal continuity, not an independent Jarvis summary
+accounting/gateway. This does not waive required checks or independent review.
 
 | Criterion | Evidence and remaining limits |
 | --- | --- |
-| A1 | Pinned-runtime native history, disk resume, separate model/provider-switch contracts, exact missing-state error and automatic/manual compaction contracts. Manual compaction RPC is experimental and its token limit is advisory. |
+| A1 | Pinned-runtime native history, disk resume, separate model/provider-switch contracts, exact missing-state error and automatic/manual compaction contracts. Manual compaction RPC is experimental and its token limit is attribution metadata only, not a size target. |
 | A2 | Tool-free Local provider messages have native system/user/assistant/user ordering on matched resume; separate conversations are isolated. Reconstruction uses labelled text, not native assistant-role seeding. |
 | A3 | Authorized Gemma3:4b and llama3.2:latest synthetic engine/exact-replay/native-role comparisons each pass3/3 at 10cc799. Prompt preservation and streaming apply on resume. No universal model/GUI output claim. |
 | A4 | Two successive controlled turns reused one disk conversation but launched two separate runtimes, both verified exited. One native macOS sample measured 1,180/221 ms to first delta, 1,232/252 ms total and 95,977,472/92,651,520 working-set bytes. No launch saving or universal speed claim. Active/idle/orphan maintenance contracts pass. |
 | A5 | Production coordinator reconstructs missing SDK state, corrupt marker and offline SQLite restore with one new request, deduplication and no rolled-back content. Checkpoint-write failure is Interrupted without a committed answer. Contested registration and delayed actual-runtime shutdown regressions pass; independent fix dispositions are recorded below. |
-| A6 | Automatic compaction emits observed events and resumes a summary. Manual public RPC returns summary/context metrics, but accepts a 144,022-character summary with 18,088 current tokens despite TokenLimit 8,192 and sends it onward. Safe production budget/privacy accounting is not established; compaction remains disabled and this criterion is unmet. |
+| A6 | Named-model configuration reaches real compaction with an 8,192 input-token budget, unlike ordinary ignored capability overrides. Tool-free Local production adapter enables automatic compaction, records safe metrics, cold-resumes a normal summary and preserves selection invalidation. The observed oversized-summary loss is explicitly accepted upstream reliance, not claimed fixed. Final gates/review pending. |
 | A7 | Cloud/tool turns remain fresh. Configuration/history changes reset Local state. Actual-runtime configuration invalidation and unadvertised resumed bash denial pass; scoped independent review found no new defect. No live cloud or household execution is claimed. |
 | A8 | Production coordinator and required HTTP/SSE integration pass; Aspire API E2E7 on both platforms and native browser23 plus deliberately failing discovery probe pass at 10cc799. |
 | A9 | Native and Linux aarch64 core gates pass at the revisions recorded below; Aspire API E2E7 passes on both at 10cc799. Native browser23 and both authorized local-model reruns pass. No hosted CI or Linux browser result is claimed. |
-| A10 | Proposed ADR and affected docs updated. Full cumulative ledger retained below; independent reviews recommend Fixed for R01-R08, with R02 limited to its original history bypass. A6 remains unresolved and no owner scope/risk acceptance is inferred. |
+| A10 | Accepted-direction ADR and affected docs updated. Full cumulative ledger retained below; independent reviews recommend Fixed for R01-R08, with R02 limited to its original history bypass. Final independent compaction review pending; owner acceptance is limited to the explicitly discussed SDK reliance, not all new risks. |
 
 No schema changes. `AgentTurnRequest` now requires durable `ConversationId`;
 the coordinator supplies it. `RuntimeContextRebuilt` is a typed, persisted
@@ -459,3 +463,60 @@ actual-runtime manual-compaction cases passed2/2; `tools/validate.sh docs` and
 No full runtime or platform-suite rerun is claimed for this test/documentation
 delta. Production transport, compaction policy and context selection remain
 unchanged, with A6 blocked on the material owner decision.
+
+## Owner-directed SDK compaction implementation (2026-10-10)
+
+The owner explicitly directed SDK-owned automatic compaction, assuming normal
+successful compaction preserves context, with no Jarvis workaround for the
+oversized-summary defect. Separate upstream reproduction is owner-led follow-up.
+The earlier blockers above are historical observations, not the current policy.
+Library-first guidance is committed in `475144d`; ADR 0004 records the specific
+accepted reliance and amended A6.
+
+At SDK 1.0.16 / CLI 1.0.90, ordinary capability limits did not change the actual
+128,000-token compaction budget. Named-provider/model configuration did: real
+compaction reports 8,192 input tokens and retains this budget across cold resume,
+although attribution metadata still reports 128,000. Manual `TokenLimit` is
+attribution metadata only; earlier interpretation as a target was incorrect.
+Five capability cases pass, including the observed successful oversized
+summary (12,617 remaining tokens) that is subsequently omitted. This passing
+observation test does not claim continuity for that defective case.
+
+Production create/resume for tool-free Local now selects the configured wire
+model through the experimental named API, reserves 2,048 output tokens in a
+10,240-total budget, disables telemetry and enables automatic 80%/95%
+background/blocking compaction. Fresh Cloud/tool paths remain unchanged.
+The output reservation is not a verified generation cap: actual requests omit
+both `max_tokens` and `max_completion_tokens`, retaining previous behavior.
+Compatibility version 2 resets prior working copies; SQLite schema is unchanged.
+`RuntimeContextCompacted` persists only success/token metrics, never summaries
+or filesystem paths. Started compaction settles before disposal under the
+existing cancellation/deadline. No manual compactor or provider gateway exists.
+
+Initial production fixtures did not trigger compaction: a cold runtime did not
+use fake prior-turn usage as assumed. Valid streaming usage was added to the
+controlled provider, then deliberately oversized synthetic selected history
+was used to reach the actual runtime threshold. Both success/refusal stress
+cases passed, as did host cancellation/deadline during a paused compaction.
+The oversized packet bypasses the normal builder; it does not prove production
+builder acceptance of oversized input. Final tests also require persisted
+outcome events and selection invalidation after compaction, with no cloud/tool
+requests. An initial attempt to assert wire output capping failed; the corrected
+test explicitly records absence instead of claiming unsupported enforcement.
+
+The first native combined integration run passed 205/206, exposing a fixture
+teardown race: releasing a paused response after its consumer/runtime exited
+raced `HttpListener` disposal. The cancellation test now keeps that response
+paused until provider shutdown cancels it through its existing deliberate path.
+No production error catch or retry was added. Initial Linux attempts failed
+first on macOS archive metadata files and then missing Aspire CLI installation;
+source archives now suppress metadata and pinned tooling is installed before
+build. These infrastructure failures are not reported as runtime failures or
+passing gates.
+
+Required native/Linux final gates and exact-commit independent review are in
+progress. `origin/main` was refreshed and remains `305dbb7`.
+No native model was loaded during `ollama ps`, so an effective server allocation
+could not be inferred; documented prerequisites require at least 10,240 tokens.
+No server/model settings were changed, credentials used, or household/cloud
+inference performed.

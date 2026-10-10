@@ -642,9 +642,9 @@ public sealed class CopilotAgentEngine : IAgentEngine, IEngineStateMaintenance
             };
             var infiniteSessions = new InfiniteSessionConfig
             {
-                // Native history is bounded by the application context checkpoint. SDK-generated summaries
-                // cannot yet be accounted for within that envelope; compaction remains a capability spike.
-                Enabled = false
+                Enabled = isReusableLocalSession,
+                BackgroundCompactionThreshold = 0.80,
+                BufferExhaustionThreshold = 0.95
             };
             var providerConfig = new ProviderConfig
             {
@@ -669,25 +669,31 @@ public sealed class CopilotAgentEngine : IAgentEngine, IEngineStateMaintenance
                     Task.FromResult(PermissionDecision.Reject("Only host-registered tools are permitted.")),
                 Tools = tools
             };
+            if (isReusableLocalSession)
+            {
+                ConfigureLocalModelBudget(sessionConfig, provider, apiKey);
+            }
             if (isResuming)
             {
                 try
                 {
+                    var resumeConfig = new ResumeSessionConfig
+                    {
+                        Model = provider.Model,
+                        Provider = providerConfig,
+                        AvailableTools = availableTools,
+                        EnableSessionStore = false,
+                        InfiniteSessions = infiniteSessions,
+                        Streaming = true,
+                        SystemMessage = systemMessage,
+                        Hooks = hooks,
+                        OnPermissionRequest = sessionConfig.OnPermissionRequest,
+                        Tools = tools
+                    };
+                    ConfigureLocalModelBudget(resumeConfig, provider, apiKey);
                     session = await client.ResumeSessionAsync(
                         GetLocalSessionId(request.ConversationId),
-                        new ResumeSessionConfig
-                        {
-                            Model = provider.Model,
-                            Provider = providerConfig,
-                            AvailableTools = availableTools,
-                            EnableSessionStore = false,
-                            InfiniteSessions = infiniteSessions,
-                            Streaming = true,
-                            SystemMessage = systemMessage,
-                            Hooks = hooks,
-                            OnPermissionRequest = sessionConfig.OnPermissionRequest,
-                            Tools = tools
-                        }).WaitAsync(cancellationToken);
+                        resumeConfig).WaitAsync(cancellationToken);
                 }
                 catch (IOException exception) when (
                     exception.InnerException is RemoteRpcException { ErrorCode: -32603 } rpc &&
@@ -725,14 +731,37 @@ public sealed class CopilotAgentEngine : IAgentEngine, IEngineStateMaintenance
                     cancellationToken: cancellationToken);
             }
 
+            var compactionGate = new object();
+            TaskCompletionSource? pendingCompaction = null;
             subscription = session.On<SessionEvent>(item =>
             {
-                if (item is AssistantMessageDeltaEvent delta)
+                AgentEvent? observed = null;
+                if (item is SessionCompactionStartEvent)
                 {
-                    var textDelta = new TextDelta(request.TurnId, clock.UtcNow, delta.Data.DeltaContent);
-                    if (!active.TryAcceptEvent(textDelta) || !events.TryWrite(textDelta))
+                    lock (compactionGate)
                     {
-                        active.FailForEventBudget();
+                        pendingCompaction = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                    }
+                }
+                else if (item is SessionCompactionCompleteEvent compacted)
+                {
+                    observed = new RuntimeContextCompacted(
+                        request.TurnId, clock.UtcNow, compacted.Data.Success,
+                        compacted.Data.TokenLimit, compacted.Data.PostCompactionTokens);
+                }
+                else if (item is AssistantMessageDeltaEvent delta)
+                {
+                    observed = new TextDelta(request.TurnId, clock.UtcNow, delta.Data.DeltaContent);
+                }
+                if (observed is not null && (!active.TryAcceptEvent(observed) || !events.TryWrite(observed)))
+                {
+                    active.FailForEventBudget();
+                }
+                if (item is SessionCompactionCompleteEvent)
+                {
+                    lock (compactionGate)
+                    {
+                        pendingCompaction?.TrySetResult();
                     }
                 }
             });
@@ -742,6 +771,17 @@ public sealed class CopilotAgentEngine : IAgentEngine, IEngineStateMaintenance
                 : LocalChatPrompt.Format(request.Context.Items);
             var turn = session.SendAndWaitAsync(new MessageOptions { Prompt = prompt });
             var response = await turn.WaitAsync(cancellationToken);
+            Task? compaction;
+            lock (compactionGate)
+            {
+                compaction = pendingCompaction?.Task;
+            }
+            // Each turn owns its runtime. Let an already-started SDK compaction settle before disposal,
+            // bounded by the same cancellation/deadline as inference; Jarvis does not replace its algorithm.
+            if (compaction is not null)
+            {
+                await compaction.WaitAsync(cancellationToken);
+            }
             var content = response?.Data.Content;
             if (string.IsNullOrWhiteSpace(content) || content.Length > 1_000_000)
             {
@@ -782,6 +822,36 @@ public sealed class CopilotAgentEngine : IAgentEngine, IEngineStateMaintenance
                 });
         }
     }
+
+    // The pinned public named-model API is experimental; ordinary capability overrides are ignored.
+#pragma warning disable GHCP001
+    private static void ConfigureLocalModelBudget(
+        SessionConfigBase config, CopilotProviderOptions provider, string? apiKey)
+    {
+        const string name = "jarvis-local";
+        config.Provider = null;
+        config.Model = $"{name}/local";
+        config.EnableSessionTelemetry = false;
+        config.Providers =
+        [
+            new NamedProviderConfig
+            {
+                Name = name, Type = "openai", BaseUrl = provider.BaseUrl.AbsoluteUri,
+                WireApi = provider.WireApi, ApiKey = apiKey
+            }
+        ];
+        config.Models =
+        [
+            new ProviderModelConfig
+            {
+                Id = "local", WireModel = provider.Model, Provider = name,
+                MaxPromptTokens = LocalContextLimits.MaximumEstimatedInputTokens,
+                MaxOutputTokens = LocalContextLimits.MaximumOutputTokens,
+                MaxContextWindowTokens = LocalContextLimits.MaximumEstimatedInputTokens + LocalContextLimits.MaximumOutputTokens
+            }
+        ];
+    }
+#pragma warning restore GHCP001
 
     private CopilotClient CreateAndAssignClient(
         string runtimeDirectory,
@@ -956,7 +1026,9 @@ public sealed class CopilotAgentEngine : IAgentEngine, IEngineStateMaintenance
     private string GetCompatibilityHash(AgentTurnRequest request) =>
         Hash(JsonSerializer.Serialize(new
         {
-            Version = 1,
+            Version = 2,
+            PromptTokens = LocalContextLimits.MaximumEstimatedInputTokens,
+            OutputTokens = LocalContextLimits.MaximumOutputTokens,
             Sdk = typeof(CopilotClient).Assembly.GetName().Version?.ToString(),
             request.Instructions,
             request.Context.PolicyVersion,

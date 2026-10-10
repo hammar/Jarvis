@@ -92,9 +92,14 @@ the exact selected role/text/privacy history and compatibility settings match.
 Otherwise they reconstruct bounded labelled history; this SDK pin has no
 established public assistant-role seeding API. Resumed turns submit only the
 current request and retain native user/assistant roles. Cloud and tool-bearing
-sessions always start fresh. Production compaction is disabled pending safe
-host-budget accounting, not treated as satisfied by reconstruction. See the
-[proposed lifecycle ADR](adr/0004-local-copilot-working-state.md) and
+sessions always start fresh. Tool-free Local sessions use SDK-owned automatic
+compaction at the registered model's 8,192-input-token budget, with 2,048 output
+tokens reserved and 80%/95% background/blocking thresholds. The host character
+estimate bounds selected inputs and reconstruction, not SDK-generated summaries.
+The owner accepts reliance on SDK compaction and the disclosed upstream
+oversized-summary/truncation limitation; Jarvis does not implement a workaround.
+Compaction outcome events contain counts, never summaries or paths. See the
+[lifecycle ADR](adr/0004-local-copilot-working-state.md) and
 [M1-04 acceptance record](tasks/M1-04-reusable-copilot-conversations.md).
 This preserves selected conversation context without replaying
 previous inference. It does not promise identical bytes to the Ollama GUI,

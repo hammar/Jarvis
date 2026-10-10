@@ -120,10 +120,16 @@ Otherwise bounded application context reconstructs a fresh session without
 replaying earlier inference. Create and resume both use explicit streaming,
 empty SDK mode, logged-in-user discovery disabled, cross-session store/search
 disabled, and a sanitized environment. `EnableSessionStore = false` does not
-disable native disk persistence. Production compaction remains disabled pending
-safe host-budget accounting; the
-[proposed lifecycle ADR](../../docs/adr/0004-local-copilot-working-state.md)
-records the open acceptance gap.
+disable native disk persistence. Tool-free Local sessions use the pinned
+experimental named-model API to propagate 8,192 input / 2,048 output tokens and
+enable SDK-owned automatic compaction at 80%/95%. The ordinary capability
+override is ignored at this pin; attribution metadata can report 128,000 while
+actual compaction correctly uses the registered budget.
+No manual compactor or request gateway is introduced. Already-started background
+compaction settles before turn-owned runtime disposal, under the same deadline.
+`RuntimeContextCompacted` persists only outcome/token metrics.
+The [lifecycle ADR](../../docs/adr/0004-local-copilot-working-state.md)
+records the owner's accepted dependency limitation and policy distinction.
 Only request-registered custom tools are exposed. The adapter streams typed
 events and appends each to `IConversationStore`, which assigns an atomic,
 monotonic per-turn sequence for later event replay. Terminal status changes and

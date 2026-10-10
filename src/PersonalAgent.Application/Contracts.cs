@@ -484,6 +484,9 @@ public static class LocalContextLimits
     /// <summary>Maximum approximate input tokens, including the reserved margin.</summary>
     public const int MaximumEstimatedInputTokens = 8_192;
 
+    /// <summary>Maximum output tokens reserved in the Local SDK model's configured total context window.</summary>
+    public const int MaximumOutputTokens = 2_048;
+
     /// <summary>Character-to-token ratio used when no exact tokenizer is available.</summary>
     public const int EstimatedCharactersPerToken = 4;
 
@@ -1210,6 +1213,19 @@ public sealed record RuntimeContextRebuilt(
     TurnId TurnId,
     DateTimeOffset OccurredAtUtc,
     string ReasonCode) : AgentEvent(TurnId, OccurredAtUtc);
+
+/// <summary>Reports an SDK-owned compaction outcome without persisting its sensitive summary or filesystem paths.</summary>
+/// <param name="TurnId">Application turn during which compaction was observed.</param>
+/// <param name="OccurredAtUtc">UTC observation instant.</param>
+/// <param name="Succeeded">SDK-reported summary generation outcome, not a guarantee of semantic recall or budget compliance.</param>
+/// <param name="PromptTokenLimit">SDK-reported input budget in tokens, when available.</param>
+/// <param name="PostCompactionTokens">SDK-estimated post-compaction tokens, when available; not the host's character estimate.</param>
+public sealed record RuntimeContextCompacted(
+    TurnId TurnId,
+    DateTimeOffset OccurredAtUtc,
+    bool Succeeded,
+    long? PromptTokenLimit,
+    long? PostCompactionTokens) : AgentEvent(TurnId, OccurredAtUtc);
 
 /// <summary>Signals that context must be inspected or approved before inference.</summary>
 /// <param name="TurnId">Application-owned turn identifier.</param>

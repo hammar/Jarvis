@@ -190,6 +190,225 @@ public sealed class CopilotAgentEngineContractTests(ITestOutputHelper output)
     [InlineData(false)]
     [InlineData(true)]
     [Trait("Category", "SdkContract")]
+    public async Task NamedProviderBudgetReachesCompactionButCapabilityOverrideAndAttributionDoNot(bool namedProvider)
+    {
+        using var data = IsolatedDirectory.Create();
+        await using var provider = await FakeOpenAiProvider.StartAsync();
+        var home = Path.Combine(data.Path, "home");
+        var workspace = Path.Combine(data.Path, "workspace");
+        Directory.CreateDirectory(home);
+        Directory.CreateDirectory(workspace);
+        await using var client = CreateSdkClient(home, workspace);
+        await client.StartAsync();
+        var config = CreateSdkSession($"jarvis-budget-{Guid.NewGuid():N}", provider.BaseUrl, "fixture-model");
+        if (namedProvider)
+        {
+            config.Provider = null;
+            config.Model = "jarvis-local/fixture-model";
+            config.EnableSessionTelemetry = false;
+            config.Providers =
+            [
+                new NamedProviderConfig { Name = "jarvis-local", Type = "openai", BaseUrl = provider.BaseUrl }
+            ];
+            config.Models =
+            [
+                new ProviderModelConfig
+                {
+                    Id = "fixture-model",
+                    Provider = "jarvis-local",
+                    MaxContextWindowTokens = 10240,
+                    MaxPromptTokens = 8192,
+                    MaxOutputTokens = 2048
+                }
+            ];
+        }
+        await using var session = await client.CreateSessionAsync(config).WaitAsync(TimeSpan.FromSeconds(15));
+        if (!namedProvider)
+        {
+            await session.SetModelAsync("fixture-model", null, new GitHub.Copilot.Rpc.ModelCapabilitiesOverride
+            {
+                Limits = new GitHub.Copilot.Rpc.ModelCapabilitiesOverrideLimits
+                {
+                    MaxContextWindowTokens = 10240,
+                    MaxPromptTokens = 8192,
+                    MaxOutputTokens = 2048
+                }
+            }).WaitAsync(TimeSpan.FromSeconds(15));
+        }
+        await session.SendAndWaitAsync(new MessageOptions { Prompt = "Remember the synthetic number 42." })
+            .WaitAsync(TimeSpan.FromSeconds(15));
+        var attribution = await session.Rpc.Metadata.GetContextAttributionAsync()
+            .WaitAsync(TimeSpan.FromSeconds(15));
+        output.WriteLine($"namedProvider={namedProvider}; resolved={JsonSerializer.Serialize(attribution)}");
+        using var json = JsonDocument.Parse(JsonSerializer.Serialize(attribution));
+        var context = json.RootElement.GetProperty("contextAttribution");
+        var compacted = await session.Rpc.History.CompactAsync(new GitHub.Copilot.Rpc.SessionHistoryCompactRequest())
+            .WaitAsync(TimeSpan.FromSeconds(15));
+        output.WriteLine($"runtimeCompaction={JsonSerializer.Serialize(compacted.ContextWindow)}");
+        Assert.Equal(128000, context.GetProperty("promptTokenLimit").GetInt64());
+        Assert.NotNull(compacted.ContextWindow);
+        Assert.Equal(namedProvider ? 8192 : 128000, compacted.ContextWindow.TokenLimit);
+        Assert.Equal(2, provider.Requests.Count);
+        using var request = JsonDocument.Parse(provider.Requests.First().Body);
+        Assert.Equal("fixture-model", request.RootElement.GetProperty("model").GetString());
+        Assert.Empty(provider.Requests.SelectMany(item => item.ToolNames));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("Category", "SdkContract")]
+    public async Task NamedProviderAutomaticCompactionUsesDeclaredBudget(bool oversizedSummary)
+    {
+        using var data = IsolatedDirectory.Create();
+        await using var provider = await FakeOpenAiProvider.StartAsync();
+        provider.ReportPromptTokens = 7000;
+        var summary = oversizedSummary
+            ? "JARVIS_BUDGET_SUMMARY " + new string('x', 100000)
+            : "JARVIS_BUDGET_SUMMARY";
+        provider.ResponseContentSelector = body =>
+            body.Contains("summar", StringComparison.OrdinalIgnoreCase)
+                ? summary
+                : "JARVIS_BUDGET_ANSWER";
+        var home = Path.Combine(data.Path, "home");
+        var workspace = Path.Combine(data.Path, "workspace");
+        Directory.CreateDirectory(home);
+        Directory.CreateDirectory(workspace);
+        await using var client = CreateSdkClient(home, workspace);
+        await client.StartAsync();
+        await using var session = await client.CreateSessionAsync(new SessionConfig
+        {
+            Model = "jarvis-local/fixture-model",
+            Providers = [new NamedProviderConfig { Name = "jarvis-local", Type = "openai", BaseUrl = provider.BaseUrl }],
+            Models =
+            [
+                new ProviderModelConfig
+                {
+                    Id = "fixture-model", Provider = "jarvis-local",
+                    MaxPromptTokens = 8192, MaxContextWindowTokens = 10240, MaxOutputTokens = 2048
+                }
+            ],
+            AvailableTools = [],
+            EnableSessionStore = false,
+            EnableSessionTelemetry = false,
+            InfiniteSessions = new InfiniteSessionConfig
+            {
+                Enabled = true,
+                BackgroundCompactionThreshold = 0.80,
+                BufferExhaustionThreshold = 0.95
+            },
+            SystemMessage = new SystemMessageConfig
+            {
+                Mode = SystemMessageMode.Replace,
+                Content = "Answer the current synthetic request briefly."
+            }
+        }).WaitAsync(TimeSpan.FromSeconds(15));
+        var completed = new TaskCompletionSource<SessionCompactionCompleteEvent>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        using var subscription = session.On<SessionEvent>(item =>
+        {
+            if (item is SessionCompactionCompleteEvent result)
+            {
+                output.WriteLine($"compactionSuccess={result.Data.Success}; limit={result.Data.TokenLimit}; postTokens={result.Data.PostCompactionTokens}; summaryCharacters={result.Data.SummaryContent?.Length}");
+                completed.TrySetResult(result);
+            }
+        });
+        await session.SendAndWaitAsync(new MessageOptions { Prompt = "Remember the synthetic number 42." })
+            .WaitAsync(TimeSpan.FromSeconds(15));
+        await session.SendAndWaitAsync(new MessageOptions { Prompt = "Continue the synthetic story." })
+            .WaitAsync(TimeSpan.FromSeconds(15));
+        var result = await completed.Task.WaitAsync(TimeSpan.FromSeconds(30));
+        Assert.Equal(8192, result.Data.TokenLimit);
+        provider.ReportPromptTokens = 100;
+        await session.SendAndWaitAsync(new MessageOptions { Prompt = "Recall the synthetic number." })
+            .WaitAsync(TimeSpan.FromSeconds(15));
+        output.WriteLine($"lastRequestCharacters={provider.Requests.Last().Body.Length}");
+        if (oversizedSummary)
+        {
+            Assert.DoesNotContain("JARVIS_BUDGET_SUMMARY", provider.Requests.Last().Body, StringComparison.Ordinal);
+        }
+        else
+        {
+            Assert.Contains("JARVIS_BUDGET_SUMMARY", provider.Requests.Last().Body, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "SdkContract")]
+    public async Task NamedBudgetSurvivesColdResumeAndManualOverflowCanBeRejectedBeforeNextInference()
+    {
+        using var data = IsolatedDirectory.Create();
+        await using var provider = await FakeOpenAiProvider.StartAsync();
+        var home = Path.Combine(data.Path, "home");
+        var workspace = Path.Combine(data.Path, "workspace");
+        Directory.CreateDirectory(home);
+        Directory.CreateDirectory(workspace);
+        var sessionId = $"jarvis-budget-resume-{Guid.NewGuid():N}";
+        var providers = new List<NamedProviderConfig>
+        {
+            new() { Name = "jarvis-local", Type = "openai", BaseUrl = provider.BaseUrl }
+        };
+        var models = new List<ProviderModelConfig>
+        {
+            new()
+            {
+                Id = "fixture-model", Provider = "jarvis-local",
+                MaxPromptTokens = 8192, MaxContextWindowTokens = 10240, MaxOutputTokens = 2048
+            }
+        };
+        await using (var client = CreateSdkClient(home, workspace))
+        {
+            await client.StartAsync();
+            await using var session = await client.CreateSessionAsync(new SessionConfig
+            {
+                SessionId = sessionId,
+                Model = "jarvis-local/fixture-model",
+                Providers = providers,
+                Models = models,
+                AvailableTools = [],
+                EnableSessionStore = false,
+                EnableSessionTelemetry = false,
+                InfiniteSessions = new InfiniteSessionConfig { Enabled = false }
+            }).WaitAsync(TimeSpan.FromSeconds(15));
+            await session.SendAndWaitAsync(new MessageOptions { Prompt = "Remember the synthetic number 42." })
+                .WaitAsync(TimeSpan.FromSeconds(15));
+            await session.Rpc.History.CompactAsync(new GitHub.Copilot.Rpc.SessionHistoryCompactRequest())
+                .WaitAsync(TimeSpan.FromSeconds(15));
+        }
+        await using (var client = CreateSdkClient(home, workspace))
+        {
+            await client.StartAsync();
+            await using var session = await client.ResumeSessionAsync(sessionId, new ResumeSessionConfig
+            {
+                Model = "jarvis-local/fixture-model",
+                Providers = providers,
+                Models = models,
+                AvailableTools = [],
+                EnableSessionStore = false,
+                EnableSessionTelemetry = false,
+                InfiniteSessions = new InfiniteSessionConfig { Enabled = false }
+            }).WaitAsync(TimeSpan.FromSeconds(15));
+            await session.SendAndWaitAsync(new MessageOptions { Prompt = "Continue the synthetic conversation." })
+                .WaitAsync(TimeSpan.FromSeconds(15));
+            Assert.Contains("Remember the synthetic number 42.", provider.Requests.Last().Body, StringComparison.Ordinal);
+            provider.ResponseContentSelector = _ => "JARVIS_OVERSIZED_SUMMARY " + new string('x', 100000);
+            var requestsBefore = provider.Requests.Count;
+            var compacted = await session.Rpc.History.CompactAsync(new GitHub.Copilot.Rpc.SessionHistoryCompactRequest())
+                .WaitAsync(TimeSpan.FromSeconds(15));
+            Assert.True(compacted.Success);
+            Assert.NotNull(compacted.ContextWindow);
+            Assert.Equal(8192, compacted.ContextWindow.TokenLimit);
+            Assert.True(compacted.ContextWindow.CurrentTokens > 8192);
+            Assert.Equal(requestsBefore + 1, provider.Requests.Count);
+            output.WriteLine($"coldResumeLimit={compacted.ContextWindow.TokenLimit}; oversizedTokens={compacted.ContextWindow.CurrentTokens}; summaryCharacters={compacted.SummaryContent?.Length}");
+        }
+        Assert.Empty(provider.Requests.SelectMany(item => item.ToolNames));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("Category", "SdkContract")]
     public async Task ManualCompactionReturnsSummaryAndContextAccountingThroughPublicApi(bool oversizedSummary)
     {
         using var data = IsolatedDirectory.Create();
@@ -1215,6 +1434,137 @@ public sealed class CopilotAgentEngineContractTests(ITestOutputHelper output)
         Assert.Equal(new[] { "system", "user" }, ReadRoles(cloudRequests[1].Body));
         Assert.DoesNotContain("JARVIS_CLOUD_FIRST", cloudRequests[1].Body, StringComparison.Ordinal);
         Assert.DoesNotContain("JARVIS_FIRST_LOCAL_TURN", cloudRequests[1].Body, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("Category", "SdkContract")]
+    public async Task ProductionAutomaticCompactionPersistsSafeOutcomeAndResumesSelectedContext(bool refuseSummary)
+    {
+        using var data = IsolatedDirectory.Create();
+        using var databaseFile = IsolatedDatabaseFile.Create();
+        var store = new SqliteConversationStore(await CreateDatabaseAsync(databaseFile.Path), new TestClock());
+        await using var provider = await FakeOpenAiProvider.StartAsync();
+        await using var cloud = await FakeOpenAiProvider.StartAsync();
+        provider.ReportPromptTokens = 7000;
+        provider.ResponseContentSelector = body => body.Contains("summar", StringComparison.OrdinalIgnoreCase)
+            ? "JARVIS_SUMMARY_PRIVATE_SENTINEL: synthetic number 42."
+            : "JARVIS_ANSWER";
+        provider.RefuseRequest = body => refuseSummary && body.Contains("summar", StringComparison.OrdinalIgnoreCase);
+        var runtime = Path.Combine(data.Path, "runtime");
+        var engine = CreateEngine(store, provider.BaseUrl, cloud.BaseUrl, runtime);
+        var conversation = ConversationId.New();
+        // Stress the adapter directly beyond the normal builder window to exercise its SDK lifecycle.
+        // This does not establish acceptance of oversized packets by the production context builder.
+        var history = Enumerable.Range(0, 8)
+            .Select(index => new ContextItem($"seed:{index}", $"SYNTHETIC_SEED_{index} " + new string('a', 8000),
+                "LocalOnly", index % 2 == 0 ? "user" : "assistant")).ToList();
+        RuntimeContextCompacted? compaction = null;
+        for (var index = 0; index < 3; index++)
+        {
+            if (index == 2)
+            {
+                provider.ReportPromptTokens = 100;
+                provider.RefuseRequest = null;
+            }
+            var turn = await CreateTurnAsync(store, conversation);
+            var text = $"JARVIS_REQUEST_{index}: synthetic number 42.";
+            var request = CreateRequest(turn, ProviderKind.Local, text, conversationId: conversation);
+            request = request with { Context = request.Context with { Items = history.Append(request.Context.Items[^1]).ToArray() } };
+            var events = await CollectAsync(engine.RunTurnAsync(request, CancellationToken.None));
+            Assert.Single(events.OfType<TurnCompleted>());
+            Assert.Empty(events.OfType<RuntimeContextRebuilt>());
+            compaction ??= events.OfType<RuntimeContextCompacted>().FirstOrDefault();
+            var persisted = await store.ReadTurnEventsAfterAsync(turn, 0, 1000, CancellationToken.None);
+            Assert.Equal(events.OfType<RuntimeContextCompacted>().Count(),
+                persisted.Count(item => item.EventType == nameof(RuntimeContextCompacted)));
+            foreach (var observed in persisted.Where(item => item.EventType == nameof(RuntimeContextCompacted)))
+            {
+                Assert.DoesNotContain("JARVIS_SUMMARY_PRIVATE_SENTINEL", observed.PayloadJson, StringComparison.Ordinal);
+                Assert.DoesNotContain(runtime, observed.PayloadJson, StringComparison.Ordinal);
+            }
+            history.Add(new ContextItem($"user:{index}", text, "LocalOnly", "user"));
+            history.Add(new ContextItem($"assistant:{index}", "JARVIS_ANSWER", "LocalOnly", "assistant"));
+        }
+        Assert.NotNull(compaction);
+        Assert.Equal(!refuseSummary, compaction.Succeeded);
+        Assert.Equal(8192, compaction.PromptTokenLimit);
+        var lastBody = provider.Requests.Last().Body;
+        Assert.Contains("JARVIS_REQUEST_2", lastBody, StringComparison.Ordinal);
+        Assert.DoesNotContain("<current_datetime>", lastBody, StringComparison.Ordinal);
+        if (!refuseSummary)
+        {
+            Assert.Contains("JARVIS_SUMMARY_PRIVATE_SENTINEL", lastBody, StringComparison.Ordinal);
+        }
+        Assert.Empty(cloud.Requests);
+        Assert.Empty(provider.Requests.SelectMany(item => item.ToolNames));
+        using (var body = JsonDocument.Parse(lastBody))
+        {
+            Assert.Equal("fixture-model", body.RootElement.GetProperty("model").GetString());
+            // At this pin, named output limits reserve context; they do not become a wire generation cap.
+            Assert.False(body.RootElement.TryGetProperty("max_tokens", out _));
+            Assert.False(body.RootElement.TryGetProperty("max_completion_tokens", out _));
+        }
+        var selectedTurn = await CreateTurnAsync(store, conversation);
+        var selectedEvents = await CollectAsync(engine.RunTurnAsync(
+            CreateRequest(selectedTurn, ProviderKind.Local, "selected context changed", conversationId: conversation),
+            CancellationToken.None));
+        Assert.Single(selectedEvents.OfType<RuntimeContextRebuilt>());
+        Assert.Single(selectedEvents.OfType<TurnCompleted>());
+        Assert.DoesNotContain("JARVIS_SUMMARY_PRIVATE_SENTINEL", provider.Requests.Last().Body, StringComparison.Ordinal);
+        Assert.DoesNotContain("SYNTHETIC_SEED_", provider.Requests.Last().Body, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("Category", "SdkContract")]
+    public async Task StartedAutomaticCompactionRemainsBoundedByCancellationOrDeadline(bool deadline)
+    {
+        using var data = IsolatedDirectory.Create();
+        using var databaseFile = IsolatedDatabaseFile.Create();
+        var store = new SqliteConversationStore(await CreateDatabaseAsync(databaseFile.Path), new TestClock());
+        await using var provider = await FakeOpenAiProvider.StartAsync();
+        provider.ReportPromptTokens = 7000;
+        provider.ResponseContentSelector = _ => "JARVIS_ANSWER";
+        var runtime = Path.Combine(data.Path, "runtime");
+        var engine = CreateEngine(store, provider.BaseUrl, provider.BaseUrl, runtime);
+        var conversation = ConversationId.New();
+        var history = Enumerable.Range(0, 8)
+            .Select(index => new ContextItem($"seed:{index}", new string('a', 8000),
+                "LocalOnly", index % 2 == 0 ? "user" : "assistant")).ToList();
+        var firstTurn = await CreateTurnAsync(store, conversation);
+        var firstRequest = CreateRequest(firstTurn, ProviderKind.Local, "synthetic first", conversationId: conversation);
+        firstRequest = firstRequest with
+        {
+            Context = firstRequest.Context with { Items = history.Append(firstRequest.Context.Items[^1]).ToArray() }
+        };
+        Assert.Single((await CollectAsync(engine.RunTurnAsync(firstRequest, CancellationToken.None))).OfType<TurnCompleted>());
+        history.Add(new ContextItem("first-user", "synthetic first", "LocalOnly", "user"));
+        history.Add(new ContextItem("first-assistant", "JARVIS_ANSWER", "LocalOnly", "assistant"));
+        provider.PauseRequest = body => body.Contains("summar", StringComparison.OrdinalIgnoreCase);
+        var turn = await CreateTurnAsync(store, conversation);
+        using var cancellation = new CancellationTokenSource();
+        var request = CreateRequest(turn, ProviderKind.Local, "synthetic second", conversationId: conversation,
+            deadlineCancellationToken: cancellation.Token);
+        request = request with { Context = request.Context with { Items = history.Append(request.Context.Items[^1]).ToArray() } };
+        var run = CollectAsync(engine.RunTurnAsync(request, CancellationToken.None));
+        await provider.InferenceStalled.Task.WaitAsync(TimeSpan.FromSeconds(15));
+        if (deadline)
+        {
+            cancellation.Cancel();
+        }
+        else
+        {
+            await engine.CancelAsync(turn, CancellationToken.None);
+        }
+        var events = await run.WaitAsync(TimeSpan.FromSeconds(15));
+        Assert.Empty(events.OfType<TurnCompleted>());
+        Assert.Empty(events.OfType<TurnFailed>());
+        var persisted = await store.GetTurnAsync(turn, CancellationToken.None);
+        Assert.Equal(deadline ? TurnStatus.Interrupted : TurnStatus.Cancelled, persisted!.Status);
+        Assert.False(Directory.Exists(Path.Combine(runtime, $"conversation-{conversation.Value:N}")));
     }
 
     [Fact]

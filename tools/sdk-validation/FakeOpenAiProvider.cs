@@ -27,6 +27,8 @@ internal sealed class FakeOpenAiProvider : IAsyncDisposable
     public bool RepeatTool { get; set; }
     public int? UnsolicitedToolRequestNumber { get; set; }
     public bool FailInference { get; set; }
+    public Func<string, bool>? RefuseRequest { get; set; }
+    public Func<string, bool>? PauseRequest { get; set; }
     public bool StallInference { get; set; }
     public bool PauseInference { get; set; }
     public int? ReportPromptTokens { get; set; }
@@ -127,7 +129,7 @@ internal sealed class FakeOpenAiProvider : IAsyncDisposable
             toolNames,
             context.Request.Headers["Authorization"]));
 
-        if (FailInference)
+        if (FailInference || RefuseRequest?.Invoke(body) == true)
         {
             context.Response.StatusCode = 400;
             var error = Encoding.UTF8.GetBytes("""{"error":{"message":"Controlled provider refusal","type":"invalid_request_error"}}""");
@@ -137,7 +139,7 @@ internal sealed class FakeOpenAiProvider : IAsyncDisposable
             return;
         }
 
-        if (PauseInference)
+        if (PauseInference || PauseRequest?.Invoke(body) == true)
         {
             InferenceStalled.TrySetResult();
             try
@@ -278,6 +280,19 @@ internal sealed class FakeOpenAiProvider : IAsyncDisposable
                 """data: {"id":"chatcmpl-stream","object":"chat.completion.chunk","created":0,"model":"fixture-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}""",
                 "data: [DONE]"
             };
+        if (ReportPromptTokens is int promptTokens)
+        {
+            var usageChunk = $"data: {JsonSerializer.Serialize(new
+            {
+                id = "chatcmpl-stream",
+                @object = "chat.completion.chunk",
+                created = 0,
+                model = "fixture-model",
+                choices = Array.Empty<object>(),
+                usage = new { prompt_tokens = promptTokens, completion_tokens = 1, total_tokens = promptTokens + 1 }
+            })}";
+            chunks = chunks[..^1].Append(usageChunk).Append("data: [DONE]").ToArray();
+        }
         foreach (var chunk in chunks)
         {
             var bytes = Encoding.UTF8.GetBytes(chunk + "\n\n");

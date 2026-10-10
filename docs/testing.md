@@ -64,9 +64,16 @@ oversized-answer and estimated-token history selection boundaries. Maintenance
 contracts exercise active-path preservation, idle cleanup and orphan deletion
 after authoritative retention without new inference.
 Compaction capability contracts prove observable summaries across resume and
-exercise the experimental public manual RPC: its token-limit argument does not
-reject oversized summaries. These are capability evidence, not safe production
-compaction or summary-quality validation. See the
+exercise the experimental public manual RPC: its token-limit argument is event
+attribution metadata, not a size target. Registered-model budget tests prove
+actual compaction uses 8,192 tokens even when attribution metadata reports
+128,000. Production adapter stress tests exercise automatic compaction,
+cold-resume summary continuity and safe persisted metrics on success/refusal.
+Their deliberately oversized synthetic context bypasses the normal builder to
+reach runtime thresholds; it does not establish builder acceptance of that
+packet or semantic summary quality. Real coordinator bounds remain separately
+tested. Oversized-summary loss is retained as the owner's accepted upstream
+limitation, not fixed or represented as a passing continuity scenario. See the
 [M1-04 record](tasks/M1-04-reusable-copilot-conversations.md).
 Live observations cover the
 tested installed model versions only, not correctness across arbitrary models,
