@@ -60,6 +60,11 @@ claim Linux execution or universal model correctness/byte-identical generation.
   request shows temperature `0`, top-p `0.95`, an SDK-added date block and
   a JSON context packet. Earlier direct experiments omitted the date block
   and sampling controls, so they were not equivalent request replays.
+  A synthetic Gemma ablation at the same sampling settings returns the stale
+  `63` for the second question with the old packet plus date block, but `15`
+  with the same packet without that block; a plain current question also gives
+  `15`. Both reported model failure modes are therefore reproduced without
+  using the owner's private transcript.
 - After correction, Gemma and Llama each pass all three live engine scenarios:
   word arithmetic, symbol arithmetic, and context-dependent test-word recall.
   Across eight requests per model, actual SDK responses, exact outgoing-request
@@ -67,11 +72,17 @@ claim Linux execution or universal model correctness/byte-identical generation.
 - Each model separately passes live authenticated Web HTTP submission,
   production coordinator/inference, SSE terminal delivery and persisted
   history checks for `63`, `15`, `8`. No real account or conversation is used.
+  A separate out-of-process exercise launches the compiled Release Web host
+  with isolated data for each model, bootstraps a synthetic account, submits
+  those three turns through HTTP, drains SSE, and verifies persisted answers.
+  Both pass; test-owned hosts shut down and temporary data is removed.
 - `tools/validate.sh build`, `unit` (96), `integration` (167), `architecture`
   (6), `sdk-contracts` (27 plus standalone actual-runtime harness), `coverage`,
   `aspire-e2e` (7), `browser-e2e` (23 plus expected failing probe), and `docs`
   pass. Coverage includes the new formatter as an explicitly owned critical
-  module; final changed-line totals are recorded after committing new files.
+  module. Post-commit coverage is 24/24 changed executable lines (100%);
+  the reviewer independently confirmed 14/14 belong to the new formatter.
+  Source/documentation lines are not coverable executable sequence points.
 - No database/schema, provider/runtime pin, tool catalog or API contract changes.
   Old incorrect messages remain durable rather than being rewritten. Start a
   new conversation for a clean comparison after restarting updated binaries.
@@ -79,5 +90,19 @@ claim Linux execution or universal model correctness/byte-identical generation.
 
 ## Independent review finding ledger
 
-Review findings and dispositions are recorded here against the implementation
-commit before final handoff.
+Independent code review examined `7ba9ef227bb344c4caf767caa8debb20aa84e920`
+against `origin/main` at `305dbb75ec8da1ad72ca785332e761b6cebe23f9`.
+The reviewer independently ran 16 prompt/context/routing unit checks and
+27 actual-runtime SDK contracts, and reran measured coverage using existing
+reports. No additional correctness, cancellation, tool, privacy, prompt-budget
+or coverage defect was found. Live inference and other gate results were
+implementer evidence rather than independently repeated review tests.
+
+| Ref | Severity | Finding | Disposition |
+| --- | --- | --- | --- |
+| R1 | Medium | The owner's request for identical curl/GUI behavior is stronger than the bounded behavioral equivalence demonstrated here. Reconstructed history is quoted text, not native assistant/user messages. | Open acceptance limitation: the reported failures are fixed and the explicit scenarios match direct Ollama on both models, but literal transcript/settings identity and universal model parity are not delivered. Supported SDK transcript seeding is unavailable at the current pin; do not bypass the SDK or seed private runtime files. Owner acceptance of this narrower result remains pending. |
+
+No owner acceptance or merge authorization is inferred from unattended work.
+The implementation is committed and tested; R1 remains disclosed rather than
+being silently relabelled as resolved. Linux CI and literal GUI/input parity
+are not claimed.
