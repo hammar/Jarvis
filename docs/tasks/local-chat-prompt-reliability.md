@@ -86,7 +86,60 @@ claim Linux execution or universal model correctness/byte-identical generation.
 - No database/schema, provider/runtime pin, tool catalog or API contract changes.
   Old incorrect messages remain durable rather than being rewritten. Start a
   new conversation for a clean comparison after restarting updated binaries.
-  Required Linux CI has not been executed by this native session.
+  Linux execution is recorded separately below; hosted GitHub CI has not run
+  for these local, unpushed commits.
+
+## Executed evidence (2026-10-10, Linux aarch64)
+
+The unchanged repository scripts run in local Docker with
+`mcr.microsoft.com/dotnet/sdk:10.0.401-noble`. An isolated source archive and
+synthetic Git baseline support architecture and changed-line coverage checks
+without exposing the checkout's Git configuration. These are Linux aarch64
+results, not a claim about hosted CI or Linux x64 execution.
+
+- `tools/validate.sh build`, `architecture` (6), `unit` (96), `integration`
+  (167), `sdk-contracts` (27 plus actual-runtime harness), `coverage`, `docs`,
+  `aspire-e2e` (7), and `browser-e2e` (23) pass. The deliberate browser failure
+  probe is discovered and fails as expected. All coverage gates pass;
+  Infrastructure measures 92.7% lines and 76.1% branches.
+- Both unchanged CI containment scripts pass using the current compiled
+  harness mounted into the existing `jarvis-sdk-egress:t02` image. The
+  loopback-only containment check observes 34 rejected external connection
+  attempts; it does not claim that no attempts occurred. The separate
+  hostname-mapped, `--network none` egress fixture observes no non-loopback
+  IPv4/IPv6 connection attempts. An exploratory bridge-network run fails that
+  stricter assertion because hostname resolution includes the container's
+  bridge address; this is not the repository's CI configuration.
+- Initial dependency installation attempts encounter a full shared Docker
+  filesystem and bind-mount package-installation permissions. The successful
+  browser run installs dependencies into executable, task-owned tmpfs mounts.
+  No shared Docker data is pruned, daemon configuration changed, repository
+  gate weakened, or failed test skipped.
+- Compact Linux logs, TRX and coverage reports are retained under
+  `artifacts/prompt-linux-validation/`. Test containers are removed after
+  exit; task-owned source copies, package/browser caches and dependency
+  filesystem copies are removed after retaining reports.
+
+## Delivery status
+
+The implementation and automated verification are finished. No database,
+credentials or existing conversation has been modified, and Debug demo
+binaries have been rebuilt. Restart the existing AppHost and begin a new
+conversation to avoid conditioning on old incorrect replies.
+
+The correction and evidence are committed locally on this session's branch;
+they are not pushed, and merged PR #37 is not reused. `origin/main` was fetched
+again before handoff and has no commits missing from this branch. Changes span
+17 files (570 insertions, 19 deletions before this final evidence update);
+the larger cohesive slice includes synthetic live diagnostics, actual-runtime
+regressions and the evidence record rather than unrelated functionality.
+
+R1 below remains an explicit acceptance decision, not an engineering test
+failure. The owner was asked whether verified behavioral parity is sufficient
+or native role-separated history is required; the owner was unavailable and
+directed autonomous work. That direction does not constitute acceptance of
+the disclosed limitation. Do not claim universal cross-model correctness,
+literal GUI parity, or final owner acceptance.
 
 ## Independent review finding ledger
 
@@ -104,5 +157,5 @@ implementer evidence rather than independently repeated review tests.
 
 No owner acceptance or merge authorization is inferred from unattended work.
 The implementation is committed and tested; R1 remains disclosed rather than
-being silently relabelled as resolved. Linux CI and literal GUI/input parity
-are not claimed.
+being silently relabelled as resolved. Local Linux gates now pass; hosted CI,
+Linux x64 execution and literal GUI/input parity are not claimed.
