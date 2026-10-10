@@ -196,7 +196,7 @@ disposition; no finding is removed because a later round omits it.
 | Ref | Severity | Finding | Current disposition/evidence |
 | --- | --- | --- | --- |
 | M104-R01 | Medium | Missing SDK state failed the current request rather than rebuilding as the owner chose. | Fixed; exact-runtime missing-state and production coordinator recovery pass. Independent recommendation at f3c0bba retained at 25d890b/10cc799. |
-| M104-R02 | High | Resumed native history bypassed host context selection/bounds. | Fixed for original bypass through selected-history matching and disabled production compaction; real coordinator count/token/oversized-answer boundaries pass. Independent recommendation at f3c0bba retained at 25d890b/10cc799. This does not resolve A6. |
+| M104-R02 | High | Resumed native history bypassed host context selection/bounds. | Fixed for original bypass through selected-history matching; real coordinator count/token/oversized-answer boundaries pass. Independent recommendations at f3c0bba/25d890b/10cc799 retained at b0bcdaa. SDK compaction accounting is now explicitly owner-accepted dependency reliance, not a reintroduced selection bypass. |
 | M104-R03 | High | Pruning snapshots raced registration/concurrent pruning. | Fixed; shared ownership gate and deterministic contested-registration regression. Independently verified at 25d890b. |
 | M104-R04 | High | Failure cleanup deleted state while runtime shutdown remained uncertain. | Fixed; confirmed-shutdown guard, blocked reuse, and full-engine delayed actual-runtime shutdown regression at 10cc799. Independent targeted test1/1 and recommendation at that exact revision; limitations below. |
 | M104-R05 | High | Ready state did not validate SQLite continuity after restore. | Fixed; Completed-turn/history checkpoint, offline restore and ready-marker write-failure regressions. Independent recommendation at f3c0bba retained at 25d890b/10cc799. |
@@ -520,3 +520,63 @@ No native model was loaded during `ollama ps`, so an effective server allocation
 could not be inferred; documented prerequisites require at least 10,240 tokens.
 No server/model settings were changed, credentials used, or household/cloud
 inference performed.
+
+## Final implementation evidence at b0bcdaa
+
+Native macOS required `tools/validate.sh` build, unit96, integration206,
+architecture6, SDK55 plus standalone actual-runtime harness, coverage, docs
+and Aspire7 passed against the production code committed as `b0bcdaa`.
+Logs are `artifacts/m104-auto-final-*.log`. Changed executable coverage is
+378/388 (97.4%) against `origin/main`; Infrastructure is2819/3027 lines and
+696/893 branches. No E2E execution is counted as coverage.
+
+Linux aarch64 isolated-container build, unit96, integration206, architecture6,
+SDK55 plus standalone, coverage and docs passed the same production code.
+The synthetic baseline now uses actual `origin/main`305dbb7, unlike earlier
+Linux rounds. Changed lines are also378/388 (97.4%); Infrastructure is2819/3027
+lines and692/887 branches. Counts are not averaged across platforms.
+Linux logs are `artifacts/m104-linux/auto-*.log`; Aspire/report export is still
+running. Native browser/full deliberate failure probe and independent review
+are also pending; no completion is claimed for pending gates.
+
+Authorized native synthetic Gemma3:4b and llama3.2:latest each passed3/3 through
+the new production provider path (`artifacts/m104-auto-live-{gemma,llama}.log`).
+These short tests do not prove real-model long-history compaction quality.
+After each model loaded, `ollama ps` reported actual CONTEXT4096, below the
+registered total budget10240 (`artifacts/m104-auto-ollama-context.log`).
+The local prerequisite is therefore known unmet, not merely uninspected.
+Changing the native Ollama application/server allocation requires the owner:
+no settings/restart authorization is inferred from synthetic-test consent.
+Real long-context use on this server must wait until the allocation is raised
+and verified. This is distinct from the explicitly accepted SDK-summary defect
+and is not silently accepted on the owner's behalf.
+
+Independent review examined exact
+`b0bcdaa7346673050ace1a5e21b2c06a0c70de1a` vs main and the new compaction delta,
+read the entire ledger and independently ran four focused compaction tests
+(4/4), the full SDK-contract suite (55 passed, one non-contract skipped) and
+`git diff --check`. It retained all prior finding dispositions with their
+existing limits and reported the operating prerequisite below, with no new
+code-level finding. It did not execute live models, builds or broader gates.
+The appended evidence section was uncommitted during that review and was not
+represented as reviewed HEAD.
+
+| Ref | Severity | Finding | Disposition/evidence |
+| --- | --- | --- | --- |
+| M104-R13 | Medium | Current native Ollama context allocation4096 is below SDK input8192/total10240; short passing turns cannot establish safe long-context behavior. | Fixed for documentation/acceptance claims, independently dispositioned after reading A3/A6: bounded live comparisons and controlled actual-SDK compaction satisfy their stated criteria; live long-context testing remains opt-in. The observed setup is explicitly not ready for long-context use pending owner-authorized allocation change and verification. No settings-change authorization or native long-context pass inferred. |
+
+Linux Aspire E2E7/7 and report export completed successfully; actual logs/TRX/
+coverage are retained under `artifacts/m104-linux/auto-*`. Both Linux and native
+core gates now pass the production revision. Native browser first attempt was
+stopped after several minutes without minimal-verbosity progress; no failure
+cause was established by an OS stack sample. A bounded diagnostic run with
+per-test output is progressing through passing cases. The stopped run is not
+reported as a pass, and no arbitrary retry or assertion weakening is applied.
+
+The diagnostic browser run completed23/23 successfully. A fresh canonical
+`tools/validate.sh browser-e2e` run is in progress so its discovery and deliberate
+failure-probe gate are still pending. No UI/browser implementation changed.
+Independent follow-up examined A3/A6 and the issue test plan, confirming the
+local allocation gap is an operational prerequisite, not a new mandatory live
+compaction test. R13 is therefore fixed for truthful docs/acceptance claims,
+while the environment remains unsuitable for long-context use until corrected.
