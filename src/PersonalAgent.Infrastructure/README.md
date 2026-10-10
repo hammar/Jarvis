@@ -111,9 +111,19 @@ passed only to the SDK and never enter the child-process environment, events,
 or logs. A configured key reference without a registered resolver fails the
 turn explicitly.
 
-Every turn starts a fresh SDK client and session in
-`<RuntimeDirectory>/turn-<TurnId>/`, with empty SDK mode, logged-in-user
-discovery disabled, session storage disabled, and a sanitized environment.
+Every turn starts a fresh SDK client/runtime. Cloud and tool-bearing turns
+create fresh sessions in `<RuntimeDirectory>/turn-<TurnId>/`. Tool-free Local
+turns retain private working state in
+`<RuntimeDirectory>/conversation-<ConversationId>/local/` and resume only when
+the Completed SQLite checkpoint, selected history and compatibility hash match.
+Otherwise bounded application context reconstructs a fresh session without
+replaying earlier inference. Create and resume both use explicit streaming,
+empty SDK mode, logged-in-user discovery disabled, cross-session store/search
+disabled, and a sanitized environment. `EnableSessionStore = false` does not
+disable native disk persistence. Production compaction remains disabled pending
+safe host-budget accounting; the
+[proposed lifecycle ADR](../../docs/adr/0004-local-copilot-working-state.md)
+records the open acceptance gap.
 Only request-registered custom tools are exposed. The adapter streams typed
 events and appends each to `IConversationStore`, which assigns an atomic,
 monotonic per-turn sequence for later event replay. Terminal status changes and
@@ -138,8 +148,11 @@ shutdown, and the durable event remains available for replay. A slow reader
 cannot block terminal delivery indefinitely. Cancellation or deadline expiry
 while acquiring the durable turn claim also persists a terminal outcome using
 the pre-claim version, so a competing engine's claim cannot be overwritten.
-The per-turn runtime/workspace directory is removed after bounded runtime
-shutdown; a removal failure is surfaced as cleanup uncertainty. Terminal
+Disposable turn directories are removed after bounded runtime shutdown.
+Successful tool-free Local state is retained, bounded to 32 conversation roots
+and 30 idle days; startup/hourly maintenance removes idle/orphan copies without
+inference. Incomplete shutdown retains ownership and prevents unsafe deletion
+or same-conversation reuse. A removal failure is surfaced as cleanup uncertainty. Terminal
 outcome persistence has its own bounded timeout so turn cancellation does not
 prevent recording the terminal result.
 Event persistence observes the turn cancellation/deadline token. Runtime

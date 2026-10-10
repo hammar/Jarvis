@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Net;
 using System.Text.Json;
+using GitHub.Copilot;
 using PersonalAgent.Application;
 using PersonalAgent.Application.Context;
 using PersonalAgent.Domain;
@@ -8,12 +9,13 @@ using PersonalAgent.Infrastructure.AgentEngine.Copilot;
 using PersonalAgent.Infrastructure.Persistence;
 using PersonalAgent.TestSupport;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace PersonalAgent.SdkContractTests;
 
 [Trait("Category", "Integration")]
 [Collection("Copilot runtime process isolation")]
-public sealed class CopilotAgentEngineContractTests
+public sealed class CopilotAgentEngineContractTests(ITestOutputHelper output)
 {
     private static readonly DateTimeOffset Now = new(2026, 10, 5, 12, 0, 0, TimeSpan.Zero);
     private const string ToolName = "read_only_lookup";
@@ -59,6 +61,281 @@ public sealed class CopilotAgentEngineContractTests
         Assert.DoesNotContain("private-source", body, StringComparison.Ordinal);
         Assert.DoesNotContain("packetId", body, StringComparison.Ordinal);
         Assert.Empty(provider.Requests.SelectMany(item => item.ToolNames));
+    }
+
+    [Fact]
+    [Trait("Category", "SdkContract")]
+    public async Task PinnedRuntimePreservesNativeRolesAndResumesSessionAcrossClients()
+    {
+        using var data = IsolatedDirectory.Create();
+        await using var localProvider = await FakeOpenAiProvider.StartAsync();
+        await using var secondProvider = await FakeOpenAiProvider.StartAsync();
+        var runtimeHome = Path.Combine(data.Path, "copilot-home");
+        var workspace = Path.Combine(data.Path, "workspace");
+        Directory.CreateDirectory(runtimeHome);
+        Directory.CreateDirectory(workspace);
+        var sessionId = $"jarvis-contract-{Guid.NewGuid():N}";
+
+        await using (var client = CreateSdkClient(runtimeHome, workspace))
+        {
+            await client.StartAsync();
+            await using var session = await client.CreateSessionAsync(CreateSdkSession(
+                sessionId,
+                localProvider.BaseUrl,
+                "fixture-model"));
+            await session.SendAndWaitAsync(new MessageOptions { Prompt = "JARVIS_SYNTHETIC_FIRST_TURN" });
+            await session.SendAndWaitAsync(new MessageOptions { Prompt = "JARVIS_SYNTHETIC_SECOND_TURN" });
+        }
+
+        var firstRequests = localProvider.Requests.ToArray();
+        Assert.Equal(2, firstRequests.Length);
+        Assert.Equal(
+            new[] { "system", "user", "assistant", "user" },
+            ReadRoles(firstRequests[1].Body));
+        Assert.Contains("JARVIS_SYNTHETIC_FIRST_TURN", firstRequests[1].Body, StringComparison.Ordinal);
+        Assert.Contains("JARVIS_SYNTHETIC_SECOND_TURN", firstRequests[1].Body, StringComparison.Ordinal);
+
+        await using (var client = CreateSdkClient(runtimeHome, workspace))
+        {
+            await client.StartAsync();
+            await using var session = await client.ResumeSessionAsync(
+                sessionId,
+                new ResumeSessionConfig
+                {
+                    Model = "fixture-model",
+                    Provider = new ProviderConfig { Type = "openai", BaseUrl = secondProvider.BaseUrl },
+                    AvailableTools = [],
+                    Hooks = new SessionHooks
+                    {
+                        OnUserPromptTransformed = (input, _) =>
+                            Task.FromResult<UserPromptTransformedHookOutput?>(
+                                new UserPromptTransformedHookOutput
+                                {
+                                    ModifiedTransformedPrompt = input.Prompt
+                                })
+                    }
+                });
+            await session.SendAndWaitAsync(new MessageOptions { Prompt = "JARVIS_SYNTHETIC_RESUMED_TURN" });
+        }
+
+        var resumedRequest = Assert.Single(secondProvider.Requests);
+        using var resumedBody = JsonDocument.Parse(resumedRequest.Body);
+        Assert.Equal("fixture-model", resumedBody.RootElement.GetProperty("model").GetString());
+        Assert.Equal(
+            new[] { "system", "user", "assistant", "user", "assistant", "user" },
+            ReadRoles(resumedRequest.Body));
+        Assert.Contains("JARVIS_SYNTHETIC_FIRST_TURN", resumedRequest.Body, StringComparison.Ordinal);
+        Assert.Contains("JARVIS_SYNTHETIC_SECOND_TURN", resumedRequest.Body, StringComparison.Ordinal);
+        Assert.Contains("JARVIS_SYNTHETIC_RESUMED_TURN", resumedRequest.Body, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [Trait("Category", "SdkContract")]
+    public async Task PinnedRuntimeChangesModelWithoutChangingProviderOrLosingNativeHistory()
+    {
+        using var data = IsolatedDirectory.Create();
+        await using var provider = await FakeOpenAiProvider.StartAsync();
+        var runtimeHome = Path.Combine(data.Path, "copilot-home");
+        var workspace = Path.Combine(data.Path, "workspace");
+        Directory.CreateDirectory(runtimeHome);
+        Directory.CreateDirectory(workspace);
+        var sessionId = $"jarvis-model-contract-{Guid.NewGuid():N}";
+
+        await using (var client = CreateSdkClient(runtimeHome, workspace))
+        {
+            await client.StartAsync();
+            await using var session = await client.CreateSessionAsync(CreateSdkSession(
+                sessionId,
+                provider.BaseUrl,
+                "fixture-model"));
+            await session.SendAndWaitAsync(new MessageOptions { Prompt = "JARVIS_MODEL_SWITCH_FIRST_TURN" });
+        }
+
+        await using (var client = CreateSdkClient(runtimeHome, workspace))
+        {
+            await client.StartAsync();
+            await using var session = await client.ResumeSessionAsync(
+                sessionId,
+                new ResumeSessionConfig
+                {
+                    Model = "fixture-model-v2",
+                    Provider = new ProviderConfig { Type = "openai", BaseUrl = provider.BaseUrl },
+                    AvailableTools = [],
+                    Hooks = new SessionHooks
+                    {
+                        OnUserPromptTransformed = (input, _) =>
+                            Task.FromResult<UserPromptTransformedHookOutput?>(
+                                new UserPromptTransformedHookOutput
+                                {
+                                    ModifiedTransformedPrompt = input.Prompt
+                                })
+                    }
+                });
+            await session.SendAndWaitAsync(new MessageOptions { Prompt = "JARVIS_MODEL_SWITCH_SECOND_TURN" });
+        }
+
+        var secondRequest = provider.Requests.Last();
+        using var body = JsonDocument.Parse(secondRequest.Body);
+        Assert.Equal("fixture-model-v2", body.RootElement.GetProperty("model").GetString());
+        Assert.Equal(
+            new[] { "system", "user", "assistant", "user" },
+            ReadRoles(secondRequest.Body));
+        Assert.Contains("JARVIS_MODEL_SWITCH_FIRST_TURN", secondRequest.Body, StringComparison.Ordinal);
+        Assert.Contains("JARVIS_MODEL_SWITCH_SECOND_TURN", secondRequest.Body, StringComparison.Ordinal);
+    }
+
+    // This capability spike evaluates the pinned SDK's experimental public manual-compaction RPC.
+#pragma warning disable GHCP001
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("Category", "SdkContract")]
+    public async Task ManualCompactionReturnsSummaryAndContextAccountingThroughPublicApi(bool oversizedSummary)
+    {
+        using var data = IsolatedDirectory.Create();
+        await using var provider = await FakeOpenAiProvider.StartAsync();
+        var summary = oversizedSummary
+            ? "JARVIS_MANUAL_SUMMARY " + string.Concat(Enumerable.Repeat("synthetic summary datum ", 6000))
+            : "JARVIS_MANUAL_SUMMARY";
+        provider.ResponseContentSelector = body =>
+            body.Contains("summar", StringComparison.OrdinalIgnoreCase)
+                ? summary
+                : "JARVIS_MANUAL_ANSWER";
+        var home = Path.Combine(data.Path, "home");
+        var workspace = Path.Combine(data.Path, "workspace");
+        Directory.CreateDirectory(home);
+        Directory.CreateDirectory(workspace);
+        await using var client = CreateSdkClient(home, workspace);
+        await client.StartAsync();
+        await using var session = await client.CreateSessionAsync(new SessionConfig
+        {
+            Model = "fixture-model",
+            Provider = new ProviderConfig { Type = "openai", BaseUrl = provider.BaseUrl },
+            AvailableTools = [],
+            EnableSessionStore = false,
+            InfiniteSessions = new InfiniteSessionConfig { Enabled = false },
+            SystemMessage = new SystemMessageConfig
+            {
+                Mode = SystemMessageMode.Replace,
+                Content = "Answer briefly using only this synthetic conversation."
+            }
+        });
+        await session.SendAndWaitAsync(new MessageOptions { Prompt = "Remember the synthetic number 42." });
+        var compacted = await session.Rpc.History.CompactAsync(
+            new GitHub.Copilot.Rpc.SessionHistoryCompactRequest { TokenLimit = 8192 })
+            .WaitAsync(TimeSpan.FromSeconds(15));
+        output.WriteLine($"summaryCharacters={compacted.SummaryContent?.Length}; context={JsonSerializer.Serialize(compacted.ContextWindow)}");
+        Assert.True(compacted.Success);
+        Assert.Equal(summary, compacted.SummaryContent);
+        Assert.NotNull(compacted.ContextWindow);
+        if (oversizedSummary)
+        {
+            Assert.True(compacted.ContextWindow.CurrentTokens > 8192);
+        }
+        var context = await session.Rpc.Metadata.ContextInfoAsync(8192, 0, "fixture-model");
+        output.WriteLine(JsonSerializer.Serialize(context));
+        await session.SendAndWaitAsync(new MessageOptions { Prompt = "Recall the synthetic number." });
+        Assert.Contains("JARVIS_MANUAL_SUMMARY", provider.Requests.Last().Body, StringComparison.Ordinal);
+    }
+#pragma warning restore GHCP001
+
+    [Fact]
+    [Trait("Category", "SdkContract")]
+    public async Task PinnedRuntimeEmitsSuccessfulCompactionEventsWhenEnabled()
+    {
+        using var data = IsolatedDirectory.Create();
+        await using var provider = await FakeOpenAiProvider.StartAsync();
+        provider.ReportPromptTokens = 100_000;
+        provider.ResponseContentSelector = body =>
+            body.Contains("summar", StringComparison.OrdinalIgnoreCase)
+                ? "JARVIS_COMPACTION_SUMMARY_SENTINEL"
+                : "JARVIS_SYNTHETIC_ANSWER";
+        var runtimeHome = Path.Combine(data.Path, "copilot-home");
+        var workspace = Path.Combine(data.Path, "workspace");
+        Directory.CreateDirectory(runtimeHome);
+        Directory.CreateDirectory(workspace);
+        var sessionId = $"jarvis-compaction-{Guid.NewGuid():N}";
+        var compactionStarted = new TaskCompletionSource<SessionCompactionStartEvent>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var compactionCompleted = new TaskCompletionSource<SessionCompactionCompleteEvent>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        {
+            await using var client = CreateSdkClient(runtimeHome, workspace);
+            await client.StartAsync();
+            await using var session = await client.CreateSessionAsync(new SessionConfig
+            {
+                SessionId = sessionId,
+                Model = "fixture-model",
+                Provider = new ProviderConfig { Type = "openai", BaseUrl = provider.BaseUrl },
+                AvailableTools = [],
+                EnableSessionStore = false,
+                InfiniteSessions = new InfiniteSessionConfig
+                {
+                    Enabled = true,
+                    BackgroundCompactionThreshold = 0.005,
+                    BufferExhaustionThreshold = 0.01
+                },
+                SystemMessage = new SystemMessageConfig
+                {
+                    Mode = SystemMessageMode.Replace,
+                    Content = "Answer briefly. The test conversation is synthetic."
+                }
+            });
+            using var subscription = session.On<SessionEvent>(item =>
+            {
+                if (item is SessionCompactionStartEvent started)
+                {
+                    compactionStarted.TrySetResult(started);
+                }
+                else if (item is SessionCompactionCompleteEvent { Data.Success: true } completed)
+                {
+                    compactionCompleted.TrySetResult(completed);
+                }
+            });
+
+            await session.SendAndWaitAsync(new MessageOptions
+            {
+                Prompt = "Tell me a synthetic story about a dragon named Kaedrith."
+            });
+            await session.SendAndWaitAsync(new MessageOptions
+            {
+                Prompt = "Continue the synthetic story with details about Kaedrith's castle."
+            });
+
+            var start = await compactionStarted.Task.WaitAsync(TimeSpan.FromSeconds(60));
+            Assert.True(start.Data.ConversationTokens.GetValueOrDefault() > 0);
+            var completed = await compactionCompleted.Task.WaitAsync(TimeSpan.FromSeconds(60));
+            Assert.True(completed.Data.Success);
+            Assert.True(completed.Data.CompactionTokensUsed?.InputTokens.GetValueOrDefault() > 0);
+        }
+
+        provider.ReportPromptTokens = null;
+        await using (var resumedClient = CreateSdkClient(runtimeHome, workspace))
+        {
+            await resumedClient.StartAsync();
+            await using var resumedSession = await resumedClient.ResumeSessionAsync(
+                sessionId,
+                new ResumeSessionConfig
+                {
+                    Model = "fixture-model",
+                    Provider = new ProviderConfig { Type = "openai", BaseUrl = provider.BaseUrl },
+                    AvailableTools = [],
+                    SystemMessage = new SystemMessageConfig
+                    {
+                        Mode = SystemMessageMode.Replace,
+                        Content = "Answer briefly. The test conversation is synthetic."
+                    }
+                });
+            await resumedSession.SendAndWaitAsync(new MessageOptions
+            {
+                Prompt = "Continue the synthetic story and preserve its relevant details."
+            });
+        }
+
+        var afterCompaction = provider.Requests.Last().Body;
+        Assert.Contains("Continue the synthetic story and preserve its relevant details.", afterCompaction, StringComparison.Ordinal);
+        Assert.Contains("JARVIS_COMPACTION_SUMMARY_SENTINEL", afterCompaction, StringComparison.Ordinal);
+        Assert.True(provider.RequestCount >= 3);
     }
 
     [Fact]
@@ -800,11 +1077,12 @@ public sealed class CopilotAgentEngineContractTests
         var dispatcher = new BlockingDispatcher();
         var runtimeDirectory = Path.Combine(data.Path, "runtime");
         var engine = CreateEngine(store, provider.BaseUrl, provider.BaseUrl, runtimeDirectory, dispatcher);
-        var turnId = await CreateTurnAsync(store);
+        var conversationId = ConversationId.New();
+        var turnId = await CreateTurnAsync(store, conversationId);
         var priorProcesses = GetProcessIds();
         var crashedRun = CollectAsync(engine.RunTurnAsync(
             CreateRequest(turnId, ProviderKind.Local, "crash contract", [new AgentToolDefinition(ToolName, ToolSchema, true)],
-                TimeSpan.FromSeconds(12)),
+                TimeSpan.FromSeconds(12), conversationId: conversationId),
             CancellationToken.None));
         await dispatcher.Started.Task.WaitAsync(TimeSpan.FromSeconds(30));
 
@@ -819,12 +1097,391 @@ public sealed class CopilotAgentEngineContractTests
         Assert.Empty(events.OfType<TurnCompleted>());
         Assert.Equal(TurnStatus.Interrupted, (await store.GetTurnAsync(turnId, CancellationToken.None))?.Status);
 
-        var nextTurn = await CreateTurnAsync(store);
+        var nextTurn = await CreateTurnAsync(store, conversationId);
         var nextEvents = await CollectAsync(engine.RunTurnAsync(
-            CreateRequest(nextTurn, ProviderKind.Local, "restart contract"),
+            CreateRequest(nextTurn, ProviderKind.Local, "restart contract", conversationId: conversationId),
             CancellationToken.None));
         Assert.Single(nextEvents.OfType<TurnCompleted>());
         Assert.Equal(2, provider.RequestCount);
+    }
+
+    [Fact]
+    [Trait("Category", "SdkContract")]
+    public async Task LocalTurnsReuseNativeHistoryWithoutCrossConversationOrCloudLeakage()
+    {
+        using var data = IsolatedDirectory.Create();
+        using var databaseFile = IsolatedDatabaseFile.Create();
+        var store = new SqliteConversationStore(await CreateDatabaseAsync(databaseFile.Path), new TestClock());
+        await using var localProvider = await FakeOpenAiProvider.StartAsync();
+        await using var cloudProvider = await FakeOpenAiProvider.StartAsync();
+        var engine = CreateEngine(
+            store,
+            localProvider.BaseUrl,
+            cloudProvider.BaseUrl,
+            Path.Combine(data.Path, "runtime"));
+        var firstConversation = ConversationId.New();
+        var firstTurn = await CreateTurnAsync(store, firstConversation);
+        var firstEvents = await CollectAsync(engine.RunTurnAsync(
+            CreateRequest(firstTurn, ProviderKind.Local, "JARVIS_FIRST_LOCAL_TURN", conversationId: firstConversation),
+            CancellationToken.None));
+        Assert.Single(firstEvents.OfType<TurnCompleted>());
+
+        var secondTurn = await CreateTurnAsync(store, firstConversation);
+        var secondRequest = CreateRequest(
+            secondTurn, ProviderKind.Local, "JARVIS_SECOND_LOCAL_TURN", conversationId: firstConversation);
+        secondRequest = secondRequest with
+        {
+            Context = secondRequest.Context with
+            {
+                Items =
+                [
+                    new ContextItem("history:user", "JARVIS_FIRST_LOCAL_TURN", "LocalOnly", "user"),
+                    new ContextItem("history:assistant", "streamed fixture answer", "LocalOnly", "assistant"),
+                    secondRequest.Context.Items[^1]
+                ]
+            }
+        };
+        var secondEvents = await CollectAsync(engine.RunTurnAsync(
+            secondRequest,
+            CancellationToken.None));
+        Assert.Single(secondEvents.OfType<TurnCompleted>());
+
+        var otherConversation = ConversationId.New();
+        var otherTurn = await CreateTurnAsync(store, otherConversation);
+        var otherEvents = await CollectAsync(engine.RunTurnAsync(
+            CreateRequest(otherTurn, ProviderKind.Local, "JARVIS_OTHER_CONVERSATION", conversationId: otherConversation),
+            CancellationToken.None));
+        Assert.Single(otherEvents.OfType<TurnCompleted>());
+
+        var cloudFirst = await CreateTurnAsync(store, firstConversation);
+        var cloudFirstEvents = await CollectAsync(engine.RunTurnAsync(
+            CreateRequest(cloudFirst, ProviderKind.Cloud, "JARVIS_CLOUD_FIRST", conversationId: firstConversation),
+            CancellationToken.None));
+        Assert.Single(cloudFirstEvents.OfType<TurnCompleted>());
+        var cloudSecond = await CreateTurnAsync(store, firstConversation);
+        var cloudSecondEvents = await CollectAsync(engine.RunTurnAsync(
+            CreateRequest(cloudSecond, ProviderKind.Cloud, "JARVIS_CLOUD_SECOND", conversationId: firstConversation),
+            CancellationToken.None));
+        Assert.Single(cloudSecondEvents.OfType<TurnCompleted>());
+
+        var localRequests = localProvider.Requests.ToArray();
+        Assert.Equal(3, localRequests.Length);
+        Assert.Equal(
+            new[] { "system", "user", "assistant", "user" },
+            ReadRoles(localRequests[1].Body));
+        Assert.Contains("JARVIS_FIRST_LOCAL_TURN", localRequests[1].Body, StringComparison.Ordinal);
+        Assert.Contains("JARVIS_SECOND_LOCAL_TURN", localRequests[1].Body, StringComparison.Ordinal);
+        Assert.DoesNotContain("<current_datetime>", localRequests[1].Body, StringComparison.Ordinal);
+        Assert.Equal(new[] { "system", "user" }, ReadRoles(localRequests[2].Body));
+        Assert.DoesNotContain("JARVIS_FIRST_LOCAL_TURN", localRequests[2].Body, StringComparison.Ordinal);
+
+        var cloudRequests = cloudProvider.Requests.ToArray();
+        Assert.Equal(2, cloudRequests.Length);
+        Assert.Equal(new[] { "system", "user" }, ReadRoles(cloudRequests[1].Body));
+        Assert.DoesNotContain("JARVIS_CLOUD_FIRST", cloudRequests[1].Body, StringComparison.Ordinal);
+        Assert.DoesNotContain("JARVIS_FIRST_LOCAL_TURN", cloudRequests[1].Body, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [Trait("Category", "SdkContract")]
+    public async Task PinnedRuntimeReportsMissingSessionBeforeInference()
+    {
+        using var data = IsolatedDirectory.Create();
+        await using var provider = await FakeOpenAiProvider.StartAsync();
+        var home = Path.Combine(data.Path, "runtime");
+        var workspace = Path.Combine(data.Path, "workspace");
+        Directory.CreateDirectory(home);
+        Directory.CreateDirectory(workspace);
+        await using var client = CreateSdkClient(home, workspace);
+        await client.StartAsync();
+        var exception = await Assert.ThrowsAsync<IOException>(() =>
+            client.ResumeSessionAsync($"missing-{Guid.NewGuid():N}", new ResumeSessionConfig
+            {
+                Model = "fixture-model",
+                Provider = new ProviderConfig { Type = "openai", BaseUrl = provider.BaseUrl },
+                AvailableTools = []
+            }));
+        var rpc = Assert.IsType<RemoteRpcException>(exception.InnerException);
+        Assert.Equal(-32603, rpc.ErrorCode);
+        Assert.Contains("Session not found", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(provider.Requests);
+    }
+
+    [Fact]
+    [Trait("Category", "SdkContract")]
+    public async Task MissingLocalSessionRebuildsSelectedHistoryAndProcessesCurrentTurnExactlyOnce()
+    {
+        using var data = IsolatedDirectory.Create();
+        using var databaseFile = IsolatedDatabaseFile.Create();
+        var store = new SqliteConversationStore(await CreateDatabaseAsync(databaseFile.Path), new TestClock());
+        await using var provider = await FakeOpenAiProvider.StartAsync();
+        var runtimeDirectory = Path.Combine(data.Path, "runtime");
+        var engine = CreateEngine(store, provider.BaseUrl, provider.BaseUrl, runtimeDirectory);
+        var conversationId = ConversationId.New();
+        var firstTurn = await CreateTurnAsync(store, conversationId);
+        var firstEvents = await CollectAsync(engine.RunTurnAsync(
+            CreateRequest(firstTurn, ProviderKind.Local, "JARVIS_DURABLE_FIRST_TURN", conversationId: conversationId),
+            CancellationToken.None));
+        Assert.Single(firstEvents.OfType<TurnCompleted>());
+
+        var sessionRuntime = Path.Combine(
+            runtimeDirectory,
+            $"conversation-{conversationId.Value:N}",
+            "local",
+            "runtime");
+        Directory.Delete(sessionRuntime, recursive: true);
+        var recoveredTurn = await CreateTurnAsync(store, conversationId);
+        var recoveredRequest = CreateRequest(
+            recoveredTurn,
+            ProviderKind.Local,
+            "JARVIS_RECOVERED_CURRENT_TURN",
+            conversationId: conversationId) with
+        {
+            Context = new ContextPacket(
+                "recovery-packet",
+                "policy-test",
+                [
+                    new ContextItem("history:user", "JARVIS_DURABLE_FIRST_TURN", "LocalOnly", "user"),
+                    new ContextItem("history:assistant", "streamed fixture answer", "LocalOnly", "assistant"),
+                    new ContextItem("request:current", "JARVIS_RECOVERED_CURRENT_TURN", "LocalOnly", "user")
+                ],
+                new ContextEstimate(0, 0, 0, 0, 0, 0, 0, 0, 8192, 0, false, false, "fixture estimate"))
+        };
+        var recoveredEvents = await CollectAsync(engine.RunTurnAsync(recoveredRequest, CancellationToken.None));
+
+        Assert.Single(recoveredEvents.OfType<TurnCompleted>());
+        Assert.Equal("session_state_missing", Assert.Single(recoveredEvents.OfType<RuntimeContextRebuilt>()).ReasonCode);
+        var recoveredRequestBody = provider.Requests.Last().Body;
+        Assert.Contains("JARVIS_DURABLE_FIRST_TURN", recoveredRequestBody, StringComparison.Ordinal);
+        Assert.Contains("streamed fixture answer", recoveredRequestBody, StringComparison.Ordinal);
+        Assert.Contains("JARVIS_RECOVERED_CURRENT_TURN", recoveredRequestBody, StringComparison.Ordinal);
+        Assert.Equal(2, provider.RequestCount);
+        Assert.Equal(TurnStatus.Completed, (await store.GetTurnAsync(recoveredTurn, CancellationToken.None))?.Status);
+    }
+
+    [Fact]
+    [Trait("Category", "SdkContract")]
+    public async Task FailedReadyCheckpointPersistsInterruptionInsteadOfContradictingDurableSuccess()
+    {
+        using var data = IsolatedDirectory.Create();
+        var store = new SqliteConversationStore(await CreateDatabaseAsync(Path.Combine(data.Path, "jarvis.db")), new TestClock());
+        await using var provider = await FakeOpenAiProvider.StartAsync();
+        provider.PauseInference = true;
+        var runtimeDirectory = Path.Combine(data.Path, "runtime");
+        var engine = CreateEngine(store, provider.BaseUrl, provider.BaseUrl, runtimeDirectory);
+        var conversation = ConversationId.New();
+        var turn = await CreateTurnAsync(store, conversation);
+        var execution = CollectAsync(engine.RunTurnAsync(
+            CreateRequest(turn, ProviderKind.Local, "CHECKPOINT_FAILURE", conversationId: conversation),
+            CancellationToken.None));
+        await provider.InferenceStalled.Task.WaitAsync(TimeSpan.FromSeconds(15));
+        var sessionDirectory = Path.Combine(runtimeDirectory, $"conversation-{conversation.Value:N}", "local");
+        using (var marker = JsonDocument.Parse(await File.ReadAllTextAsync(
+            Path.Combine(sessionDirectory, ".jarvis-copilot-session.json"))))
+        {
+            Assert.Equal("pending", marker.RootElement.GetProperty("State").GetString());
+        }
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(sessionDirectory, ".jarvis-copilot-session.json.tmp"));
+        }
+        finally
+        {
+            provider.ContinueInference.TrySetResult();
+        }
+        var events = await execution.WaitAsync(TimeSpan.FromSeconds(15));
+        Assert.Equal("session_checkpoint_failed", Assert.Single(events.OfType<TurnInterrupted>()).ReasonCode);
+        Assert.Empty(events.OfType<TurnCompleted>());
+        Assert.Equal(TurnStatus.Interrupted, (await store.GetTurnAsync(turn, CancellationToken.None))!.Status);
+        Assert.DoesNotContain(await store.ReadRecentAsync(conversation, 10, CancellationToken.None),
+            message => message.Role == "assistant");
+        Assert.False(Directory.Exists(sessionDirectory));
+        Assert.Single(provider.Requests);
+    }
+
+    [Fact]
+    [Trait("Category", "SdkContract")]
+    public async Task LocalSessionReuseStopsEachOwnedRuntimeAndRecordsLaunchLatencyAndMemory()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var data = IsolatedDirectory.Create();
+        var store = new SqliteConversationStore(await CreateDatabaseAsync(Path.Combine(data.Path, "jarvis.db")), new TestClock());
+        await using var provider = await FakeOpenAiProvider.StartAsync();
+        provider.PauseInference = true;
+        var engine = CreateEngine(store, provider.BaseUrl, provider.BaseUrl, Path.Combine(data.Path, "runtime"));
+        var conversation = ConversationId.New();
+        var history = new List<ContextItem>();
+        var launches = new HashSet<int>();
+        for (var index = 0; index < 2; index++)
+        {
+            var turnId = await CreateTurnAsync(store, conversation);
+            var request = CreateRequest(turnId, ProviderKind.Local, $"MEASURED_REQUEST_{index}", conversationId: conversation);
+            request = request with { Context = request.Context with { Items = history.Append(request.Context.Items[^1]).ToArray() } };
+            var before = GetProcessIds();
+            var elapsed = Stopwatch.StartNew();
+            var firstDeltaMilliseconds = -1L;
+            async Task<List<AgentEvent>> RunAsync()
+            {
+                var events = new List<AgentEvent>();
+                await foreach (var item in engine.RunTurnAsync(request, CancellationToken.None))
+                {
+                    if (item is TextDelta && firstDeltaMilliseconds < 0)
+                    {
+                        firstDeltaMilliseconds = elapsed.ElapsedMilliseconds;
+                    }
+                    events.Add(item);
+                }
+                return events;
+            }
+
+            var execution = RunAsync();
+            await provider.InferenceStalled.Task.WaitAsync(TimeSpan.FromSeconds(15));
+            using var runtime = await FindNewRuntimeProcessAsync(before);
+            launches.Add(runtime.Id);
+            var workingSet = runtime.WorkingSet64;
+            provider.ContinueInference.TrySetResult();
+            var events = await execution.WaitAsync(TimeSpan.FromSeconds(15));
+            Assert.Single(events.OfType<TurnCompleted>());
+            await runtime.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.True(runtime.HasExited);
+            Assert.True(firstDeltaMilliseconds >= 0);
+            output.WriteLine($"turn={index + 1}; runtimePid={runtime.Id}; workingSetBytes={workingSet}; firstDeltaMs={firstDeltaMilliseconds}; elapsedMs={elapsed.ElapsedMilliseconds}");
+            history.Add(request.Context.Items[^1] with { SourceId = $"history:user:{index}" });
+            history.Add(new ContextItem("history:assistant", "streamed fixture answer", "LocalOnly", "assistant"));
+            provider.InferenceStalled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            provider.ContinueInference = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        }
+
+        Assert.Equal(2, launches.Count);
+        Assert.Equal(new[] { "system", "user", "assistant", "user" }, ReadRoles(provider.Requests.Last().Body));
+        output.WriteLine("Two turns reused one persisted Local conversation, with two independent runtime launches and no surviving owned runtime.");
+    }
+
+    [Fact]
+    [Trait("Category", "SdkContract")]
+    public async Task LocalSessionCacheEvictsIdleAndExcessSessions()
+    {
+        using var data = IsolatedDirectory.Create();
+        using var databaseFile = IsolatedDatabaseFile.Create();
+        var store = new SqliteConversationStore(await CreateDatabaseAsync(databaseFile.Path), new TestClock());
+        await using var provider = await FakeOpenAiProvider.StartAsync();
+        var runtimeDirectory = Path.Combine(data.Path, "runtime");
+        var staleDirectory = string.Empty;
+        for (var index = 0; index < 34; index++)
+        {
+            var conversationId = ConversationId.New();
+            var checkpoint = await CreateTurnAsync(store, conversationId);
+            var sessionDirectory = Path.Combine(
+                runtimeDirectory,
+                $"conversation-{conversationId.Value:N}",
+                "local");
+            Directory.CreateDirectory(sessionDirectory);
+            var lastUsedUtc = index < 2 ? Now.AddDays(-31) : Now;
+            await File.WriteAllTextAsync(
+                Path.Combine(sessionDirectory, ".jarvis-copilot-session.json"),
+                JsonSerializer.Serialize(new
+                {
+                    SessionId = $"jarvis-local-{conversationId.Value:N}",
+                    State = "ready",
+                    LastUsedUtc = lastUsedUtc,
+                    LastTurnId = checkpoint.Value
+                }));
+            if (index == 0)
+            {
+                staleDirectory = Directory.GetParent(sessionDirectory)!.FullName;
+            }
+        }
+
+        var engine = CreateEngine(store, provider.BaseUrl, provider.BaseUrl, runtimeDirectory);
+        var currentConversation = ConversationId.New();
+        var turnId = await CreateTurnAsync(store, currentConversation);
+        var events = await CollectAsync(engine.RunTurnAsync(
+            CreateRequest(turnId, ProviderKind.Local, "session cache bound", conversationId: currentConversation),
+            CancellationToken.None));
+
+        Assert.Single(events.OfType<TurnCompleted>());
+        Assert.False(Directory.Exists(staleDirectory));
+        Assert.Equal(
+            32,
+            Directory.EnumerateDirectories(runtimeDirectory, "conversation-*").Count());
+    }
+
+    [Fact]
+    [Trait("Category", "SdkContract")]
+    public async Task MaintenancePreservesActiveSessionAndRemovesIdleCopyWithoutAnotherTurn()
+    {
+        using var data = IsolatedDirectory.Create();
+        var clock = new AdjustableClock(Now);
+        var database = await CreateDatabaseAsync(Path.Combine(data.Path, "jarvis.db"));
+        var store = new SqliteConversationStore(database, clock);
+        await using var provider = await FakeOpenAiProvider.StartAsync();
+        var runtimeDirectory = Path.Combine(data.Path, "runtime");
+        var engine = new CopilotAgentEngine(store, new RecordingDispatcher(new ToolDispatchResult("Succeeded", "{}", null)),
+            clock, new CopilotAgentEngineOptions(runtimeDirectory, new CopilotProviderOptions("fixture-model", new Uri(provider.BaseUrl)), null));
+        var completedConversation = ConversationId.New();
+        var completedTurn = await CreateTurnAsync(store, completedConversation);
+        Assert.Single((await CollectAsync(engine.RunTurnAsync(
+            CreateRequest(completedTurn, ProviderKind.Local, "IDLE_HISTORY", conversationId: completedConversation),
+            CancellationToken.None))).OfType<TurnCompleted>());
+        clock.UtcNow = Now.AddDays(31);
+        provider.PauseInference = true;
+        var activeConversation = ConversationId.New();
+        var activeTurn = await CreateTurnAsync(store, activeConversation);
+        var execution = CollectAsync(engine.RunTurnAsync(
+            CreateRequest(activeTurn, ProviderKind.Local, "ACTIVE_HISTORY", conversationId: activeConversation),
+            CancellationToken.None));
+        await provider.InferenceStalled.Task.WaitAsync(TimeSpan.FromSeconds(15));
+        try
+        {
+            await engine.CleanupAsync(CancellationToken.None);
+            Assert.True(Directory.Exists(Path.Combine(runtimeDirectory, $"conversation-{activeConversation.Value:N}")));
+        }
+        finally
+        {
+            provider.ContinueInference.TrySetResult();
+        }
+        Assert.Single((await execution.WaitAsync(TimeSpan.FromSeconds(15))).OfType<TurnCompleted>());
+        Assert.False(Directory.Exists(Path.Combine(runtimeDirectory, $"conversation-{completedConversation.Value:N}")));
+        clock.UtcNow = Now.AddDays(62);
+        var requestCount = provider.RequestCount;
+        await engine.CleanupAsync(CancellationToken.None);
+        Assert.Empty(Directory.EnumerateDirectories(runtimeDirectory, "conversation-*"));
+        Assert.Equal(requestCount, provider.RequestCount);
+    }
+
+    [Fact]
+    [Trait("Category", "SdkContract")]
+    public async Task SessionMaintenanceRemovesCopiesAfterAuthoritativeConversationRetention()
+    {
+        using var data = IsolatedDirectory.Create();
+        var clock = new AdjustableClock(Now);
+        var database = await CreateDatabaseAsync(Path.Combine(data.Path, "jarvis.db"));
+        var store = new SqliteConversationStore(database, clock);
+        await using var provider = await FakeOpenAiProvider.StartAsync();
+        var runtimeDirectory = Path.Combine(data.Path, "runtime");
+        var engine = new CopilotAgentEngine(store, new RecordingDispatcher(new ToolDispatchResult("Succeeded", "{}", null)),
+            clock, new CopilotAgentEngineOptions(runtimeDirectory, new CopilotProviderOptions("fixture-model", new Uri(provider.BaseUrl)), null));
+        var conversation = ConversationId.New();
+        var turn = await CreateTurnAsync(store, conversation);
+        Assert.Single((await CollectAsync(engine.RunTurnAsync(
+            CreateRequest(turn, ProviderKind.Local, "RETAINED_HISTORY", conversationId: conversation),
+            CancellationToken.None))).OfType<TurnCompleted>());
+        clock.UtcNow = Now.AddDays(2);
+        var retention = new SqliteRetentionService(database, clock, new SqliteRetentionOptions(1, 1));
+        await retention.CleanupExpiredAsync(CancellationToken.None);
+        Assert.Null(await store.GetTurnAsync(turn, CancellationToken.None));
+        await engine.CleanupAsync(CancellationToken.None);
+        Assert.Empty(Directory.EnumerateDirectories(runtimeDirectory, "conversation-*"));
+        Assert.Single(provider.Requests);
+    }
+
+    private sealed class AdjustableClock(DateTimeOffset now) : IClock
+    {
+        public DateTimeOffset UtcNow { get; set; } = now;
     }
 
     private static CopilotAgentEngine CreateEngine(
@@ -842,21 +1499,72 @@ public sealed class CopilotAgentEngineContractTests
                 new CopilotProviderOptions("fixture-model", new Uri(localBaseUrl)),
                 new CopilotProviderOptions("fixture-model", new Uri(cloudBaseUrl))));
 
+    private static CopilotClient CreateSdkClient(string runtimeHome, string workspace)
+    {
+        var temporaryDirectory = Path.Combine(runtimeHome, "tmp");
+        Directory.CreateDirectory(temporaryDirectory);
+        return new CopilotClient(new CopilotClientOptions
+        {
+            Mode = CopilotClientMode.Empty,
+            BaseDirectory = runtimeHome,
+            WorkingDirectory = workspace,
+            UseLoggedInUser = false,
+            LogLevel = CopilotLogLevel.None,
+            Environment = new Dictionary<string, string>
+            {
+                ["HOME"] = runtimeHome,
+                ["USERPROFILE"] = runtimeHome,
+                ["TMPDIR"] = temporaryDirectory,
+                ["TMP"] = temporaryDirectory,
+                ["TEMP"] = temporaryDirectory,
+                ["XDG_CONFIG_HOME"] = Path.Combine(runtimeHome, "config"),
+                ["XDG_CACHE_HOME"] = Path.Combine(runtimeHome, "cache")
+            }
+        });
+    }
+
+    private static SessionConfig CreateSdkSession(string sessionId, string baseUrl, string model) =>
+        new()
+        {
+            SessionId = sessionId,
+            Model = model,
+            Provider = new ProviderConfig { Type = "openai", BaseUrl = baseUrl },
+            AvailableTools = [],
+            EnableSessionStore = false,
+            InfiniteSessions = new InfiniteSessionConfig { Enabled = false },
+            SystemMessage = new SystemMessageConfig
+            {
+                Mode = SystemMessageMode.Replace,
+                Content = "Answer the current synthetic test request briefly."
+            }
+        };
+
+    private static IReadOnlyList<string?> ReadRoles(string body)
+    {
+        using var json = JsonDocument.Parse(body);
+        return json.RootElement.GetProperty("messages")
+            .EnumerateArray()
+            .Select(message => message.GetProperty("role").GetString())
+            .ToArray();
+    }
+
     private static AgentTurnRequest CreateRequest(
         TurnId turnId,
         ProviderKind provider,
         string marker,
         IReadOnlyList<AgentToolDefinition>? tools = null,
         TimeSpan? deadline = null,
-        CancellationToken deadlineCancellationToken = default) =>
+        CancellationToken deadlineCancellationToken = default,
+        ConversationId? conversationId = null) =>
         new(
             turnId,
+            conversationId ?? new ConversationId(turnId.Value),
             provider,
             "Use only the selected context and registered tools.",
             new ContextPacket(
                 $"packet-{marker}",
                 "policy-test",
-                [new ContextItem("fixture", marker, "LocalOnly", "user")],
+                [new ContextItem("request:current", marker, "LocalOnly", "user")],
                 new ContextEstimate(0, 0, 0, 0, 0, 0, 0, 0, 8192, 0, false, false, "fixture estimate")),
             tools ?? [],
             deadline ?? TimeSpan.FromSeconds(60),
@@ -870,10 +1578,17 @@ public sealed class CopilotAgentEngineContractTests
         return database;
     }
 
-    private static async Task<TurnId> CreateTurnAsync(IConversationStore store)
+    private static async Task<TurnId> CreateTurnAsync(
+        IConversationStore store,
+        ConversationId? conversationId = null)
     {
         var turnId = TurnId.New();
-        await store.CreateTurnAsync(turnId, ConversationId.New(), TurnStatus.Received, Now, CancellationToken.None);
+        await store.CreateTurnAsync(
+            turnId,
+            conversationId ?? new ConversationId(turnId.Value),
+            TurnStatus.Received,
+            Now,
+            CancellationToken.None);
         return turnId;
     }
 

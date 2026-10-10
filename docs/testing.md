@@ -57,7 +57,18 @@ model setting and are outside the required CI selectors.
 
 Required credential-free regressions check the exact provider-bound prompt
 through the actual runtime, including no SDK date wrapper, no packet/private
-provenance metadata and quoted ordered history. Live observations cover the
+provenance metadata, quoted ordered reconstructed history and native resumed
+user/assistant history with streaming. Actual-runtime coordinator regressions
+cover missing/corrupt SDK state, offline SQLite restore, message-count,
+oversized-answer and estimated-token history selection boundaries. Maintenance
+contracts exercise active-path preservation, idle cleanup and orphan deletion
+after authoritative retention without new inference.
+Compaction capability contracts prove observable summaries across resume and
+exercise the experimental public manual RPC: its token-limit argument does not
+reject oversized summaries. These are capability evidence, not safe production
+compaction or summary-quality validation. See the
+[M1-04 record](tasks/M1-04-reusable-copilot-conversations.md).
+Live observations cover the
 tested installed model versions only, not correctness across arbitrary models,
 unbounded transcripts or byte-identical Ollama GUI output.
 

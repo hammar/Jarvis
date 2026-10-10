@@ -11,6 +11,7 @@ public sealed class ApplicationContractTests
     public void AgentTurnContractCarriesHostSelectedProviderContextToolsAndLimits()
     {
         var turnId = TurnId.New();
+        var conversationId = ConversationId.New();
         var context = new ContextPacket(
             "packet-1",
             "policy-1",
@@ -20,6 +21,7 @@ public sealed class ApplicationContractTests
         using var deadlineCancellation = new CancellationTokenSource();
         var request = new AgentTurnRequest(
             turnId,
+            conversationId,
             ProviderKind.Cloud,
             "Summarize the selected context.",
             context,
@@ -30,6 +32,7 @@ public sealed class ApplicationContractTests
         var result = new AgentTurnResult(TurnStatus.Interrupted, null, "engine_timeout");
 
         Assert.Equal(turnId, request.TurnId);
+        Assert.Equal(conversationId, request.ConversationId);
         Assert.Equal(ProviderKind.Cloud, request.Provider);
         Assert.Equal("approved text", request.Context.Items[0].Text);
         Assert.Equal("read_state", request.Tools[0].Name);

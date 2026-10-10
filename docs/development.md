@@ -71,8 +71,12 @@ actual Copilot runtime through production Local/Hybrid composition against
 strict completion paths; startup-only checks are not inference evidence.
 
 Local chat preserves the application-owned current question instead of the
-SDK's default date/XML wrapper. Earlier history is explicitly quoted and
-labelled as context, not sent as an opaque provenance packet. Validate a model
+SDK's default date/XML wrapper on create and resume. Tool-free Local turns reuse
+native SDK history only when it matches the host-selected SQLite context.
+Reconstruction quotes/labels earlier history instead of sending an opaque
+provenance packet. Each turn still launches its own runtime. Working copies are
+private, bounded and replaceable; production compaction remains disabled pending
+M1-04 context-budget enforcement. Validate a model
 with the opt-in [Local chat comparison](testing.md#local-chat-model-comparison);
 passing controlled-provider tests alone does not establish live model quality.
 Restart the host after updating binaries. Existing accounts/history remain;

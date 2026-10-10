@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -59,11 +60,13 @@ public sealed class LiveOllamaChatTests(ITestOutputHelper output)
             var context = await builder.BuildAsync(new ContextBuildRequest(conversation, ProviderKind.Local, task,
                 Instructions, [], submitted.UserMessageId), CancellationToken.None);
             var events = new List<AgentEvent>();
-            await foreach (var item in engine.RunTurnAsync(new AgentTurnRequest(submitted.Turn.Id, ProviderKind.Local,
+            var engineTurn = Stopwatch.StartNew();
+            await foreach (var item in engine.RunTurnAsync(new AgentTurnRequest(submitted.Turn.Id, conversation, ProviderKind.Local,
                 Instructions, context, [], TimeSpan.FromSeconds(120), 0), CancellationToken.None))
             {
                 events.Add(item);
             }
+            engineTurn.Stop();
             Assert.Single(events.OfType<TurnCompleted>());
             var answer = (await store.ReadRecentAsync(conversation, 1, CancellationToken.None)).Single().Content.Trim();
             output.WriteLine($"{model}: {task}; engine={answer}; expected={expected}");
@@ -72,6 +75,7 @@ public sealed class LiveOllamaChatTests(ITestOutputHelper output)
                 failures.Add($"{task}: expected {expected}, received {answer}");
             }
             var raw = captured.Last();
+            output.WriteLine($"SDK turn elapsed: {engineTurn.ElapsedMilliseconds} ms; provider request size: {raw.Length} characters.");
             output.WriteLine($"Synthetic SDK request: {raw}");
             var replay = JsonNode.Parse(raw)!.AsObject();
             replay["stream"] = false;

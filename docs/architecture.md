@@ -86,9 +86,17 @@ privacy labels remain in the application packet. Host instructions distinguish
 answering a user request from granting it authority over policy or capabilities.
 The Copilot adapter uses the pinned SDK's user-prompt-transformed hook to
 preserve that bounded prompt without unsolicited date/XML wrappers. SDK
-sessions remain disposable per turn. This SDK pin has no public assistant-role
-history seeding API; reconstructed history is labelled text, not native chat
-messages. This preserves selected conversation context without replaying
+clients/runtimes remain disposable per turn. Tool-free Local sessions may resume
+private conversation-bound disk history when a Completed SQLite checkpoint and
+the exact selected role/text/privacy history and compatibility settings match.
+Otherwise they reconstruct bounded labelled history; this SDK pin has no
+established public assistant-role seeding API. Resumed turns submit only the
+current request and retain native user/assistant roles. Cloud and tool-bearing
+sessions always start fresh. Production compaction is disabled pending safe
+host-budget accounting, not treated as satisfied by reconstruction. See the
+[proposed lifecycle ADR](adr/0004-local-copilot-working-state.md) and
+[M1-04 acceptance record](tasks/M1-04-reusable-copilot-conversations.md).
+This preserves selected conversation context without replaying
 previous inference. It does not promise identical bytes to the Ollama GUI,
 which can use different prompts, generation settings and context windows.
 

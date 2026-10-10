@@ -28,13 +28,15 @@ internal sealed class FakeOpenAiProvider : IAsyncDisposable
     public bool FailInference { get; set; }
     public bool StallInference { get; set; }
     public bool PauseInference { get; set; }
+    public int? ReportPromptTokens { get; set; }
+    public Func<string, string>? ResponseContentSelector { get; set; }
     public string? StreamingContent { get; set; }
     public int StreamingDeltaCount { get; set; }
     public string? RedirectUrl { get; set; }
     public string? ExpectedApiPath { get; set; }
     public string? ExpectedToolResult { get; set; } = "fixture-result:fixture-key";
-    public TaskCompletionSource InferenceStalled { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
-    public TaskCompletionSource ContinueInference { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public TaskCompletionSource InferenceStalled { get; set; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public TaskCompletionSource ContinueInference { get; set; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     public TaskCompletionSource StreamingResponseWritten { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     public static Task<FakeOpenAiProvider> StartAsync()
@@ -183,11 +185,12 @@ internal sealed class FakeOpenAiProvider : IAsyncDisposable
         using var requestJson = JsonDocument.Parse(body);
         if (requestJson.RootElement.TryGetProperty("stream", out var stream) && stream.GetBoolean())
         {
-            await WriteStreamingResponseAsync(context.Response, StreamingContent, StreamingDeltaCount);
+            var selectedContent = StreamingContent ?? ResponseContentSelector?.Invoke(body);
+            await WriteStreamingResponseAsync(context.Response, selectedContent, StreamingDeltaCount);
             return;
         }
 
-        var answer = "Controlled denied-tool fixture completed.";
+        var answer = ResponseContentSelector?.Invoke(body) ?? "Controlled denied-tool fixture completed.";
         if (ExpectedToolResult is not null && toolNames.Length > 0)
         {
             var returnedResults = requestJson.RootElement.GetProperty("messages").EnumerateArray()
@@ -202,14 +205,33 @@ internal sealed class FakeOpenAiProvider : IAsyncDisposable
             }
             answer = returnedResults[0].GetProperty("content").GetString()!;
         }
-        await WriteJsonAsync(context.Response, JsonSerializer.Serialize(new
+        var completion = new Dictionary<string, object?>
         {
-            id = "chatcmpl-jarvis-final",
-            @object = "chat.completion",
-            created = 0,
-            model = "fixture-model",
-            choices = new[] { new { index = 0, message = new { role = "assistant", content = answer }, finish_reason = "stop" } },
-        }));
+            ["id"] = "chatcmpl-jarvis-final",
+            ["object"] = "chat.completion",
+            ["created"] = 0,
+            ["model"] = "fixture-model",
+            ["choices"] = new[]
+            {
+                new
+                {
+                    index = 0,
+                    message = new { role = "assistant", content = answer },
+                    finish_reason = "stop"
+                }
+            }
+        };
+        if (ReportPromptTokens is int promptTokens)
+        {
+            completion["usage"] = new
+            {
+                prompt_tokens = promptTokens,
+                completion_tokens = 1,
+                total_tokens = promptTokens + 1
+            };
+        }
+
+        await WriteJsonAsync(context.Response, JsonSerializer.Serialize(completion));
     }
 
     private async Task WriteStreamingResponseAsync(
