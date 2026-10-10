@@ -301,3 +301,39 @@ an advisory TokenLimit cannot enforce untrusted summary size. Using a new
 provider-interception boundary, changing the context contract, or refreshing SDK
 APIs would be material design work requiring compatibility/policy validation,
 not a quick fallback. No such architectural change or scope waiver is inferred.
+
+## Reviewed correction revision and remaining shutdown verification
+
+Independent scoped fix review at
+`25d890b51a6e13a360566394d8b0366e19794b81` independently ran 11 targeted
+integration/actual-runtime checks, found no new high-confidence defect and
+recommended Fixed for R03, ordinary/worker R06, R07 and R08. It retained Fixed
+recommendations for R01, the original R02 bypass and R05, and retained original
+prompt R1 as Not applicable. It left R04 open solely for full-engine
+failed-shutdown verification. Production compaction A6 remains blocking.
+
+Linux aarch64 core gates at that exact revision passed: build, unit96,
+integration196, architecture6, SDK46 plus standalone harness, coverage and
+docs. Current-revision logs/reports are under `artifacts/m104-linux/current-*`.
+No Linux Aspire/browser execution or hosted CI is claimed.
+
+The subsequent `ActualRuntimeDelayedShutdownPreservesStateBlocksReuseThenMaintenanceDeletesWithoutInference`
+regression fills R04's engine-level gap. An internal constructor seam supplies
+the same shutdown component with a controlled completion delay; it is not
+exposed through public configuration, DI, HTTP or model input. The first actual
+runtime turn is Interrupted after bounded cleanup times out, its private state
+survives maintenance, same-conversation reuse rejects without another provider
+request, and completion permits no-inference maintenance deletion. A later
+fresh turn completes. Actual SDK process stop/disposal still run; the test does
+not simulate SDK compatibility. This targeted check passed.
+
+After that regression, native `tools/validate.sh build`, integration197,
+architecture6, coverage and docs passed. Changed executable coverage is
+318/328 (97.0%); Infrastructure 2765/2971 lines and 687/881 branches.
+The prior SDK46/standalone result predates the constructor seam; fresh SDK/Linux
+and narrow independent R04 review remain pending.
+
+R01–R08 remain in the cumulative record, including every earlier verification
+gap and fix. No owner acceptance or merge decision is inferred. Final readiness
+is still blocked by A6 and any outstanding final-revision checks, not by an
+unsubstantiated claim that green capability tests make compaction safe.

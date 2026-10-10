@@ -37,6 +37,7 @@ public sealed class CopilotAgentEngine : IAgentEngine, IEngineStateMaintenance
     private readonly CopilotAgentEngineOptions options;
     private readonly ISecretResolver? secretResolver;
     private readonly CopilotTurnStateMachine stateMachine;
+    private readonly Func<CopilotClient, CopilotClientShutdown>? shutdownFactory;
     private readonly ConcurrentDictionary<TurnId, CopilotActiveTurn> activeTurns = new();
     private readonly ConcurrentDictionary<ConversationId, TurnId> activeConversations = new();
     private readonly ConcurrentDictionary<ConversationId, CopilotActiveTurn> unresolvedRuntimeCleanups = new();
@@ -71,13 +72,25 @@ public sealed class CopilotAgentEngine : IAgentEngine, IEngineStateMaintenance
         ArgumentException.ThrowIfNullOrWhiteSpace(options.RuntimeDirectory);
     }
 
+    internal CopilotAgentEngine(
+        IConversationStore conversations,
+        IToolDispatcher dispatcher,
+        IClock clock,
+        CopilotAgentEngineOptions options,
+        ISecretResolver? secretResolver,
+        Func<CopilotClient, CopilotClientShutdown> shutdownFactory)
+        : this(conversations, dispatcher, clock, options, secretResolver)
+    {
+        this.shutdownFactory = shutdownFactory ?? throw new ArgumentNullException(nameof(shutdownFactory));
+    }
+
     /// <inheritdoc />
     public async IAsyncEnumerable<AgentEvent> RunTurnAsync(
         AgentTurnRequest request,
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
         ValidateRequest(request);
-        var active = new CopilotActiveTurn(request.MaximumToolCalls);
+        var active = new CopilotActiveTurn(request.MaximumToolCalls, shutdownFactory);
         if (!await sessionOwnership.WaitAsync(CleanupTimeout))
         {
             throw new TimeoutException("Conversation runtime ownership could not be acquired.");

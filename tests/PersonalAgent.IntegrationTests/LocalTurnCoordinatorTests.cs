@@ -17,6 +17,88 @@ public sealed class LocalTurnCoordinatorTests
 {
     private static readonly DateTimeOffset Now = new(2026, 10, 6, 12, 0, 0, TimeSpan.Zero);
 
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task ActualRuntimeDelayedShutdownPreservesStateBlocksReuseThenMaintenanceDeletesWithoutInference()
+    {
+        using var directory = IsolatedDirectory.Create();
+        var clock = new MutableClock(Now);
+        var database = new SqliteDatabase(Path.Combine(directory.Path, "jarvis.db"));
+        await database.InitializeAsync();
+        var store = new SqliteConversationStore(database, clock);
+        await using var provider = await FakeOpenAiProvider.StartAsync();
+        var runtimeDirectory = Path.Combine(directory.Path, "runtime");
+        var releaseShutdown = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        CopilotClientShutdown? shutdown = null;
+        var runtimeCount = 0;
+        var engine = new CopilotAgentEngine(store, new RejectingToolDispatcher(), clock,
+            new CopilotAgentEngineOptions(runtimeDirectory,
+                new CopilotProviderOptions("fixture-model", new Uri(provider.BaseUrl)), null), null,
+            client => Interlocked.Increment(ref runtimeCount) == 1
+                ? shutdown = new CopilotClientShutdown(
+                async () =>
+                {
+                    await client.ForceStopAsync();
+                    await releaseShutdown.Task;
+                },
+                () => client.DisposeAsync().AsTask(),
+                TimeSpan.FromMilliseconds(50))
+                : new CopilotClientShutdown(client.ForceStopAsync, () => client.DisposeAsync().AsTask()));
+        var conversation = ConversationId.New();
+        var first = TurnId.New();
+        await store.CreateTurnAsync(first, conversation, TurnStatus.Received, Now, CancellationToken.None);
+        var events = new List<AgentEvent>();
+        try
+        {
+            await foreach (var item in engine.RunTurnAsync(Request(first), CancellationToken.None))
+            {
+                events.Add(item);
+            }
+            Assert.Single(events.OfType<TurnInterrupted>());
+            Assert.Empty(events.OfType<TurnCompleted>());
+            Assert.Equal(TurnStatus.Interrupted, (await store.GetTurnAsync(first, CancellationToken.None))!.Status);
+            Assert.True(Directory.Exists(Path.Combine(runtimeDirectory, $"conversation-{conversation.Value:N}")));
+            await engine.CleanupAsync(CancellationToken.None);
+            Assert.True(Directory.Exists(Path.Combine(runtimeDirectory, $"conversation-{conversation.Value:N}")));
+            var blocked = TurnId.New();
+            await store.CreateTurnAsync(blocked, conversation, TurnStatus.Received, Now, CancellationToken.None);
+            await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            {
+                await foreach (var _ in engine.RunTurnAsync(Request(blocked), CancellationToken.None))
+                {
+                }
+            });
+            Assert.Single(provider.Requests);
+        }
+        finally
+        {
+            releaseShutdown.TrySetResult();
+            if (shutdown is not null)
+            {
+                await shutdown.StopAsync();
+            }
+        }
+        await engine.CleanupAsync(CancellationToken.None);
+        Assert.Empty(Directory.EnumerateDirectories(runtimeDirectory, "conversation-*"));
+        Assert.Single(provider.Requests);
+        var next = TurnId.New();
+        await store.CreateTurnAsync(next, conversation, TurnStatus.Received, Now, CancellationToken.None);
+        events.Clear();
+        await foreach (var item in engine.RunTurnAsync(Request(next), CancellationToken.None))
+        {
+            events.Add(item);
+        }
+        Assert.Single(events.OfType<TurnCompleted>());
+        Assert.Equal(2, provider.RequestCount);
+
+        AgentTurnRequest Request(TurnId id) => new(id, conversation, ProviderKind.Local,
+            "Answer the synthetic request briefly.",
+            new ContextPacket("fixture", "fixture",
+                [new ContextItem("request:current", "CURRENT_REQUEST", "LocalOnly", "user")],
+                new ContextEstimate(0, 0, 0, 0, 0, 0, 0, 0, 8192, 0, false, false, "fixture")),
+            [], TimeSpan.FromSeconds(15), 0);
+    }
+
     [Theory]
     [InlineData("message-count", 8, 0)]
     [InlineData("oversized-answer", 2, 8001)]
