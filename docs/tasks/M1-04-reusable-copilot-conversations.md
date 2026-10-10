@@ -216,6 +216,10 @@ needs an engine-level uncertain-shutdown regression. A6 remains blocking.
 | --- | --- | --- |
 | M104-R07 | High | Previously missed: directory deletion in the terminal finally could throw before output completion, stranding enumeration/ownership. Fixed after `f3c0bba`: unconditional channel completion preserves cleanup exceptions. Helper deletion failure and full-engine pre-claim failure regressions pass; independently verified at 25d890b. Full engine/coordinator directory-deletion failure injection remains unexercised, not claimed by the helper test. |
 | M104-R08 | Medium | Previously missed: delayed successful shutdown stayed protected forever unless the same conversation submitted another turn. Fixed after `f3c0bba`: maintenance reconciles confirmed shutdown under the gate, removing ownership only after successful deletion. Helper timeout/completion/active/deletion-failure regressions independently verified at 25d890b; full-engine delayed completion added at 10cc799. |
+| M104-R09 | Low | Public metadata truncation claims were logged but not regression-asserted. | Fix added after 46c88d1: assert truncated user label, no content field, compaction count and positive message-token attribution for both summary cases. Verification below. |
+| M104-R10 | Low | Compaction documentation did not qualify the single prior exchange tested. | Fixed after 46c88d1: ADR explicitly limits the observation to one prior user/assistant exchange and discloses untested multi-exchange retention patterns. |
+| M104-R11 | Low | Summary-versus-wrapper length assertion is weak by itself. | Not applicable as a defect: it asserts a necessary accounting distinction in conjunction with exact retained source, summary equality, framing tags and emitted role assertions. It is not used as production enforcement or a complete context estimator. |
+| M104-R12 | Low | New compaction capability evidence lacked a numbered finding row. | Not applicable as a missing defect row: capability evidence is not itself a review finding. All observations from this review, including this ledger concern, are now explicitly retained as R09-R12. |
 
 Round-2 recommendations do not erase earlier findings or verification gaps.
 The original six rows above retain their history; the original prompt R1 is
@@ -431,3 +435,27 @@ Earlier substantiated reviews and the complete R01-R08 ledger remain intact.
 No new production behavior, configuration, dependencies or acceptance waiver
 was introduced. Linux/coverage/E2E results above remain attributed to10cc799,
 not claimed as rerun for these test-only additions. A6 remains blocking.
+
+## Substantiated public-state review at 46c88d1
+
+A second, narrowly scoped independent review compared exact `46c88d1` with
+`b418793`, read the cumulative ledger and independently executed the two manual
+compaction cases;2/2 passed. It verified the five asserted properties: full
+summary wrapper exceeds returned summary, original user retained, original
+assistant absent, public archive retains both, provider roles system/user/user.
+No production change or A6 waiver was recommended.
+
+Its four nonblocking observations are retained as R09-R12 above, including
+the suggestion and ledger concern. Added explicit metadata assertions and
+qualified the ADR's single-exchange coverage. The review also described
+matching captured-request output, but the final test no longer logs that body;
+that extra claim is not relied upon. Its command/result and assertion analysis,
+rather than an unsupported log identity claim, establish independent evidence.
+No review omission erases a previous finding or accepts residual risk.
+
+With the R09 assertions and R10 documentation correction, the targeted
+actual-runtime manual-compaction cases passed2/2; `tools/validate.sh docs` and
+`git diff --check` passed. These are the verifying checks for R09/R10.
+No full runtime or platform-suite rerun is claimed for this test/documentation
+delta. Production transport, compaction policy and context selection remain
+unchanged, with A6 blocked on the material owner decision.

@@ -259,6 +259,18 @@ public sealed class CopilotAgentEngineContractTests(ITestOutputHelper output)
         Assert.True(summaryPrompt.Length > summary.Length + "Remember the synthetic number 42.".Length);
         Assert.Contains("<user_message>", summaryPrompt, StringComparison.Ordinal);
         Assert.Contains("<summary>", summaryPrompt, StringComparison.Ordinal);
+        using var heaviestJson = JsonDocument.Parse(JsonSerializer.Serialize(heaviest));
+        var heaviestMessage = Assert.Single(heaviestJson.RootElement.GetProperty("messages").EnumerateArray());
+        var label = heaviestMessage.GetProperty("label").GetString();
+        Assert.NotNull(label);
+        Assert.StartsWith("user: ", label, StringComparison.Ordinal);
+        Assert.True(label.Length < summaryPrompt.Length);
+        Assert.DoesNotContain(summary, label, StringComparison.Ordinal);
+        Assert.False(heaviestMessage.TryGetProperty("content", out _));
+        using var attributionJson = JsonDocument.Parse(JsonSerializer.Serialize(attribution));
+        var attributionContext = attributionJson.RootElement.GetProperty("contextAttribution");
+        Assert.Equal(1, attributionContext.GetProperty("compactions").GetProperty("count").GetInt32());
+        Assert.True(attributionContext.GetProperty("categories").GetProperty("messages").GetInt64() > 0);
     }
 #pragma warning restore GHCP001
 

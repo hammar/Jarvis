@@ -71,11 +71,16 @@ reported as compaction, and A6 remains incomplete.
 
 Further public-state experiments show that `SummaryContent` is not the complete
 compacted provider message. The runtime wraps it with original user instructions
-and additional framing; the first original request survives even when its
-assistant answer is removed. `GetEventsAsync` retains the original user and
+and additional framing; in the tested single prior exchange, the original
+request survives even when its assistant answer is removed. Multi-exchange
+retention patterns have not been established by this experiment.
+`GetEventsAsync` retains the original user and
 assistant events after compaction rather than exposing only active model
 context. Context attribution/heaviest-message APIs return counts and truncated
-labels, not the full message text. Neither the event archive nor the summary
+labels, not the full message text in these tested cases. Label truncation,
+absence of a content field, positive message-token attribution and the
+compaction count are regression-asserted; these metadata shapes do not
+establish a hard pre-provider context boundary. Neither the event archive nor the summary
 alone is therefore a validated substitute for the complete compacted request.
 
 Further work must establish enforceable summary/retained-context accounting
