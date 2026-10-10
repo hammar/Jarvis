@@ -133,14 +133,14 @@ despite observable runtime capability evidence.
 | --- | --- |
 | A1 | Pinned-runtime native history, disk resume, separate model/provider-switch contracts, exact missing-state error and automatic/manual compaction contracts. Manual compaction RPC is experimental and its token limit is advisory. |
 | A2 | Tool-free Local provider messages have native system/user/assistant/user ordering on matched resume; separate conversations are isolated. Reconstruction uses labelled text, not native assistant-role seeding. |
-| A3 | Earlier authorized Gemma/Llama synthetic comparisons passed; final rerun is pending in this record. Prompt preservation and streaming apply on resume. |
+| A3 | Authorized Gemma3:4b and llama3.2:latest synthetic engine/exact-replay/native-role comparisons each pass3/3 at 10cc799. Prompt preservation and streaming apply on resume. No universal model/GUI output claim. |
 | A4 | Two successive controlled turns reused one disk conversation but launched two separate runtimes, both verified exited. One native macOS sample measured 1,180/221 ms to first delta, 1,232/252 ms total and 95,977,472/92,651,520 working-set bytes. No launch saving or universal speed claim. Active/idle/orphan maintenance contracts pass. |
-| A5 | Production coordinator reconstructs missing SDK state, corrupt marker and offline SQLite restore with one new request, deduplication and no rolled-back content. Checkpoint-write failure is Interrupted without a committed answer. Remaining cleanup/race review evidence is not complete. |
+| A5 | Production coordinator reconstructs missing SDK state, corrupt marker and offline SQLite restore with one new request, deduplication and no rolled-back content. Checkpoint-write failure is Interrupted without a committed answer. Contested registration and delayed actual-runtime shutdown regressions pass; independent fix dispositions are recorded below. |
 | A6 | Automatic compaction emits observed events and resumes a summary. Manual public RPC returns summary/context metrics, but accepts a 144,022-character summary with 18,088 current tokens despite TokenLimit 8,192 and sends it onward. Safe production budget/privacy accounting is not established; compaction remains disabled and this criterion is unmet. |
-| A7 | Cloud/tool turns remain fresh. Configuration/history changes reset Local state. Credential/configuration-change and adversarial resumed-tool coverage still require final review. |
-| A8 | Production coordinator and required HTTP/SSE integration pass; process/browser gate evidence is being refreshed. |
-| A9 | Current native build, unit, integration, architecture, SDK, docs and coverage results below. Current Linux execution remains unrun; prior prompt-correction Linux evidence does not validate this change. |
-| A10 | Proposed ADR and affected docs updated. Full cumulative ledger retained below. Exact-revision independent review and final dispositions remain required. |
+| A7 | Cloud/tool turns remain fresh. Configuration/history changes reset Local state. Actual-runtime configuration invalidation and unadvertised resumed bash denial pass; scoped independent review found no new defect. No live cloud or household execution is claimed. |
+| A8 | Production coordinator and required HTTP/SSE integration pass; Aspire API E2E7 on both platforms and native browser23 plus deliberately failing discovery probe pass at 10cc799. |
+| A9 | Native and Linux aarch64 core gates pass at the revisions recorded below; Aspire API E2E7 passes on both at 10cc799. Native browser23 and both authorized local-model reruns pass. No hosted CI or Linux browser result is claimed. |
+| A10 | Proposed ADR and affected docs updated. Full cumulative ledger retained below; independent reviews recommend Fixed for R01-R08, with R02 limited to its original history bypass. A6 remains unresolved and no owner scope/risk acceptance is inferred. |
 
 No schema changes. `AgentTurnRequest` now requires durable `ConversationId`;
 the coordinator supplies it. `RuntimeContextRebuilt` is a typed, persisted
@@ -191,12 +191,12 @@ disposition; no finding is removed because a later round omits it.
 
 | Ref | Severity | Finding | Current disposition/evidence |
 | --- | --- | --- | --- |
-| M104-R01 | Medium | Missing SDK state failed the current request rather than rebuilding as the owner chose. | Fix implemented; exact-runtime missing-state and production coordinator recovery pass. Pending final revision review. |
-| M104-R02 | High | Resumed native history bypassed host context selection/bounds. | Checkpointed selected-history matching and production compaction disabled; real coordinator count/token/oversized-answer boundaries pass. A6 unresolved; pending final review. |
-| M104-R03 | High | Pruning snapshots raced registration/concurrent pruning. | Shared ownership gate implemented; active-path maintenance test passes. Deterministic contested-registration coverage/final review remain. |
-| M104-R04 | High | Failure cleanup deleted state while runtime shutdown remained uncertain. | Deletion guarded by confirmed shutdown; unresolved ownership blocks reuse. Dedicated failed-shutdown path regression/final review remain. |
-| M104-R05 | High | Ready state did not validate SQLite continuity after restore. | Completed-turn and selected-history checkpoint implemented; offline restore excludes rolled-back context. Ready-marker ordering corrected with write-failure regression. Pending final review. |
-| M104-R06 | Medium | Idle/orphan copies were cleaned only on new inference. | Startup/hourly maintenance and orphan checkpoint validation implemented; idle/no-inference/retention tests pass. Hosted worker failure-path review remains. |
+| M104-R01 | Medium | Missing SDK state failed the current request rather than rebuilding as the owner chose. | Fixed; exact-runtime missing-state and production coordinator recovery pass. Independent recommendation at f3c0bba retained at 25d890b/10cc799. |
+| M104-R02 | High | Resumed native history bypassed host context selection/bounds. | Fixed for original bypass through selected-history matching and disabled production compaction; real coordinator count/token/oversized-answer boundaries pass. Independent recommendation at f3c0bba retained at 25d890b/10cc799. This does not resolve A6. |
+| M104-R03 | High | Pruning snapshots raced registration/concurrent pruning. | Fixed; shared ownership gate and deterministic contested-registration regression. Independently verified at 25d890b. |
+| M104-R04 | High | Failure cleanup deleted state while runtime shutdown remained uncertain. | Fixed; confirmed-shutdown guard, blocked reuse, and full-engine delayed actual-runtime shutdown regression at 10cc799. Independent targeted test1/1 and recommendation at that exact revision; limitations below. |
+| M104-R05 | High | Ready state did not validate SQLite continuity after restore. | Fixed; Completed-turn/history checkpoint, offline restore and ready-marker write-failure regressions. Independent recommendation at f3c0bba retained at 25d890b/10cc799. |
+| M104-R06 | Medium | Idle/orphan copies were cleaned only on new inference. | Fixed; startup/hourly idle/orphan/retention and hosted worker failure paths. Independently verified at 25d890b. |
 
 Prior prompt-reliability finding **R1 — Not applicable** and its rationale remain
 in [the original cumulative record](local-chat-prompt-reliability.md#independent-review-finding-ledger).
@@ -214,8 +214,8 @@ needs an engine-level uncertain-shutdown regression. A6 remains blocking.
 
 | Ref | Severity | Finding and disposition |
 | --- | --- | --- |
-| M104-R07 | High | Previously missed: directory deletion in the terminal finally could throw before output completion, stranding enumeration/ownership. Fix implemented after `f3c0bba`: production cleanup uses unconditional channel completion while preserving the exception. `FailedDirectoryCleanupClosesOutputAndPreservesFailure` dynamically injects deletion failure into that production helper and verifies the reader terminates. Full engine/coordinator deletion-failure injection remains unexercised; independent fix review pending. |
-| M104-R08 | Medium | Previously missed: delayed successful shutdown stayed protected forever unless the same conversation submitted another turn. Fix implemented after `f3c0bba`: maintenance reconciles deferred ownership under the gate, removing it only after shutdown confirmation and successful directory deletion. `DeferredShutdownMaintenancePreservesUncertainOwnershipThenDeletesWithoutInference` exercises timeout, later shutdown completion, active preservation, deletion failure retaining ownership and successful removal. Independent fix review pending. |
+| M104-R07 | High | Previously missed: directory deletion in the terminal finally could throw before output completion, stranding enumeration/ownership. Fixed after `f3c0bba`: unconditional channel completion preserves cleanup exceptions. Helper deletion failure and full-engine pre-claim failure regressions pass; independently verified at 25d890b. Full engine/coordinator directory-deletion failure injection remains unexercised, not claimed by the helper test. |
+| M104-R08 | Medium | Previously missed: delayed successful shutdown stayed protected forever unless the same conversation submitted another turn. Fixed after `f3c0bba`: maintenance reconciles confirmed shutdown under the gate, removing ownership only after successful deletion. Helper timeout/completion/active/deletion-failure regressions independently verified at 25d890b; full-engine delayed completion added at 10cc799. |
 
 Round-2 recommendations do not erase earlier findings or verification gaps.
 The original six rows above retain their history; the original prompt R1 is
@@ -337,3 +337,53 @@ R01–R08 remain in the cumulative record, including every earlier verification
 gap and fix. No owner acceptance or merge decision is inferred. Final readiness
 is still blocked by A6 and any outstanding final-revision checks, not by an
 unsubstantiated claim that green capability tests make compaction safe.
+
+## Shutdown review and refreshed evidence at 10cc799
+
+Committed shutdown seam/regression revision:
+`10cc7990e6b5ea2083b60c49109621a5e3145a2b`. Independent narrow review compared
+this exact commit with `25d890b`, read the entire cumulative ledger, executed
+the new actual-runtime integration test1/1, recommended R04 Fixed and found no
+new concrete finding. The internal seam has no public configuration, DI, HTTP
+or model-input activation; production shutdown defaults are unchanged.
+
+The deliberate delay starts after real `ForceStopAsync` returns and before
+disposal. It proves uncertain shutdown completion, preserved state, blocked
+reuse and later no-inference maintenance cleanup, not a genuinely hung OS
+process or permanent SDK shutdown failure. Existing bounded shutdown helper
+tests cover timeout/failure behavior within their stated limits. Original
+prompt R1 remains Not applicable; no finding is erased or residual risk accepted.
+
+At this exact revision, native `tools/validate.sh sdk-contracts` passed the
+standalone actual-runtime harness and SDK46/46; `tools/validate.sh aspire-e2e`
+passed7/7 with discovery. Linux aarch64 core build, unit96, integration197,
+architecture6, SDK46 plus standalone, coverage and docs all passed using the
+same scripts, pins and isolated container procedure described above.
+Linux Aspire API E2E also passed7/7 with discovery, with its console evidence
+retained in `artifacts/m104-linux/final-aspire-e2e.log`.
+Core logs/TRX/coverage are under `artifacts/m104-linux/final-*`.
+
+Linux changed executable coverage is301/311 (96.8%) relative to the synthetic
+`0d9be55` baseline; the earlier native318/328 (97.0%) uses `origin/main` and
+therefore also includes the carried-forward prompt correction.
+Linux Infrastructure coverage is2765/2971 lines and686/881 branches.
+These counts are not averaged across platforms or attributed to E2E.
+Native `tools/validate.sh browser-e2e` passed23/23 with discovery and the
+deliberately failing gate probe; evidence is in `artifacts/m104-final-browser.log`.
+The earlier simulator-startup failure and its unestablished cause remain
+recorded above; this passing run does not retroactively diagnose it.
+`JARVIS_OLLAMA_MODEL=gemma3:4b` and `llama3.2:latest` runs of
+`dotnet test tests/PersonalAgent.SdkContractTests/PersonalAgent.SdkContractTests.csproj -c Release --no-restore --filter Category=LiveOllama --logger 'console;verbosity=minimal'`
+each passed3/3. Only previously authorized synthetic Local inputs were used.
+No hosted CI, Linux browser, Linux x64, live cloud or household evidence is
+claimed. Updated evidence documentation passed `tools/validate.sh docs`.
+
+Fetched `origin/main` again; it remains `305dbb7`. No merge/rebase was necessary.
+Nothing pushed, no PR created and no merge authorized.
+
+Re-presented the material A6 choice: validate a new Local-only full-request
+inference boundary, explicitly defer production compaction, or retain the
+blocker without changing transport. The owner was unavailable and no choice
+was made. Autonomous continuation is not approval to change accepted
+transport/privacy policy or waive A6. Production compaction stays disabled;
+this task remains incomplete pending that decision and its resulting evidence.
