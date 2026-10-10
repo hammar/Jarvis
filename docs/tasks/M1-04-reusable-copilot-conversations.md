@@ -124,14 +124,16 @@ do not claim implementation complete.
 
 ## Current implementation and acceptance status
 
-**Implementation in validation.** Owner-approved lifecycle/recovery and
+**Implemented and validated for the owner-approved scope.** Lifecycle/recovery and
 SDK-owned compaction decisions are recorded in
 [ADR 0004](../adr/0004-local-copilot-working-state.md). On 2026-10-10 the owner
 explicitly directed us to assume successful SDK auto-compaction, accept the
 observed upstream oversized-summary loss for separate reproduction, and not
 build a workaround. A6 therefore verifies real model-budget propagation,
 SDK-owned compaction and normal continuity, not an independent Jarvis summary
-accounting/gateway. This does not waive required checks or independent review.
+accounting/gateway. Required native/Linux core, native browser and independent
+review evidence is recorded below. No merge/hosted CI or live long-context
+readiness is claimed.
 
 | Criterion | Evidence and remaining limits |
 | --- | --- |
@@ -140,11 +142,11 @@ accounting/gateway. This does not waive required checks or independent review.
 | A3 | Authorized Gemma3:4b and llama3.2:latest synthetic engine/exact-replay/native-role comparisons each pass3/3 at 10cc799. Prompt preservation and streaming apply on resume. No universal model/GUI output claim. |
 | A4 | Two successive controlled turns reused one disk conversation but launched two separate runtimes, both verified exited. One native macOS sample measured 1,180/221 ms to first delta, 1,232/252 ms total and 95,977,472/92,651,520 working-set bytes. No launch saving or universal speed claim. Active/idle/orphan maintenance contracts pass. |
 | A5 | Production coordinator reconstructs missing SDK state, corrupt marker and offline SQLite restore with one new request, deduplication and no rolled-back content. Checkpoint-write failure is Interrupted without a committed answer. Contested registration and delayed actual-runtime shutdown regressions pass; independent fix dispositions are recorded below. |
-| A6 | Named-model configuration reaches real compaction with an 8,192 input-token budget, unlike ordinary ignored capability overrides. Tool-free Local production adapter enables automatic compaction, records safe metrics, cold-resumes a normal summary and preserves selection invalidation. The observed oversized-summary loss is explicitly accepted upstream reliance, not claimed fixed. Final gates/review pending. |
+| A6 | Named-model configuration reaches real compaction with an 8,192 input-token budget, unlike ordinary ignored capability overrides. Tool-free Local production adapter enables automatic compaction, records safe metrics, cold-resumes a normal summary and preserves selection invalidation. Native/Linux SDK55 and full integration206 pass at b0bcdaa; independent review substantiates scope. Oversized-summary loss is explicitly accepted upstream reliance, not claimed fixed. |
 | A7 | Cloud/tool turns remain fresh. Configuration/history changes reset Local state. Actual-runtime configuration invalidation and unadvertised resumed bash denial pass; scoped independent review found no new defect. No live cloud or household execution is claimed. |
 | A8 | Production coordinator and required HTTP/SSE integration pass; Aspire API E2E7 on both platforms and native browser23 plus deliberately failing discovery probe pass at 10cc799. |
-| A9 | Native and Linux aarch64 core gates pass at the revisions recorded below; Aspire API E2E7 passes on both at 10cc799. Native browser23 and both authorized local-model reruns pass. No hosted CI or Linux browser result is claimed. |
-| A10 | Accepted-direction ADR and affected docs updated. Full cumulative ledger retained below; independent reviews recommend Fixed for R01-R08, with R02 limited to its original history bypass. Final independent compaction review pending; owner acceptance is limited to the explicitly discussed SDK reliance, not all new risks. |
+| A9 | Native and Linux aarch64 core gates and Aspire7 pass at b0bcdaa; native canonical browser23 plus failure probe and both authorized bounded live comparisons pass. Changed lines378/388 (97.4%). No hosted CI or Linux browser result is claimed. |
+| A10 | Accepted-direction ADR and affected docs updated. Full cumulative ledger retained; exact b0bcdaa independently reviewed, prior dispositions retained and R13 fixed for documentation/acceptance claims. No native long-context support claim or settings consent inferred. |
 
 No schema changes. `AgentTurnRequest` now requires durable `ConversationId`;
 the coordinator supplies it. `RuntimeContextRebuilt` is a typed, persisted
@@ -580,3 +582,33 @@ Independent follow-up examined A3/A6 and the issue test plan, confirming the
 local allocation gap is an operational prerequisite, not a new mandatory live
 compaction test. R13 is therefore fixed for truthful docs/acceptance claims,
 while the environment remains unsuitable for long-context use until corrected.
+
+### Final gate closure and handoff
+
+Canonical `tools/validate.sh browser-e2e` completed23/23 with discovery and
+the deliberate failing probe correctly rejected. Evidence:
+`artifacts/m104-auto-final-browser-rerun.log`. This and the diagnostic23/23
+do not retrospectively explain the earlier stopped minimal-output run.
+All required applicable native scripts pass; Linux aarch64 core/Aspire also
+pass as recorded above. Final documentation/link checks and `git diff --check`
+pass. Scenario mappings in `docs/testing.md` include the new budget/compaction
+and cancellation regressions.
+
+Production reviewed revision is `b0bcdaa`; later commits only record evidence/
+scenario mappings. The coherent compaction slice exceeds the400-line review
+target primarily because of actual-runtime experiments, failure/continuity/
+cancellation regressions and truthful documentation (about100 production
+adapter lines). Dependencies and SQLite schema are unchanged.
+Application changes include `MaximumOutputTokens` context reservation and the
+safe `RuntimeContextCompacted` event, in addition to the earlier conversation
+identity/maintenance contracts. Exact temporary Linux source archives and
+helper script were removed; redacted reports/logs remain in ignored artifacts.
+
+Before final handoff `origin/main` was fetched again and remains305dbb7; no
+merge/rebase was necessary. Nothing pushed or merged and no PR created.
+Hosted CI, Linux browser/x64, live cloud/household/device execution and live
+long-context compaction remain unexercised; none is claimed. The existing
+native allocation4096 must be increased and verified before long-context use.
+Known SDK oversized-summary loss is owner-accepted for separate upstream repro.
+Every independent finding retains an explicit disposition; the owner retains
+the merge decision, not a manual code-certification obligation.
