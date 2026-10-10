@@ -58,6 +58,13 @@ Aspire dashboard is for local development; do not expose it publicly. The
 direct Web host command and the Local/Hybrid profile configuration are in
 [development guidance](docs/development.md).
 
+On first startup, copy the one-time bootstrap token from the Web host's local
+console into the setup page and choose an owner passphrase. The passphrase
+verifier, session-protection keys, conversations, and owner retention settings
+remain in the private data directory across restarts and application updates.
+See the [Web guide](src/PersonalAgent.Web/README.md) for session, API, and
+retention details.
+
 ## Validation
 
 Use `tools/validate.sh` on macOS/Linux. It relies on the pinned .NET SDK and

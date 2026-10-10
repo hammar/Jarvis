@@ -13,7 +13,7 @@ var web = builder.AddProject<Projects.PersonalAgent_Web>("personalagent-web", la
     .WithHttpEndpoint()
     .WithEnvironment("JARVIS_PROFILE", profile)
     .WithEnvironment("JARVIS_DATA_DIR", dataDirectory)
-    .WithHttpHealthCheck("/health/ready");
+    .WithHttpHealthCheck("/health/live");
 
 if (profile is "Simulator" or "E2E")
 {
@@ -25,12 +25,19 @@ if (profile is "Simulator" or "E2E")
         .WithEnvironment("JARVIS_CLOUD_SECRET_REFERENCE", string.Empty)
         .WithEnvironment("JARVIS_HOME_ASSISTANT_BASE_URL", string.Empty)
         .WithEnvironment("JARVIS_HOME_ASSISTANT_SECRET_REFERENCE", string.Empty);
+    if (profile == "E2E")
+    {
+        web.WithEnvironment(
+            "JARVIS_E2E_BOOTSTRAP_TOKEN",
+            builder.Configuration["JARVIS_E2E_BOOTSTRAP_TOKEN"] ?? "e2e-only-bootstrap-token");
+    }
 
     var simulatorModel = builder.AddProject<Projects.PersonalAgent_SimulatorEndpoints>(
             "simulator-model",
             launchProfileName: null)
         .WithHttpEndpoint()
         .WithEnvironment("JARVIS_SIMULATOR_KIND", "model")
+        .WithEnvironment("JARVIS_SIMULATOR_CONTROLS_ENABLED", profile == "E2E" ? "true" : "false")
         .WithHttpHealthCheck("/health/ready");
     var simulatorHome = builder.AddProject<Projects.PersonalAgent_SimulatorEndpoints>(
             "simulator-home-assistant",

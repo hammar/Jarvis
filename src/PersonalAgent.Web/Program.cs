@@ -6,12 +6,20 @@ using PersonalAgent.Application.TurnCoordination;
 using PersonalAgent.Domain;
 using PersonalAgent.Infrastructure.AgentEngine.Copilot;
 using PersonalAgent.Infrastructure.Persistence;
+using PersonalAgent.Web;
 
 var builder = WebApplication.CreateBuilder(args);
 
+const long maximumRequestBodyBytes = 65_536;
+builder.WebHost.ConfigureKestrel(options =>
+    options.Limits.MaxRequestBodySize = maximumRequestBodyBytes);
 builder.AddServiceDefaults();
 builder.Services.AddRazorPages();
 builder.Services.AddHealthChecks();
+builder.Services.AddProblemDetails(options =>
+    options.CustomizeProblemDetails = context =>
+        context.ProblemDetails.Extensions["correlationId"] = context.HttpContext.TraceIdentifier);
+builder.Services.AddSingleton<IProblemDetailsWriter, ApiProblemDetailsFallbackWriter>();
 
 var profile = builder.Configuration["JARVIS_PROFILE"] ?? "Local";
 if (profile is not ("Simulator" or "Local" or "Hybrid" or "E2E"))
@@ -34,17 +42,45 @@ var clock = new SystemClock();
 var localProvider = profile is "Simulator" or "E2E"
     ? ReadSimulatorProvider(builder.Configuration)
     : ReadLocalProvider(builder.Configuration);
+var retentionDefaults = ChatApi.ReadRetentionDefaults(builder.Configuration);
+var ownerStateStore = new SqliteOwnerStateStore(database);
+var effectiveRetention = await ownerStateStore.GetRetentionAsync(retentionDefaults, CancellationToken.None);
 var retentionOptions = new SqliteRetentionOptions(
-    ReadRetentionDays(builder.Configuration, "JARVIS_CONVERSATION_RETENTION_DAYS", 90),
-    ReadRetentionDays(builder.Configuration, "JARVIS_AUDIT_RETENTION_DAYS", 30));
-retentionOptions.Validate();
+    effectiveRetention.ConversationDays,
+    effectiveRetention.AuditDays);
 await new SqliteRetentionService(database, clock, retentionOptions).CleanupExpiredAsync(CancellationToken.None);
 
 builder.Services.AddSingleton(database);
 builder.Services.AddSingleton<IClock>(clock);
+builder.Services.AddSingleton(retentionDefaults);
+var e2eBootstrapToken = builder.Configuration["JARVIS_E2E_BOOTSTRAP_TOKEN"];
+if (profile != "E2E" && !string.IsNullOrWhiteSpace(e2eBootstrapToken))
+{
+    throw new InvalidOperationException("JARVIS_E2E_BOOTSTRAP_TOKEN is only permitted in the isolated E2E profile.");
+}
+
+builder.Services.AddOwnerAuthentication(dataDirectory);
 builder.Services.AddSingleton<IModelRouter, LocalOnlyModelRouter>();
 builder.Services.AddSingleton<IContextBuilder, ConversationContextBuilder>();
 builder.Services.AddSingleton(retentionOptions);
+builder.Services.AddSingleton<IOwnerAccountStore>(ownerStateStore);
+builder.Services.AddSingleton<IOwnerSettingsService>(ownerStateStore);
+builder.Services.AddSingleton<IHistoryRetentionStore>(
+    new SqliteRetentionService(database, clock, retentionOptions));
+builder.Services.AddSingleton<RetentionCleanupService>(services =>
+    new RetentionCleanupService(
+        services.GetRequiredService<IHistoryRetentionStore>(),
+        clock,
+        retentionDefaults,
+        TimeSpan.FromHours(1),
+        services.GetRequiredService<ILogger<RetentionCleanupService>>()));
+builder.Services.AddHostedService(services => services.GetRequiredService<RetentionCleanupService>());
+builder.Services.AddHealthChecks().AddCheck<RetentionCleanupService>("history-cleanup", tags: ["ready"]);
+builder.Services.AddSingleton<OwnerAuthenticationService>(services => new OwnerAuthenticationService(
+    services.GetRequiredService<IOwnerAccountStore>(),
+    services.GetRequiredService<Microsoft.AspNetCore.Identity.IPasswordHasher<OwnerIdentity>>(),
+    services.GetRequiredService<IClock>(),
+    profile == "E2E" ? e2eBootstrapToken : null));
 builder.Services.AddSingleton<IConversationStore, SqliteConversationStore>();
 builder.Services.AddSingleton<IAtomicTurnOutcomeStore>(services =>
     (IAtomicTurnOutcomeStore)services.GetRequiredService<IConversationStore>());
@@ -90,8 +126,71 @@ builder.Services.AddHealthChecks().AddCheck<LocalTurnReadinessHealthCheck>("loca
 
 var app = builder.Build();
 
+var authentication = app.Services.GetRequiredService<OwnerAuthenticationService>();
+if (!await authentication.IsOwnerConfiguredAsync(CancellationToken.None))
+{
+    Console.Error.WriteLine("Jarvis one-time owner bootstrap token (keep local; do not share):");
+    Console.Error.WriteLine(authentication.BootstrapToken);
+}
+
 app.UseStaticFiles();
 app.UseRouting();
+app.Use(async (context, next) =>
+{
+    context.Response.OnStarting(() =>
+    {
+        context.Response.Headers["X-Correlation-ID"] = context.TraceIdentifier;
+        return Task.CompletedTask;
+    });
+
+    if (context.Request.ContentLength is > maximumRequestBodyBytes)
+    {
+        context.Response.StatusCode = StatusCodes.Status413PayloadTooLarge;
+        await Microsoft.AspNetCore.Http.Results.Problem(
+            statusCode: StatusCodes.Status413PayloadTooLarge,
+            title: "Request exceeds the supported size.")
+            .ExecuteAsync(context);
+        return;
+    }
+
+    try
+    {
+        await next();
+    }
+    catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
+    {
+        throw;
+    }
+    catch (Exception error)
+    {
+        app.Logger.LogError(
+            "Request failed with {ErrorType}; correlation {CorrelationId}.",
+            error.GetType().Name,
+            context.TraceIdentifier);
+        if (context.Response.HasStarted || context.RequestAborted.IsCancellationRequested)
+        {
+            context.Abort();
+            return;
+        }
+
+        context.Response.Clear();
+        var status = error is BadHttpRequestException badRequest
+            ? badRequest.StatusCode
+            : StatusCodes.Status500InternalServerError;
+        await Results.Problem(
+            statusCode: status,
+            title: status == StatusCodes.Status500InternalServerError
+                ? "The request could not be completed."
+                : "The request could not be read.")
+            .ExecuteAsync(context);
+    }
+});
+app.UseStatusCodePages(async statusContext =>
+    await Results.Problem(statusCode: statusContext.HttpContext.Response.StatusCode)
+        .ExecuteAsync(statusContext.HttpContext));
+app.UseRateLimiter();
+app.UseAuthentication();
+app.UseAuthorization();
 app.MapRazorPages();
 app.MapHealthChecks("/health/live", new Microsoft.AspNetCore.Diagnostics.HealthChecks.HealthCheckOptions
 {
@@ -121,26 +220,11 @@ app.MapHealthChecks("/health/ready", new Microsoft.AspNetCore.Diagnostics.Health
             },
             cancellationToken: context.RequestAborted);
     }
-});
+}).RequireAuthorization();
 app.MapDefaultEndpoints();
+ChatApi.Map(app);
 
 app.Run();
-
-static int ReadRetentionDays(Microsoft.Extensions.Configuration.IConfiguration configuration, string key, int defaultValue)
-{
-    var configuredValue = configuration[key];
-    if (configuredValue is null)
-    {
-        return defaultValue;
-    }
-
-    if (int.TryParse(configuredValue, NumberStyles.None, CultureInfo.InvariantCulture, out var days))
-    {
-        return days;
-    }
-
-    throw new InvalidOperationException($"{key} must be an integer number of days.");
-}
 
 static CopilotProviderOptions? ReadLocalProvider(Microsoft.Extensions.Configuration.IConfiguration configuration)
 {
@@ -217,4 +301,24 @@ static int ReadBoundedSeconds(
 /// <summary>Exposes the generated entry point to in-process ASP.NET Core integration tests.</summary>
 public partial class Program
 {
+}
+
+// EventSource requests accept text/event-stream, but pre-stream failures still require
+// correlated JSON. The default writer otherwise declines these requests, bypassing customization.
+internal sealed class ApiProblemDetailsFallbackWriter(
+    Microsoft.Extensions.Options.IOptions<ProblemDetailsOptions> options) : IProblemDetailsWriter
+{
+    /// <inheritdoc />
+    public bool CanWrite(ProblemDetailsContext context) => !context.HttpContext.Response.HasStarted;
+
+    /// <inheritdoc />
+    public ValueTask WriteAsync(ProblemDetailsContext context)
+    {
+        options.Value.CustomizeProblemDetails?.Invoke(context);
+        return new ValueTask(context.HttpContext.Response.WriteAsJsonAsync(
+            context.ProblemDetails,
+            options: null,
+            contentType: "application/problem+json",
+            cancellationToken: context.HttpContext.RequestAborted));
+    }
 }

@@ -193,8 +193,10 @@ file, not a database container.
 `PersonalAgent.Infrastructure.Persistence` owns the SQLite file, forward-only
 schema migrations, FTS5 synchronization, and implementations of the
 Application storage contracts. Conversation storage includes messages, turns,
-and ordered event cursors; memory, jobs, approvals, action journals, and audit
-use separate storage operations. Web composition selects `JARVIS_DATA_DIR` (or
+ordered event cursors, and owner-scoped conversation queries; a separate owner
+state store persists the password verifier and validated retention values.
+Memory, jobs, approvals, action journals, and audit use separate storage
+operations. Web composition selects `JARVIS_DATA_DIR` (or
 the per-user LocalApplicationData `Jarvis` directory when unset). It reuses
 the previous AppHost `PersonalAgent` location only when that is the sole
 default database; if both default locations contain data, startup requires an
@@ -208,6 +210,11 @@ inside its own immediate transaction. Foreign keys are enabled per connection;
 WAL is enabled during startup. Apply pending upgrades to a SQLite backup copy
 before swapping application binaries. Schema downgrade is not automatic: a
 rollback restores a matched backup and prior binary.
+Migration 004 introduces one fixed owner-account row and a constrained
+key/value table for 1–3650-day history retention. The Web layer hashes the
+owner passphrase using ASP.NET Identity; Infrastructure persists only that
+verifier. ASP.NET Data Protection keys are stored below the owner-private data
+directory, separate from the database.
 
 `SqliteBackupRestoreService` uses SQLite's online backup facility and verifies
 integrity plus foreign keys. Restore first copies the backup, migrates and
@@ -217,9 +224,15 @@ remain open. Restore does not run jobs or replay an action, and preserves
 recorded `Unknown` action outcomes. Backups can retain logically deleted data;
 SQLite file-page secure erasure is not claimed.
 
-The Web host applies validated retention settings at startup:
+Trusted configuration supplies validated retention defaults at startup:
 `JARVIS_CONVERSATION_RETENTION_DAYS` defaults to 90 days and
 `JARVIS_AUDIT_RETENTION_DAYS` defaults to 30 days (each accepts 1–3650 days).
+The owner's saved SQLite value is authoritative across restarts and updates.
 Cleanup deletes old conversation roots and their dependent messages/turn
-events, and expired audit events. It does not purge durable memory facts,
+events only when every associated turn is `Completed`, `Failed`, or
+`Cancelled`, and expired audit events. Interrupted turns retain their
+conversation/recovery state under ADR 0003. Startup,
+settings updates, and a host-owned hourly cleanup worker apply the current
+effective values. The worker uses Application contracts and the Infrastructure
+store, while Web only composes it. Cleanup does not purge durable memory facts,
 jobs, actions, approvals, or uncertain outcomes.

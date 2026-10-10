@@ -1,5 +1,6 @@
 using System.Net.Http.Json;
 using System.Net;
+using System.Net.Http.Headers;
 using System.Text.Json;
 using Xunit;
 
@@ -101,12 +102,57 @@ public sealed class AspireSimulatorTests(SimulatorHostFixture fixture)
         Assert.Equal(
             "Controlled fixture response",
             completion.RootElement.GetProperty("choices")[0].GetProperty("message").GetProperty("content").GetString());
-        Assert.Contains("Controlled fixture response", streaming, StringComparison.Ordinal);
+        Assert.Contains("Controlled streaming ", streaming, StringComparison.Ordinal);
+        Assert.Contains("\"content\":\"response\"", streaming, StringComparison.Ordinal);
         Assert.EndsWith("data: [DONE]\n\n", streaming, StringComparison.Ordinal);
         Assert.Contains("Running the E2E profile.", page, StringComparison.Ordinal);
         Assert.Equal("controlled fixture response", JsonDocument.Parse(model).RootElement.GetProperty("completion").GetString());
         Assert.Equal(
             "light.simulator_lamp",
             JsonDocument.Parse(home).RootElement[0].GetProperty("entityId").GetString());
+    }
+
+    [Theory]
+    [InlineData(65_536, false, HttpStatusCode.Unauthorized)]
+    [InlineData(65_537, false, HttpStatusCode.RequestEntityTooLarge)]
+    [InlineData(64_000, true, HttpStatusCode.Unauthorized)]
+    [InlineData(65_537, true, HttpStatusCode.RequestEntityTooLarge)]
+    [Trait("Category", "AspireE2E")]
+    public async Task RequestSizeLimitAcceptsValidJsonAndRejectsOversizedBodies(
+        int bodyLength, bool chunked, HttpStatusCode expectedStatus)
+    {
+        const string json = "{\"passphrase\":\"incorrect-owner-passphrase\"}";
+        var body = System.Text.Encoding.UTF8.GetBytes(json.PadRight(bodyLength));
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/api/auth/login")
+        {
+            Content = chunked ? new UnknownLengthContent(body) : new ByteArrayContent(body)
+        };
+        request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+        request.Headers.TransferEncodingChunked = chunked;
+
+        using var response = await fixture.WebClient.SendAsync(request);
+
+        Assert.Equal(expectedStatus, response.StatusCode);
+        Assert.NotEmpty(response.Headers.GetValues("X-Correlation-ID"));
+    }
+
+    private sealed class UnknownLengthContent : HttpContent
+    {
+        private readonly byte[] bytes;
+
+        public UnknownLengthContent(byte[] bytes)
+        {
+            this.bytes = bytes;
+            Headers.ContentType = new MediaTypeHeaderValue("application/json");
+        }
+
+        protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context) =>
+            stream.WriteAsync(bytes, 0, bytes.Length);
+
+        protected override bool TryComputeLength(out long length)
+        {
+            length = 0;
+            return false;
+        }
     }
 }

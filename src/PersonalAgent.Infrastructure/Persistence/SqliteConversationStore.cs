@@ -32,6 +32,99 @@ public sealed class SqliteConversationStore : IConversationStore, IAtomicTurnOut
     }
 
     /// <inheritdoc />
+    public async ValueTask<ConversationRecord> CreateConversationAsync(
+        ConversationRecord conversation,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(conversation);
+        if (conversation.Id.Value == Guid.Empty)
+        {
+            throw new ArgumentException("Conversation identifier must be nonempty.", nameof(conversation));
+        }
+
+        ArgumentException.ThrowIfNullOrWhiteSpace(conversation.OwnerId);
+        ArgumentNullException.ThrowIfNull(conversation.Title);
+        if (conversation.OwnerId.Length > 128 || conversation.Title.Length > 200)
+        {
+            throw new ArgumentException("Conversation owner or title exceeds its supported length.", nameof(conversation));
+        }
+
+        var createdAt = SqliteValue.Utc(conversation.CreatedAtUtc);
+        var updatedAt = SqliteValue.Utc(conversation.UpdatedAtUtc);
+        await using var connection = await database.OpenConnectionWithDefaultTimeoutAsync(1, cancellationToken);
+        await using var transaction = await SqliteDatabase.BeginImmediateTransactionAsync(connection, cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            INSERT INTO conversations (id, owner_id, title, created_at_utc, updated_at_utc)
+            VALUES ($id, $owner, $title, $created, $updated);
+            """;
+        command.Parameters.AddWithValue("$id", SqliteValue.Guid(conversation.Id.Value));
+        command.Parameters.AddWithValue("$owner", conversation.OwnerId);
+        command.Parameters.AddWithValue("$title", conversation.Title);
+        command.Parameters.AddWithValue("$created", createdAt);
+        command.Parameters.AddWithValue("$updated", updatedAt);
+        await command.ExecuteNonQueryAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+        return conversation with
+        {
+            CreatedAtUtc = conversation.CreatedAtUtc.ToUniversalTime(),
+            UpdatedAtUtc = conversation.UpdatedAtUtc.ToUniversalTime()
+        };
+    }
+
+    /// <inheritdoc />
+    public async ValueTask<ConversationRecord?> GetConversationAsync(
+        ConversationId conversationId,
+        string ownerId,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(ownerId);
+        await using var connection = await database.OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT id, owner_id, title, created_at_utc, updated_at_utc
+            FROM conversations WHERE id = $id AND owner_id = $owner;
+            """;
+        command.Parameters.AddWithValue("$id", SqliteValue.Guid(conversationId.Value));
+        command.Parameters.AddWithValue("$owner", ownerId);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        return await reader.ReadAsync(cancellationToken) ? ReadConversation(reader) : null;
+    }
+
+    /// <inheritdoc />
+    public async ValueTask<IReadOnlyList<ConversationRecord>> ReadRecentConversationsAsync(
+        string ownerId,
+        int maximumConversations,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(ownerId);
+        if (maximumConversations is < 1 or > 1000)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maximumConversations), "The conversation limit must be from 1 through 1000.");
+        }
+
+        await using var connection = await database.OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT id, owner_id, title, created_at_utc, updated_at_utc
+            FROM conversations WHERE owner_id = $owner
+            ORDER BY updated_at_utc DESC, id
+            LIMIT $maximum;
+            """;
+        command.Parameters.AddWithValue("$owner", ownerId);
+        command.Parameters.AddWithValue("$maximum", maximumConversations);
+        var conversations = new List<ConversationRecord>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            conversations.Add(ReadConversation(reader));
+        }
+
+        return conversations;
+    }
+
+    /// <inheritdoc />
     public async ValueTask<ConversationMessage> AppendMessageAsync(
         ConversationMessage message,
         CancellationToken cancellationToken)
@@ -185,10 +278,26 @@ public sealed class SqliteConversationStore : IConversationStore, IAtomicTurnOut
             throw new ArgumentOutOfRangeException(nameof(submission), "Turn text exceeds the fixed local input limit.");
         }
 
+        ValidateRequiredOwner(submission.RequiredOwnerId, nameof(submission));
         var createdAtUtc = submission.CreatedAtUtc.ToUniversalTime();
         var createdAt = SqliteValue.Utc(createdAtUtc);
         await using var connection = await database.OpenConnectionWithDefaultTimeoutAsync(1, cancellationToken);
         await using var transaction = await SqliteDatabase.BeginImmediateTransactionAsync(connection, cancellationToken);
+
+        // The owner check shares the write lock with duplicate detection and insertion. Retention cannot delete the
+        // conversation between the check and the insert, so owner-scoped submissions never resurrect a deleted root.
+        if (submission.RequiredOwnerId is { } requiredOwner)
+        {
+            await using var ownerCheck = connection.CreateCommand();
+            ownerCheck.Transaction = transaction;
+            ownerCheck.CommandText = "SELECT owner_id FROM conversations WHERE id = $id;";
+            ownerCheck.Parameters.AddWithValue("$id", SqliteValue.Guid(submission.ConversationId.Value));
+            var storedOwner = await ownerCheck.ExecuteScalarAsync(cancellationToken) as string;
+            if (!string.Equals(storedOwner, requiredOwner, StringComparison.Ordinal))
+            {
+                throw new ConversationNotFoundException();
+            }
+        }
 
         await using (var existing = connection.CreateCommand())
         {
@@ -228,6 +337,21 @@ public sealed class SqliteConversationStore : IConversationStore, IAtomicTurnOut
                     Guid.Parse(reader.GetString(7)),
                     IsDuplicate: true);
                 await reader.DisposeAsync();
+                if (submission.RequiredOwnerId is not null)
+                {
+                    // An owner-scoped duplicate is re-acceptance: refresh retention activity under the same write
+                    // lock so cleanup cannot remove the conversation before the caller receives this turn.
+                    await using var touch = connection.CreateCommand();
+                    touch.Transaction = transaction;
+                    touch.CommandText = """
+                        UPDATE conversations SET updated_at_utc = $updated
+                        WHERE id = $id AND updated_at_utc < $updated;
+                        """;
+                    touch.Parameters.AddWithValue("$id", SqliteValue.Guid(submission.ConversationId.Value));
+                    touch.Parameters.AddWithValue("$updated", createdAt);
+                    await touch.ExecuteNonQueryAsync(cancellationToken);
+                }
+
                 await transaction.CommitAsync(cancellationToken);
                 return result;
             }
@@ -319,12 +443,15 @@ public sealed class SqliteConversationStore : IConversationStore, IAtomicTurnOut
         ConversationId conversationId,
         string clientRequestId,
         string requestFingerprint,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? requiredOwnerId = null)
     {
         if (conversationId.Value == Guid.Empty)
         {
             throw new ArgumentException("A nonempty conversation identifier is required.", nameof(conversationId));
         }
+
+        ValidateRequiredOwner(requiredOwnerId, nameof(requiredOwnerId));
 
         ArgumentException.ThrowIfNullOrWhiteSpace(clientRequestId);
         ArgumentException.ThrowIfNullOrWhiteSpace(requestFingerprint);
@@ -337,17 +464,32 @@ public sealed class SqliteConversationStore : IConversationStore, IAtomicTurnOut
 
         await using var connection = await database.OpenConnectionAsync(cancellationToken);
         await using var command = connection.CreateCommand();
+
+        // One statement reads ownership and the request key from the same snapshot, so a duplicate is never
+        // returned for a conversation that is missing or foreign at read time.
         command.CommandText = """
             SELECT t.id, t.conversation_id, t.status, t.created_at_utc, t.updated_at_utc,
-                t.version, t.request_fingerprint, m.message_id
-            FROM turns t
-            LEFT JOIN messages m ON m.turn_id = t.id AND m.role = 'user'
-            WHERE t.conversation_id = $conversation_id AND t.client_request_id = $request_id;
+                t.version, t.request_fingerprint, m.message_id, c.owner_id
+            FROM (SELECT $conversation_id AS id) requested
+            LEFT JOIN conversations c ON c.id = requested.id
+            LEFT JOIN turns t ON t.conversation_id = requested.id AND t.client_request_id = $request_id
+            LEFT JOIN messages m ON m.turn_id = t.id AND m.role = 'user';
             """;
         command.Parameters.AddWithValue("$conversation_id", SqliteValue.Guid(conversationId.Value));
         command.Parameters.AddWithValue("$request_id", clientRequestId);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
+        {
+            throw new InvalidOperationException("The request-key lookup returned no anchor row.");
+        }
+
+        if (requiredOwnerId is not null
+            && (reader.IsDBNull(8) || !string.Equals(reader.GetString(8), requiredOwnerId, StringComparison.Ordinal)))
+        {
+            throw new ConversationNotFoundException();
+        }
+
+        if (reader.IsDBNull(0))
         {
             return null;
         }
@@ -440,6 +582,63 @@ public sealed class SqliteConversationStore : IConversationStore, IAtomicTurnOut
         return await reader.ReadAsync(cancellationToken)
             ? ReadTurn(reader)
             : null;
+    }
+
+    /// <inheritdoc />
+    public async ValueTask<ConversationTurn?> GetTurnForOwnerAsync(
+        TurnId turnId,
+        string ownerId,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(ownerId);
+        await using var connection = await database.OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT turns.id, turns.conversation_id, turns.status,
+                turns.created_at_utc, turns.updated_at_utc, turns.version
+            FROM turns
+            INNER JOIN conversations ON conversations.id = turns.conversation_id
+            WHERE turns.id = $id AND conversations.owner_id = $owner;
+            """;
+        command.Parameters.AddWithValue("$id", SqliteValue.Guid(turnId.Value));
+        command.Parameters.AddWithValue("$owner", ownerId);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        return await reader.ReadAsync(cancellationToken) ? ReadTurn(reader) : null;
+    }
+
+    /// <inheritdoc />
+    public async ValueTask<IReadOnlyList<ConversationTurn>> ReadRecentTurnsForOwnerAsync(
+        string ownerId,
+        int maximumTurns,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(ownerId);
+        if (maximumTurns is < 1 or > 1000)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maximumTurns), "The turn limit must be from 1 through 1000.");
+        }
+
+        await using var connection = await database.OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT turns.id, turns.conversation_id, turns.status,
+                turns.created_at_utc, turns.updated_at_utc, turns.version
+            FROM turns
+            INNER JOIN conversations ON conversations.id = turns.conversation_id
+            WHERE conversations.owner_id = $owner
+            ORDER BY turns.updated_at_utc DESC, turns.id
+            LIMIT $maximum;
+            """;
+        command.Parameters.AddWithValue("$owner", ownerId);
+        command.Parameters.AddWithValue("$maximum", maximumTurns);
+        var turns = new List<ConversationTurn>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            turns.Add(ReadTurn(reader));
+        }
+
+        return turns;
     }
 
     /// <inheritdoc />
@@ -926,6 +1125,23 @@ public sealed class SqliteConversationStore : IConversationStore, IAtomicTurnOut
             SqliteValue.DateTimeOffset(reader.GetString(3)),
             SqliteValue.DateTimeOffset(reader.GetString(4)),
             reader.GetInt64(5));
+
+    private static void ValidateRequiredOwner(string? requiredOwnerId, string parameterName)
+    {
+        if (requiredOwnerId is not null
+            && (string.IsNullOrWhiteSpace(requiredOwnerId) || requiredOwnerId.Length > 128))
+        {
+            throw new ArgumentException("The required owner identifier is invalid.", parameterName);
+        }
+    }
+
+    private static ConversationRecord ReadConversation(SqliteDataReader reader) =>
+        new(
+            new ConversationId(System.Guid.Parse(reader.GetString(0))),
+            reader.GetString(1),
+            reader.GetString(2),
+            SqliteValue.DateTimeOffset(reader.GetString(3)),
+            SqliteValue.DateTimeOffset(reader.GetString(4)));
 
     private static bool CanTransition(TurnStatus current, TurnStatus next) =>
         (current, next) switch

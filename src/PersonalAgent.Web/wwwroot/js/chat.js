@@ -1,0 +1,580 @@
+const authSection = document.getElementById("auth");
+const chatSection = document.getElementById("chat");
+const errorBox = document.getElementById("error");
+const profile = document.getElementById("profile");
+const pendingTurnStorageKey = "jarvis.pending-turn.v1";
+let csrfToken = "";
+let conversationId = "";
+let activeTurnId = "";
+let activeTurnConversationId = "";
+let turnSubmissionInFlight = false;
+let conversationCreationInFlight = false;
+let authenticationInFlight = false;
+let pendingTurnSubmission = null;
+let conversationSelectionGeneration = 0;
+let eventSource = null;
+let bootstrapRequired = false;
+
+function showError(message) {
+    errorBox.textContent = message;
+    errorBox.hidden = false;
+}
+
+function clearError() {
+    errorBox.textContent = "";
+    errorBox.hidden = true;
+}
+
+function clearPendingTurn() {
+    try {
+        sessionStorage.removeItem(pendingTurnStorageKey);
+        pendingTurnSubmission = null;
+        return true;
+    } catch (error) {
+        showError(`The request could not be cleared from this tab's recovery state: ${error.message}`);
+        return false;
+    }
+}
+
+function setTurnNavigationLocked(locked) {
+    document.getElementById("new-conversation").disabled = locked;
+    document.getElementById("settings-button").disabled = locked;
+    document.getElementById("activity-button").disabled = locked;
+    document.getElementById("logout").disabled = locked;
+    for (const button of document.querySelectorAll("#conversation-list button")) {
+        button.disabled = locked;
+    }
+}
+
+async function csrf() {
+    const response = await fetch("/api/auth/csrf", { credentials: "same-origin" });
+    if (!response.ok) throw new Error("Could not establish request protection.");
+    csrfToken = (await response.json()).token;
+}
+
+function setAuthenticationMode(requiresBootstrap) {
+    bootstrapRequired = requiresBootstrap;
+    profile.textContent = bootstrapRequired ? "Create the local owner account." : "Sign in to your local assistant.";
+    document.getElementById("auth-title").textContent = bootstrapRequired ? "Set up owner account" : "Owner sign-in";
+    document.getElementById("bootstrap-token").hidden = !bootstrapRequired;
+    document.getElementById("bootstrap-token-label").hidden = !bootstrapRequired;
+    document.getElementById("passphrase").autocomplete = bootstrapRequired ? "new-password" : "current-password";
+    document.getElementById("auth-submit").textContent = bootstrapRequired ? "Create owner account" : "Sign in";
+}
+
+async function api(path, options = {}) {
+    const headers = new Headers(options.headers || {});
+    if (options.method && !["GET", "HEAD"].includes(options.method.toUpperCase())) {
+        headers.set("X-CSRF-TOKEN", csrfToken);
+    }
+    const response = await fetch(path, {
+        ...options,
+        headers,
+        credentials: "same-origin"
+    });
+    if (response.status === 401 && path !== "/api/auth/login") {
+        ++conversationSelectionGeneration;
+        chatSection.hidden = true;
+        authSection.hidden = true;
+        await csrf();
+        setAuthenticationMode(bootstrapRequired);
+        authSection.hidden = false;
+        const error = new Error("Please sign in again.");
+        error.status = 401;
+        throw error;
+    }
+    if (!response.ok) {
+        const body = await response.json().catch(() => null);
+        const error = new Error(body?.title || `Request failed (${response.status}).`);
+        error.status = response.status;
+        throw error;
+    }
+    const body = await response.text();
+    return body.length === 0 ? null : JSON.parse(body);
+}
+
+function renderMessages(messages) {
+    const list = document.getElementById("messages");
+    list.replaceChildren();
+    for (const message of messages) {
+        const item = document.createElement("li");
+        const label = document.createElement("strong");
+        label.textContent = message.role === "assistant" ? "Jarvis: " : "You: ";
+        const content = document.createElement("span");
+        content.textContent = message.content;
+        item.append(label, content);
+        list.append(item);
+    }
+}
+
+async function loadConversations() {
+    const conversations = await api("/api/conversations");
+    const list = document.getElementById("conversation-list");
+    list.replaceChildren();
+    for (const item of conversations) {
+        const entry = document.createElement("li");
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = item.title || "New conversation";
+        button.disabled = activeTurnId !== "" || turnSubmissionInFlight || conversationCreationInFlight;
+        button.addEventListener("click", async () => {
+            const opening = openConversation(item.id.value || item.id);
+            const selectionGeneration = conversationSelectionGeneration;
+            try {
+                await opening;
+            } catch (error) {
+                if (selectionGeneration === conversationSelectionGeneration) showError(error.message);
+            }
+        });
+        entry.append(button);
+        list.append(entry);
+    }
+}
+
+async function openConversation(id) {
+    const targetId = id.value || id;
+    const selectionGeneration = ++conversationSelectionGeneration;
+    if ((activeTurnId || turnSubmissionInFlight) && targetId !== activeTurnConversationId) {
+        showError("Finish or cancel the active turn before switching conversations.");
+        return;
+    }
+    const data = await api(`/api/conversations/${encodeURIComponent(targetId)}`);
+    if (selectionGeneration !== conversationSelectionGeneration) return;
+    if ((activeTurnId || turnSubmissionInFlight) && targetId !== activeTurnConversationId) {
+        showError("Finish or cancel the active turn before switching conversations.");
+        return;
+    }
+    conversationId = data.conversation.id.value || data.conversation.id;
+    document.getElementById("conversation-title").textContent = data.conversation.title || "Conversation";
+    renderMessages(data.messages);
+    document.getElementById("settings").hidden = true;
+    document.getElementById("activity").hidden = true;
+    document.getElementById("conversation").hidden = false;
+}
+
+async function refreshStatus() {
+    const status = await api("/api/status");
+    document.getElementById("route-status").textContent =
+        `${status.route} route · ${status.provider}${status.model ? ` · ${status.model}` : ""} · ` +
+        `${status.endpointConfigured ? "provider configured" : "provider not configured"} · ` +
+        `${status.readiness ? "ready" : "not ready"} · model connectivity ${status.modelConnectivity}`;
+}
+
+async function showChat() {
+    ++conversationSelectionGeneration;
+    if (!pendingTurnSubmission) {
+        let stored;
+        try {
+            stored = sessionStorage.getItem(pendingTurnStorageKey);
+        } catch (error) {
+            showError(`Cannot check this tab's request recovery state: ${error.message}`);
+            return;
+        }
+        if (stored) {
+            try {
+                const candidate = JSON.parse(stored);
+                const isIdentifier = value => typeof value === "string" &&
+                    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value) &&
+                    value !== "00000000-0000-0000-0000-000000000000";
+                if (!candidate || !isIdentifier(candidate.conversationId) ||
+                    typeof candidate.text !== "string" || candidate.text.trim().length === 0 ||
+                    candidate.text.length > 8000 || !isIdentifier(candidate.requestId) ||
+                    (candidate.turnId !== undefined && !isIdentifier(candidate.turnId))) {
+                    throw new Error("The saved request has an invalid format.");
+                }
+                pendingTurnSubmission = candidate;
+            } catch (error) {
+                try {
+                    sessionStorage.removeItem(pendingTurnStorageKey);
+                } catch (storageError) {
+                    showError(`Invalid request recovery state could not be cleared: ${storageError.message}`);
+                    return;
+                }
+                showError(`Invalid request recovery state was cleared: ${error.message}`);
+            }
+        }
+    }
+    if (pendingTurnSubmission?.turnId) {
+        activeTurnId = pendingTurnSubmission.turnId;
+        activeTurnConversationId = pendingTurnSubmission.conversationId;
+        conversationId = activeTurnConversationId;
+        document.getElementById("conversation-title").textContent = "Recovering conversation";
+        document.getElementById("prompt").value = pendingTurnSubmission.text;
+        document.getElementById("conversation").hidden = false;
+        setTurnNavigationLocked(true);
+        document.getElementById("send-turn").disabled = true;
+        document.getElementById("cancel-turn").hidden = false;
+    }
+    authSection.hidden = true;
+    chatSection.hidden = false;
+    profile.textContent = "Checking your local assistant session.";
+    document.getElementById("settings").hidden = true;
+    document.getElementById("activity").hidden = true;
+    if (activeTurnId) {
+        let reconnect = true;
+        try {
+            await refreshStatus();
+            profile.textContent = "Signed in to your local assistant.";
+            await loadConversations();
+            reconnect = await restoreConversation(activeTurnConversationId);
+        } finally {
+            if (reconnect && !chatSection.hidden && activeTurnId) connectEvents(activeTurnId, 0);
+        }
+        return;
+    }
+    await refreshStatus();
+    profile.textContent = "Signed in to your local assistant.";
+    await loadConversations();
+    if (pendingTurnSubmission) {
+        document.getElementById("prompt").value = pendingTurnSubmission.text;
+        if (await restoreConversation(pendingTurnSubmission.conversationId)) {
+            showError("A previous send may have been accepted. Resend the unchanged message to safely recover it.");
+        }
+    }
+}
+
+async function restoreConversation(id) {
+    const recoveredSubmission = pendingTurnSubmission;
+    const opening = openConversation(id);
+    const recoveryGeneration = conversationSelectionGeneration;
+    try {
+        await opening;
+        return true;
+    } catch (error) {
+        if (error.status !== 404) throw error;
+        clearMissingRecovery(recoveredSubmission, recoveryGeneration);
+        return false;
+    }
+}
+
+function clearMissingRecovery(recoveredSubmission, recoveryGeneration) {
+    if (pendingTurnSubmission !== recoveredSubmission) return;
+    if (!clearPendingTurn()) return;
+    if (recoveryGeneration !== conversationSelectionGeneration) return;
+    eventSource?.close();
+    eventSource = null;
+    activeTurnId = "";
+    activeTurnConversationId = "";
+    conversationId = "";
+    setTurnNavigationLocked(false);
+    document.getElementById("send-turn").disabled = false;
+    document.getElementById("cancel-turn").hidden = true;
+    document.getElementById("conversation").hidden = true;
+    showError("The recovered conversation no longer exists. Start or select another conversation.");
+}
+
+async function start() {
+    await csrf();
+    const status = await api("/api/auth/status");
+    if (typeof status?.bootstrapRequired !== "boolean") {
+        throw new Error("The owner authentication status could not be read.");
+    }
+    setAuthenticationMode(status.bootstrapRequired);
+
+    try {
+        await showChat();
+    } catch (error) {
+        if (error.status !== 401) {
+            showError(error.message);
+            return;
+        }
+        authSection.hidden = false;
+        chatSection.hidden = true;
+    }
+}
+
+document.getElementById("auth-form").addEventListener("submit", async event => {
+    event.preventDefault();
+    if (authenticationInFlight) return;
+    authenticationInFlight = true;
+    document.getElementById("auth-submit").disabled = true;
+    clearError();
+    try {
+        const bootstrap = !document.getElementById("bootstrap-token").hidden;
+        const body = {
+            passphrase: document.getElementById("passphrase").value,
+            rememberMe: document.getElementById("remember-me").checked
+        };
+        if (bootstrap) body.bootstrapToken = document.getElementById("bootstrap-token").value;
+        await api(bootstrap ? "/api/auth/bootstrap" : "/api/auth/login", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body)
+        });
+        document.getElementById("passphrase").value = "";
+        document.getElementById("bootstrap-token").value = "";
+        setAuthenticationMode(false);
+        await csrf();
+        await showChat();
+    } catch (error) {
+        showError(error.message);
+    } finally {
+        authenticationInFlight = false;
+        document.getElementById("auth-submit").disabled = false;
+    }
+});
+
+document.getElementById("new-conversation").addEventListener("click", async () => {
+    if (activeTurnId || turnSubmissionInFlight || conversationCreationInFlight) return;
+    clearError();
+    conversationCreationInFlight = true;
+    ++conversationSelectionGeneration;
+    setTurnNavigationLocked(true);
+    document.getElementById("send-turn").disabled = true;
+    try {
+        const created = await api("/api/conversations", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ title: "" })
+        });
+        await openConversation(created.id.value || created.id);
+        await loadConversations();
+    } catch (error) {
+        showError(error.message);
+    } finally {
+        conversationCreationInFlight = false;
+        const locked = activeTurnId !== "" || turnSubmissionInFlight;
+        setTurnNavigationLocked(locked);
+        document.getElementById("send-turn").disabled = locked;
+    }
+});
+
+document.getElementById("turn-form").addEventListener("submit", async event => {
+    event.preventDefault();
+    if (!conversationId || activeTurnId || turnSubmissionInFlight || conversationCreationInFlight) return;
+    clearError();
+    const submittedConversationId = conversationId;
+    const text = document.getElementById("prompt").value;
+    if (pendingTurnSubmission &&
+        (pendingTurnSubmission.conversationId !== submittedConversationId || pendingTurnSubmission.text !== text)) {
+        showError("Retry the previous request unchanged before sending a different message.");
+        return;
+    }
+    pendingTurnSubmission ??= {
+        conversationId: submittedConversationId,
+        text,
+        requestId: crypto.randomUUID()
+    };
+    try {
+        sessionStorage.setItem(pendingTurnStorageKey, JSON.stringify(pendingTurnSubmission));
+    } catch (error) {
+        pendingTurnSubmission = null;
+        showError(`Cannot safely preserve this request for retry: ${error.message}`);
+        return;
+    }
+    const requestId = pendingTurnSubmission.requestId;
+    conversationSelectionGeneration++;
+    turnSubmissionInFlight = true;
+    activeTurnConversationId = submittedConversationId;
+    setTurnNavigationLocked(true);
+    document.getElementById("send-turn").disabled = true;
+    let result;
+    try {
+        result = await api(`/api/conversations/${encodeURIComponent(submittedConversationId)}/turns`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ requestId, text })
+        });
+    } catch (error) {
+        turnSubmissionInFlight = false;
+        activeTurnConversationId = "";
+        setTurnNavigationLocked(false);
+        document.getElementById("send-turn").disabled = false;
+        if (error.status >= 400 && error.status < 500 && ![408, 429].includes(error.status)) {
+            if (!clearPendingTurn()) return;
+        }
+        showError(error.message);
+        return;
+    }
+    activeTurnId = result.turnId.value || result.turnId;
+    pendingTurnSubmission.turnId = activeTurnId;
+    try {
+        sessionStorage.setItem(pendingTurnStorageKey, JSON.stringify(pendingTurnSubmission));
+    } catch (error) {
+        showError(`Cannot preserve the accepted turn for reload recovery: ${error.message}`);
+    }
+    turnSubmissionInFlight = false;
+    document.getElementById("cancel-turn").hidden = false;
+    try {
+        await loadConversations();
+        renderMessages([...(await api(`/api/conversations/${encodeURIComponent(submittedConversationId)}`)).messages]);
+    } catch (error) {
+        showError(error.message);
+    }
+    connectEvents(activeTurnId, 0);
+});
+
+function connectEvents(turnId, lastSequence) {
+    eventSource?.close();
+    const source = new EventSource(`/api/turns/${encodeURIComponent(turnId)}/events`, { withCredentials: true });
+    eventSource = source;
+    let streamedReply = null;
+    let recoveryError = "";
+    const handleEvent = async event => {
+        if (eventSource !== source || activeTurnId !== turnId) return;
+        if (recoveryError && errorBox.textContent === recoveryError) clearError();
+        recoveryError = "";
+        lastSequence = Number(event.lastEventId || lastSequence);
+        const payload = JSON.parse(event.data);
+        if (event.type === "TextDelta" && typeof (payload.text || payload.Text) === "string") {
+            const text = payload.text || payload.Text;
+            const list = document.getElementById("messages");
+            if (!streamedReply) {
+                streamedReply = document.createElement("li");
+                streamedReply.textContent = "Jarvis: ";
+                list.append(streamedReply);
+            }
+            streamedReply.textContent += text;
+        } else if (event.type === "AssistantMessage" && typeof (payload.text || payload.Text) === "string") {
+            const list = document.getElementById("messages");
+            const item = document.createElement("li");
+            item.textContent = `Jarvis: ${payload.text || payload.Text}`;
+            list.append(item);
+        }
+        if (["TurnCompleted", "TurnFailed", "TurnCancelled", "TurnInterrupted"].includes(event.type)) {
+            if (event.type === "TurnFailed") {
+                showError("The assistant could not complete this request. Your conversation is saved; you can try again.");
+            } else if (event.type === "TurnInterrupted") {
+                showError("This request was interrupted before completion. Your conversation is saved; you can try again.");
+            }
+            source.close();
+            document.getElementById("cancel-turn").hidden = true;
+            try {
+                await loadConversations();
+                await openConversation(activeTurnConversationId);
+            } catch (error) {
+                showError(error.message);
+            } finally {
+                if (clearPendingTurn()) {
+                    activeTurnId = "";
+                    activeTurnConversationId = "";
+                    setTurnNavigationLocked(false);
+                    document.getElementById("send-turn").disabled = false;
+                }
+            }
+        }
+    };
+    for (const type of ["TextDelta", "AssistantMessage", "TurnCompleted", "TurnFailed", "TurnCancelled", "TurnInterrupted"]) {
+        source.addEventListener(type, handleEvent);
+    }
+    let recoveryCheckInFlight = false;
+    source.onerror = async () => {
+        if (recoveryCheckInFlight || eventSource !== source || activeTurnId !== turnId) return;
+        recoveryCheckInFlight = true;
+        const recoveredSubmission = pendingTurnSubmission;
+        const recoveryGeneration = conversationSelectionGeneration;
+        try {
+            await api(`/api/conversations/${encodeURIComponent(activeTurnConversationId)}`);
+            if (eventSource === source && activeTurnId === turnId &&
+                recoveryGeneration === conversationSelectionGeneration && source.readyState === EventSource.CLOSED) {
+                recoveryError = "The stream connection closed. Reload this page to resume the saved request.";
+                showError(recoveryError);
+            }
+        } catch (error) {
+            if (eventSource !== source || activeTurnId !== turnId ||
+                recoveryGeneration !== conversationSelectionGeneration) return;
+            if (error.status === 404) {
+                source.close();
+                clearMissingRecovery(recoveredSubmission, recoveryGeneration);
+            } else {
+                const resumeGuidance = source.readyState === EventSource.CLOSED
+                    ? " Reload this page to resume the saved request." : "";
+                recoveryError = `Stream recovery could not be checked: ${error.message}${resumeGuidance}`;
+                showError(recoveryError);
+            }
+        } finally {
+            recoveryCheckInFlight = false;
+        }
+        // Connecting sources retain automatic cursor reconnect; closed sources require reload.
+    };
+}
+
+document.getElementById("cancel-turn").addEventListener("click", async () => {
+    if (!activeTurnId) return;
+    clearError();
+    try {
+        await api(`/api/turns/${encodeURIComponent(activeTurnId)}/cancel`, { method: "POST" });
+    } catch (error) {
+        showError(error.message);
+    }
+});
+
+async function openSettings() {
+    if (activeTurnId || turnSubmissionInFlight || conversationCreationInFlight) return;
+    const selectionGeneration = ++conversationSelectionGeneration;
+    clearError();
+    try {
+        const settings = await api("/api/settings");
+        if (selectionGeneration !== conversationSelectionGeneration ||
+            activeTurnId || turnSubmissionInFlight || conversationCreationInFlight) return;
+        document.getElementById("conversation-days").value = settings.conversationDays;
+        document.getElementById("audit-days").value = settings.auditDays;
+        document.getElementById("settings-status").textContent = "Local profile settings. Provider keys are not displayed.";
+        document.getElementById("settings").hidden = false;
+        document.getElementById("activity").hidden = true;
+        document.getElementById("conversation").hidden = true;
+    } catch (error) {
+        if (selectionGeneration === conversationSelectionGeneration) showError(error.message);
+    }
+}
+
+document.getElementById("settings-button").addEventListener("click", openSettings);
+
+async function saveRetention(event) {
+    event.preventDefault();
+    const selectionGeneration = conversationSelectionGeneration;
+    clearError();
+    try {
+        const settings = await api("/api/settings/retention", {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                conversationDays: Number(document.getElementById("conversation-days").value),
+                auditDays: Number(document.getElementById("audit-days").value)
+            })
+        });
+        if (selectionGeneration !== conversationSelectionGeneration) return;
+        document.getElementById("settings-status").textContent =
+            `Saved: conversations ${settings.conversationDays} days; audit ${settings.auditDays} days.`;
+    } catch (error) {
+        if (selectionGeneration === conversationSelectionGeneration) showError(error.message);
+    }
+}
+
+document.getElementById("retention-form").addEventListener("submit", saveRetention);
+
+async function openActivity() {
+    if (activeTurnId || turnSubmissionInFlight || conversationCreationInFlight) return;
+    const selectionGeneration = ++conversationSelectionGeneration;
+    clearError();
+    try {
+        const turns = await api("/api/activity");
+        if (selectionGeneration !== conversationSelectionGeneration ||
+            activeTurnId || turnSubmissionInFlight || conversationCreationInFlight) return;
+        const list = document.getElementById("activity-list");
+        list.replaceChildren();
+        for (const item of turns) {
+            const entry = document.createElement("li");
+            entry.textContent = `Local turn ${item.turnId.value || item.turnId} · ${item.status} · updated ${new Date(item.updatedAtUtc).toLocaleString()}`;
+            list.append(entry);
+        }
+        document.getElementById("activity").hidden = false;
+        document.getElementById("settings").hidden = true;
+        document.getElementById("conversation").hidden = true;
+    } catch (error) {
+        if (selectionGeneration === conversationSelectionGeneration) showError(error.message);
+    }
+}
+
+document.getElementById("activity-button").addEventListener("click", openActivity);
+
+document.getElementById("logout").addEventListener("click", async () => {
+    try {
+        await api("/api/auth/logout", { method: "POST" });
+        window.location.reload();
+    } catch (error) {
+        showError(error.message);
+    }
+});
+
+start().catch(error => showError(error.message));

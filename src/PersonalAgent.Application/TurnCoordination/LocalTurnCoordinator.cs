@@ -265,18 +265,24 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
                 request.ConversationId,
                 request.ClientRequestId,
                 fingerprint,
-                cancellationToken);
-            if (existing is not null)
+                cancellationToken,
+                request.RequiredOwnerId);
+
+            // Trusted owner-less callers may return the read-only duplicate directly. Owner-scoped duplicates must
+            // be re-accepted by the atomic submission, which rechecks ownership and refreshes retention activity in
+            // the write transaction; a stale pre-read could otherwise return a turn that cleanup deletes before the
+            // response. Such retries are not new work, so a full queue does not reject them.
+            if (existing is not null && request.RequiredOwnerId is null)
             {
                 return existing;
             }
 
-            if (!queueSlots.Wait(0))
+            var slotReserved = queueSlots.Wait(0);
+            if (!slotReserved && existing is null)
             {
                 throw new TurnQueueFullException();
             }
 
-            var slotReserved = true;
             try
             {
                 var messageId = Guid.NewGuid();
@@ -288,13 +294,30 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
                         fingerprint,
                         messageId,
                         request.Text,
-                        clock.UtcNow),
+                        clock.UtcNow,
+                        request.RequiredOwnerId),
                     cancellationToken);
                 if (submitted.IsDuplicate)
                 {
-                    queueSlots.Release();
-                    slotReserved = false;
+                    if (slotReserved)
+                    {
+                        queueSlots.Release();
+                        slotReserved = false;
+                    }
+
                     return submitted;
+                }
+
+                if (!slotReserved)
+                {
+                    // The key vanished between the pre-read and the write, so this became new work with no
+                    // reserved capacity. Resolve it durably instead of queueing beyond the bound.
+                    await TryResolveTerminalWithinBoundAsync(
+                        submitted.Turn.Id,
+                        TurnStatus.Failed,
+                        "turn_queue_full",
+                        "The local turn queue is full. Please try again.");
+                    throw new TurnQueueFullException();
                 }
 
                 var work = new WorkItem(
@@ -872,6 +895,12 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
         if (!Enum.IsDefined(request.TaskKind))
         {
             throw new ArgumentOutOfRangeException(nameof(request), "The host task category is invalid.");
+        }
+
+        if (request.RequiredOwnerId is not null
+            && (string.IsNullOrWhiteSpace(request.RequiredOwnerId) || request.RequiredOwnerId.Length > 128))
+        {
+            throw new ArgumentException("The required owner identifier is invalid.", nameof(request));
         }
     }
 

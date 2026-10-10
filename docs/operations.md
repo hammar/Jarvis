@@ -34,6 +34,15 @@ publication/cleanup wait with the supplied token while the selected cancellation
 and pending terminal persistence continue independently.
 `/health/ready` reports migration/policy/runtime readiness and local provider
 configuration separately from model connectivity, which is not probed.
+It also includes `history-cleanup`: hourly maintenance failures are reported
+as degraded until the next successful pass. Maintenance retries once at each
+scheduled hourly pass rather than stopping the host or retrying in a tight
+loop. Logs contain only the failure type and interval, not private exception
+messages. Degraded readiness is HTTP 200 with explicit JSON health status;
+unhealthy runtime/database readiness remains HTTP 503. Persistent cleanup
+degradation means history can remain beyond its configured retention window;
+inspect local storage availability and permissions rather than assuming data
+was deleted. Shutdown cancellation is not handled as a maintenance failure.
 The database result is based on a live SQLite query and the expected migration
 version, not only the startup initialization result. Simulator and E2E profiles
 use the Aspire-discovered controlled model endpoint; Local and Hybrid use

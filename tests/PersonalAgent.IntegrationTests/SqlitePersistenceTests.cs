@@ -1,7 +1,14 @@
 using Microsoft.Data.Sqlite;
+using Microsoft.AspNetCore.Identity;
+using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Diagnostics.HealthChecks;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using PersonalAgent.Application;
 using PersonalAgent.Domain;
 using PersonalAgent.Infrastructure.Persistence;
+using PersonalAgent.Web;
 using PersonalAgent.TestSupport;
 using System.Runtime.Versioning;
 using System.Security.AccessControl;
@@ -13,6 +20,80 @@ namespace PersonalAgent.IntegrationTests;
 public sealed class SqlitePersistenceTests
 {
     private static readonly DateTimeOffset Now = new(2026, 10, 4, 12, 0, 0, TimeSpan.Zero);
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task SuccessfulLoginUpgradesOutdatedVerifierWithoutOverwritingNewerVerifier()
+    {
+        using var file = IsolatedDatabaseFile.Create();
+        var database = new SqliteDatabase(file.Path);
+        await database.InitializeAsync();
+        var accounts = new SqliteOwnerStateStore(database);
+        var identity = new OwnerIdentity("owner");
+        var oldHasher = new PasswordHasher<OwnerIdentity>(Options.Create(new PasswordHasherOptions
+        {
+            IterationCount = 1000
+        }));
+        var passphrase = "a-long-owner-passphrase";
+        var oldHash = oldHasher.HashPassword(identity, passphrase);
+        await accounts.TryCreateOwnerAsync(oldHash, Now, CancellationToken.None);
+        var currentHasher = new PasswordHasher<OwnerIdentity>();
+        var authentication = new OwnerAuthenticationService(accounts, currentHasher, new MutableClock(Now));
+
+        Assert.False(await authentication.VerifyAsync("wrong-passphrase", CancellationToken.None));
+        Assert.Equal(oldHash, await accounts.GetPasswordHashAsync(CancellationToken.None));
+        Assert.True(await authentication.VerifyAsync(passphrase, CancellationToken.None));
+        var upgraded = await accounts.GetPasswordHashAsync(CancellationToken.None);
+        Assert.NotEqual(oldHash, upgraded);
+        Assert.Equal(PasswordVerificationResult.Success, currentHasher.VerifyHashedPassword(identity, upgraded!, passphrase));
+        Assert.False(await accounts.TryUpgradePasswordHashAsync(oldHash, "stale-replacement", CancellationToken.None));
+        Assert.Equal(upgraded, await accounts.GetPasswordHashAsync(CancellationToken.None));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(async () =>
+            await accounts.TryUpgradePasswordHashAsync(upgraded!, new string('x', 4097), CancellationToken.None));
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    [Trait("Category", "Integration")]
+    public async Task VerifierUpgradeRaceRechecksTheWinningPassword(bool samePassword)
+    {
+        using var file = IsolatedDatabaseFile.Create();
+        var database = new SqliteDatabase(file.Path);
+        await database.InitializeAsync();
+        var accounts = new SqliteOwnerStateStore(database);
+        var identity = new OwnerIdentity("owner");
+        var oldHasher = new PasswordHasher<OwnerIdentity>(Options.Create(new PasswordHasherOptions { IterationCount = 1000 }));
+        var hasher = new PasswordHasher<OwnerIdentity>();
+        const string passphrase = "a-long-owner-passphrase";
+        var oldHash = oldHasher.HashPassword(identity, passphrase);
+        await accounts.TryCreateOwnerAsync(oldHash, Now, CancellationToken.None);
+        var winningHash = hasher.HashPassword(identity, samePassword ? passphrase : "a-different-owner-passphrase");
+        var competing = new CompetingVerifierStore(accounts, winningHash);
+        var authentication = new OwnerAuthenticationService(competing, hasher, new MutableClock(Now));
+
+        Assert.Equal(samePassword, await authentication.VerifyAsync(passphrase, CancellationToken.None));
+        Assert.Equal(winningHash, await accounts.GetPasswordHashAsync(CancellationToken.None));
+    }
+
+    private sealed class CompetingVerifierStore(IOwnerAccountStore accounts, string winningHash) : IOwnerAccountStore
+    {
+        public ValueTask<bool> IsConfiguredAsync(CancellationToken cancellationToken) =>
+            accounts.IsConfiguredAsync(cancellationToken);
+
+        public ValueTask<bool> TryCreateOwnerAsync(string passwordHash, DateTimeOffset createdAtUtc, CancellationToken cancellationToken) =>
+            accounts.TryCreateOwnerAsync(passwordHash, createdAtUtc, cancellationToken);
+
+        public ValueTask<string?> GetPasswordHashAsync(CancellationToken cancellationToken) =>
+            accounts.GetPasswordHashAsync(cancellationToken);
+
+        public async ValueTask<bool> TryUpgradePasswordHashAsync(
+            string expectedHash, string replacementHash, CancellationToken cancellationToken)
+        {
+            Assert.True(await accounts.TryUpgradePasswordHashAsync(expectedHash, winningHash, cancellationToken));
+            return await accounts.TryUpgradePasswordHashAsync(expectedHash, replacementHash, cancellationToken);
+        }
+    }
 
     [Fact]
     [Trait("Category", "Integration")]
@@ -28,6 +109,106 @@ public sealed class SqlitePersistenceTests
         await missing.InitializeAsync();
 
         Assert.True(await missing.CheckReadinessAsync());
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task RetentionReadsReturnOnlyCommittedPairsDuringConcurrentUpdates()
+    {
+        using var file = IsolatedDatabaseFile.Create();
+        var database = new SqliteDatabase(file.Path);
+        await database.InitializeAsync();
+        var store = new SqliteOwnerStateStore(database);
+        var first = new RetentionSettings(111, 222);
+        var second = new RetentionSettings(333, 444);
+        await store.UpdateRetentionAsync(first, Now, CancellationToken.None);
+        var start = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var writer = Task.Run(async () =>
+        {
+            await start.Task;
+            for (var i = 0; i < 100; i++)
+            {
+                await store.UpdateRetentionAsync(i % 2 == 0 ? second : first, Now, CancellationToken.None);
+                await Task.Yield();
+            }
+        });
+        var reader = Task.Run(async () =>
+        {
+            await start.Task;
+            for (var i = 0; i < 200; i++)
+            {
+                var settings = await store.GetRetentionAsync(new RetentionSettings(90, 30), CancellationToken.None);
+                Assert.True(settings == first || settings == second, $"Read an uncommitted retention pair: {settings}");
+                await Task.Yield();
+            }
+        });
+        start.SetResult();
+        await Task.WhenAll(writer, reader).WaitAsync(TimeSpan.FromSeconds(10));
+
+        await using var connection = await database.OpenConnectionAsync();
+        await using var remove = connection.CreateCommand();
+        remove.CommandText = "DELETE FROM owner_settings WHERE setting_key = 'audit_retention_days';";
+        await remove.ExecuteNonQueryAsync();
+        Assert.Equal(new RetentionSettings(first.ConversationDays, 30),
+            await store.GetRetentionAsync(new RetentionSettings(90, 30), CancellationToken.None));
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task OwnerVerifierAndRetentionSettingsSurviveDatabaseReopen()
+    {
+        using var file = IsolatedDatabaseFile.Create();
+        var database = new SqliteDatabase(file.Path);
+        await database.InitializeAsync();
+        var owner = new SqliteOwnerStateStore(database);
+
+        Assert.False(await owner.IsConfiguredAsync(CancellationToken.None));
+        Assert.True(await owner.TryCreateOwnerAsync("adaptive-verifier", Now, CancellationToken.None));
+        Assert.False(await owner.TryCreateOwnerAsync("replacement-verifier", Now, CancellationToken.None));
+        Assert.Equal("adaptive-verifier", await owner.GetPasswordHashAsync(CancellationToken.None));
+
+        var defaults = new RetentionSettings(90, 30);
+        Assert.Equal(defaults, await owner.GetRetentionAsync(defaults, CancellationToken.None));
+        var saved = new RetentionSettings(42, 21);
+        await owner.UpdateRetentionAsync(saved, Now, CancellationToken.None);
+
+        var reopened = new SqliteOwnerStateStore(new SqliteDatabase(file.Path));
+        Assert.Equal(saved, await reopened.GetRetentionAsync(defaults, CancellationToken.None));
+        Assert.True(await reopened.IsConfiguredAsync(CancellationToken.None));
+        await using var connection = await new SqliteDatabase(file.Path).OpenConnectionAsync();
+        Assert.Equal(4, await UserVersionAsync(connection));
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task ConversationQueriesEnforceOwnerIdentity()
+    {
+        using var file = IsolatedDatabaseFile.Create();
+        var database = new SqliteDatabase(file.Path);
+        await database.InitializeAsync();
+        var store = new SqliteConversationStore(database, new MutableClock(Now));
+        var conversation = new ConversationRecord(
+            ConversationId.New(),
+            "owner",
+            "Local chat",
+            Now,
+            Now);
+        await store.CreateConversationAsync(conversation, CancellationToken.None);
+
+        Assert.Equal(conversation, await store.GetConversationAsync(
+            conversation.Id,
+            "owner",
+            CancellationToken.None));
+        Assert.Null(await store.GetConversationAsync(conversation.Id, "different-owner", CancellationToken.None));
+        Assert.Equal(
+            [conversation],
+            await store.ReadRecentConversationsAsync("owner", 10, CancellationToken.None));
+        Assert.Empty(await store.ReadRecentConversationsAsync("different-owner", 10, CancellationToken.None));
+        var turn = await store.CreateTurnAsync(TurnId.New(), conversation.Id, TurnStatus.Received, Now, CancellationToken.None);
+        Assert.Equal(turn, await store.GetTurnForOwnerAsync(turn.Id, "owner", CancellationToken.None));
+        Assert.Null(await store.GetTurnForOwnerAsync(turn.Id, "different-owner", CancellationToken.None));
+        Assert.Equal([turn], await store.ReadRecentTurnsForOwnerAsync("owner", 10, CancellationToken.None));
+        Assert.Empty(await store.ReadRecentTurnsForOwnerAsync("different-owner", 10, CancellationToken.None));
     }
 
     [Fact]
@@ -90,7 +271,7 @@ public sealed class SqlitePersistenceTests
         await using var foreignKeys = connection.CreateCommand();
         foreignKeys.CommandText = "PRAGMA foreign_keys;";
         Assert.Equal(1L, (long)(await foreignKeys.ExecuteScalarAsync())!);
-        Assert.Equal(3, await UserVersionAsync(connection));
+        Assert.Equal(4, await UserVersionAsync(connection));
     }
 
     [Fact]
@@ -111,7 +292,7 @@ public sealed class SqlitePersistenceTests
         Assert.Equal(messageId, messages[0].MessageId);
         Assert.Equal("before upgrade", messages[0].Content);
         await using var migrated = await database.OpenConnectionAsync();
-        Assert.Equal(3, await UserVersionAsync(migrated));
+        Assert.Equal(4, await UserVersionAsync(migrated));
         await using var table = migrated.CreateCommand();
         table.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'cloud_consents';";
         Assert.Equal(1L, (long)(await table.ExecuteScalarAsync())!);
@@ -322,6 +503,138 @@ public sealed class SqlitePersistenceTests
                     "different request",
                     Now.AddSeconds(2)),
                 CancellationToken.None));
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task OwnerScopedSubmissionRequiresTheExistingOwnedConversationAtomically()
+    {
+        using var file = IsolatedDatabaseFile.Create();
+        var database = new SqliteDatabase(file.Path);
+        await database.InitializeAsync();
+        var clock = new MutableClock(Now);
+        var store = new SqliteConversationStore(database, clock);
+        var retention = new SqliteRetentionService(database, clock, new SqliteRetentionOptions());
+        const string text = "Owner scoped request";
+        var fingerprint = Convert.ToHexString(
+            System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(text)));
+        ConversationTurnSubmission Submission(ConversationId id, string requestId, string? owner) =>
+            new(TurnId.New(), id, requestId, fingerprint, Guid.NewGuid(), text, Now, owner);
+
+        var missing = ConversationId.New();
+        await Assert.ThrowsAsync<ArgumentException>(async () =>
+            await store.SubmitTurnAsync(Submission(missing, "invalid", " "), CancellationToken.None));
+        await Assert.ThrowsAsync<ArgumentException>(async () =>
+            await store.FindSubmittedTurnAsync(missing, "invalid", fingerprint, CancellationToken.None, new string('o', 129)));
+        await Assert.ThrowsAsync<ConversationNotFoundException>(async () =>
+            await store.SubmitTurnAsync(Submission(missing, "missing", "owner"), CancellationToken.None));
+        await Assert.ThrowsAsync<ConversationNotFoundException>(async () =>
+            await store.FindSubmittedTurnAsync(missing, "missing", fingerprint, CancellationToken.None, "owner"));
+        Assert.Null(await store.GetConversationAsync(missing, "owner", CancellationToken.None));
+
+        var owned = await store.CreateConversationAsync(
+            new ConversationRecord(ConversationId.New(), "owner", "Owned", Now.AddDays(-400), Now.AddDays(-400)),
+            CancellationToken.None);
+        await Assert.ThrowsAsync<ConversationNotFoundException>(async () =>
+            await store.SubmitTurnAsync(Submission(owned.Id, "foreign", "intruder"), CancellationToken.None));
+        Assert.Empty(await store.ReadRecentAsync(owned.Id, 10, CancellationToken.None));
+        Assert.Equal(owned.UpdatedAtUtc, (await store.GetConversationAsync(owned.Id, "owner", CancellationToken.None))!.UpdatedAtUtc);
+
+        var accepted = await store.SubmitTurnAsync(Submission(owned.Id, "accepted", "owner"), CancellationToken.None);
+        Assert.False(accepted.IsDuplicate);
+        var duplicate = await store.SubmitTurnAsync(Submission(owned.Id, "accepted", "owner"), CancellationToken.None);
+        Assert.True(duplicate.IsDuplicate);
+        Assert.Equal(accepted.Turn, duplicate.Turn);
+        Assert.Equal(accepted.Turn, (await store.FindSubmittedTurnAsync(
+            owned.Id, "accepted", fingerprint, CancellationToken.None, "owner"))!.Turn);
+        await Assert.ThrowsAsync<ConversationNotFoundException>(async () =>
+            await store.FindSubmittedTurnAsync(owned.Id, "accepted", fingerprint, CancellationToken.None, "intruder"));
+        await Assert.ThrowsAsync<ConversationNotFoundException>(async () =>
+            await store.SubmitTurnAsync(Submission(owned.Id, "accepted", "intruder"), CancellationToken.None));
+
+        // The accepted nonterminal turn and refreshed update time keep cleanup from removing the conversation.
+        clock.UtcNow = Now.AddDays(3700);
+        Assert.Equal(new SqliteRetentionResult(0, 0), await retention.CleanupExpiredAsync(CancellationToken.None));
+        Assert.NotNull(await store.GetConversationAsync(owned.Id, "owner", CancellationToken.None));
+
+        var expired = await store.CreateConversationAsync(
+            new ConversationRecord(ConversationId.New(), "owner", "Expired", Now.AddDays(-400), Now.AddDays(-400)),
+            CancellationToken.None);
+        Assert.Equal(new SqliteRetentionResult(1, 0), await retention.CleanupExpiredAsync(CancellationToken.None));
+        await Assert.ThrowsAsync<ConversationNotFoundException>(async () =>
+            await store.SubmitTurnAsync(Submission(expired.Id, "after-cleanup", "owner"), CancellationToken.None));
+        await using (var connection = await database.OpenConnectionAsync())
+        await using (var rows = connection.CreateCommand())
+        {
+            rows.CommandText = """
+                SELECT (SELECT COUNT(*) FROM conversations WHERE id = $id)
+                    + (SELECT COUNT(*) FROM turns WHERE conversation_id = $id)
+                    + (SELECT COUNT(*) FROM messages WHERE conversation_id = $id);
+                """;
+            rows.Parameters.AddWithValue("$id", expired.Id.Value.ToString("D"));
+            Assert.Equal(0L, (long)(await rows.ExecuteScalarAsync())!);
+        }
+
+        var implicitRoot = ConversationId.New();
+        var trusted = await store.SubmitTurnAsync(Submission(implicitRoot, "implicit", null), CancellationToken.None);
+        Assert.False(trusted.IsDuplicate);
+        Assert.NotNull(await store.GetConversationAsync(implicitRoot, "owner", CancellationToken.None));
+        Assert.Null(await store.FindSubmittedTurnAsync(implicitRoot, "unused", fingerprint, CancellationToken.None, "owner"));
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task OwnerScopedDuplicateRefreshesRetentionActivityButTrustedDuplicateDoesNot()
+    {
+        using var file = IsolatedDatabaseFile.Create();
+        var database = new SqliteDatabase(file.Path);
+        await database.InitializeAsync();
+        var past = Now.AddDays(-400);
+        var clock = new MutableClock(past);
+        var store = new SqliteConversationStore(database, clock);
+        var retention = new SqliteRetentionService(database, clock, new SqliteRetentionOptions());
+        const string text = "Completed request";
+        var fingerprint = Convert.ToHexString(
+            System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(text)));
+
+        async Task<(ConversationId Id, SubmittedConversationTurn First)> CompletedConversationAsync()
+        {
+            var conversation = await store.CreateConversationAsync(
+                new ConversationRecord(ConversationId.New(), "owner", "Old", past, past), CancellationToken.None);
+            var first = await store.SubmitTurnAsync(
+                new ConversationTurnSubmission(TurnId.New(), conversation.Id, "retry", fingerprint, Guid.NewGuid(), text, past, "owner"),
+                CancellationToken.None);
+            await store.UpdateTurnStatusAsync(first.Turn.Id, TurnStatus.Completed, first.Turn.Version, past, CancellationToken.None);
+            return (conversation.Id, first);
+        }
+
+        var ownerScoped = await CompletedConversationAsync();
+        var trusted = await CompletedConversationAsync();
+        clock.UtcNow = Now;
+        var ownerRetry = await store.SubmitTurnAsync(
+            new ConversationTurnSubmission(TurnId.New(), ownerScoped.Id, "retry", fingerprint, Guid.NewGuid(), text, Now, "owner"),
+            CancellationToken.None);
+        var trustedRetry = await store.SubmitTurnAsync(
+            new ConversationTurnSubmission(TurnId.New(), trusted.Id, "retry", fingerprint, Guid.NewGuid(), text, Now),
+            CancellationToken.None);
+
+        Assert.True(ownerRetry.IsDuplicate);
+        Assert.Equal(ownerScoped.First.Turn.Id, ownerRetry.Turn.Id);
+        Assert.True(trustedRetry.IsDuplicate);
+        Assert.Equal(Now, (await store.GetConversationAsync(ownerScoped.Id, "owner", CancellationToken.None))!.UpdatedAtUtc);
+        Assert.Equal(past, (await store.GetConversationAsync(trusted.Id, "owner", CancellationToken.None))!.UpdatedAtUtc);
+
+        // Cleanup immediately after acceptance keeps the re-accepted root; the untouched trusted root expires.
+        Assert.Equal(new SqliteRetentionResult(1, 0), await retention.CleanupExpiredAsync(CancellationToken.None));
+        Assert.Equal(TurnStatus.Completed, (await store.GetTurnAsync(ownerRetry.Turn.Id, CancellationToken.None))!.Status);
+        Assert.Null(await store.GetConversationAsync(trusted.Id, "owner", CancellationToken.None));
+
+        // An older duplicate timestamp never moves the activity time backwards.
+        var stale = await store.SubmitTurnAsync(
+            new ConversationTurnSubmission(TurnId.New(), ownerScoped.Id, "retry", fingerprint, Guid.NewGuid(), text, past, "owner"),
+            CancellationToken.None);
+        Assert.True(stale.IsDuplicate);
+        Assert.Equal(Now, (await store.GetConversationAsync(ownerScoped.Id, "owner", CancellationToken.None))!.UpdatedAtUtc);
     }
 
     [Fact]
@@ -756,6 +1069,105 @@ public sealed class SqlitePersistenceTests
         Assert.Equal("Unknown", (string?)await runs.ExecuteScalarAsync());
     }
 
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task CleanupFailureDegradesReadinessWithoutStoppingHostAndRecoversOnNextPass()
+    {
+        var store = new ControlledCleanupStore();
+        var worker = new RetentionCleanupService(
+            store, new MutableClock(Now), new RetentionSettings(1, 1),
+            TimeSpan.FromMilliseconds(20), NullLogger<RetentionCleanupService>.Instance);
+        using var host = new HostBuilder().ConfigureServices(services => services.AddSingleton<IHostedService>(worker)).Build();
+        await host.StartAsync();
+        try
+        {
+            await store.SecondPass.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            Assert.False(host.Services.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping.IsCancellationRequested);
+            Assert.Equal(HealthStatus.Degraded, (await worker.CheckHealthAsync(new HealthCheckContext())).Status);
+            store.AllowSuccess.TrySetResult();
+            await store.ThirdPass.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            Assert.Equal(HealthStatus.Healthy, (await worker.CheckHealthAsync(new HealthCheckContext())).Status);
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+                worker.CheckHealthAsync(new HealthCheckContext(), new CancellationToken(true)));
+        }
+        finally
+        {
+            await host.StopAsync();
+        }
+        Assert.True(store.ShutdownCancelled.Task.IsCompletedSuccessfully);
+        Assert.Equal(HealthStatus.Healthy, (await worker.CheckHealthAsync(new HealthCheckContext())).Status);
+        Assert.True(worker.ExecuteTask!.IsCanceled);
+    }
+
+    private sealed class ControlledCleanupStore : IHistoryRetentionStore
+    {
+        public TaskCompletionSource SecondPass { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource AllowSuccess { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource ThirdPass { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource ShutdownCancelled { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int passes;
+
+        public async ValueTask CleanupExpiredAsync(
+            RetentionSettings defaults, DateTimeOffset nowUtc, CancellationToken cancellationToken)
+        {
+            var pass = Interlocked.Increment(ref passes);
+            if (pass == 1) throw new InvalidOperationException("private-maintenance-detail");
+            if (pass == 2)
+            {
+                SecondPass.TrySetResult();
+                await AllowSuccess.Task.WaitAsync(cancellationToken);
+                return;
+            }
+            ThirdPass.TrySetResult();
+            try
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                ShutdownCancelled.TrySetResult();
+                throw;
+            }
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task HostedRetentionCleanupAppliesExpiredHistoryDuringUptime()
+    {
+        using var file = IsolatedDatabaseFile.Create();
+        var database = new SqliteDatabase(file.Path);
+        await database.InitializeAsync();
+        var clock = new MutableClock(Now);
+        var conversations = new SqliteConversationStore(database, clock);
+        var expired = new ConversationRecord(
+            ConversationId.New(),
+            "owner",
+            "Expired",
+            Now.AddDays(-2),
+            Now.AddDays(-2));
+        await conversations.CreateConversationAsync(expired, CancellationToken.None);
+
+        var cleanup = new RetentionCleanupService(
+            new SqliteRetentionService(database, clock, new SqliteRetentionOptions()),
+            clock,
+            new RetentionSettings(1, 1),
+            TimeSpan.FromMilliseconds(20),
+            NullLogger<RetentionCleanupService>.Instance);
+        await cleanup.StartAsync(CancellationToken.None);
+        try
+        {
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+            await WaitForConversationDeletionAsync(conversations, expired.Id, deadline.Token);
+        }
+        finally
+        {
+            await cleanup.StopAsync(CancellationToken.None);
+        }
+
+        Assert.Null(await conversations.GetConversationAsync(expired.Id, "owner", CancellationToken.None));
+    }
+
     [Theory]
     [InlineData("Succeeded")]
     [InlineData("Unknown")]
@@ -947,14 +1359,29 @@ public sealed class SqlitePersistenceTests
         var runningConversation = ConversationId.New();
         var approvalConversation = ConversationId.New();
         var interruptedConversation = ConversationId.New();
+        var receivedConversation = ConversationId.New();
+        var routingConversation = ConversationId.New();
+        var contextReviewConversation = ConversationId.New();
+        var completedConversation = ConversationId.New();
+        var failedConversation = ConversationId.New();
+        var cancelledConversation = ConversationId.New();
         await conversations.AppendMessageAsync(Message(oldConversation, "expired"), CancellationToken.None);
         await conversations.AppendMessageAsync(Message(retainedConversation, "retained"), CancellationToken.None);
         await conversations.AppendMessageAsync(Message(runningConversation, "running turn"), CancellationToken.None);
         await conversations.AppendMessageAsync(Message(approvalConversation, "approval turn"), CancellationToken.None);
         await conversations.AppendMessageAsync(Message(interruptedConversation, "interrupted turn"), CancellationToken.None);
+        await conversations.AppendMessageAsync(Message(receivedConversation, "received turn"), CancellationToken.None);
+        await conversations.AppendMessageAsync(Message(routingConversation, "routing turn"), CancellationToken.None);
+        await conversations.AppendMessageAsync(Message(contextReviewConversation, "context review turn"), CancellationToken.None);
+        await conversations.AppendMessageAsync(Message(completedConversation, "completed turn"), CancellationToken.None);
+        await conversations.AppendMessageAsync(Message(failedConversation, "failed turn"), CancellationToken.None);
+        await conversations.AppendMessageAsync(Message(cancelledConversation, "cancelled turn"), CancellationToken.None);
         var runningTurn = TurnId.New();
         var approvalTurn = TurnId.New();
         var interruptedTurn = TurnId.New();
+        var receivedTurn = TurnId.New();
+        var routingTurn = TurnId.New();
+        var contextReviewTurn = TurnId.New();
         await conversations.CreateTurnAsync(
             runningTurn,
             runningConversation,
@@ -973,6 +1400,56 @@ public sealed class SqlitePersistenceTests
             TurnStatus.Interrupted,
             Now,
             CancellationToken.None);
+        await conversations.CreateTurnAsync(
+            receivedTurn,
+            receivedConversation,
+            TurnStatus.Received,
+            Now,
+            CancellationToken.None);
+        await conversations.CreateTurnAsync(
+            routingTurn,
+            routingConversation,
+            TurnStatus.Routing,
+            Now,
+            CancellationToken.None);
+        await conversations.CreateTurnAsync(
+            contextReviewTurn,
+            contextReviewConversation,
+            TurnStatus.ContextReview,
+            Now,
+            CancellationToken.None);
+        async Task<TurnId> CreateTerminalTurnAsync(ConversationId id, TurnStatus status)
+        {
+            var created = await conversations.CreateTurnAsync(
+                TurnId.New(),
+                id,
+                TurnStatus.Received,
+                Now,
+                CancellationToken.None);
+            var routing = await conversations.UpdateTurnStatusAsync(
+                created.Id,
+                TurnStatus.Routing,
+                created.Version,
+                Now,
+                CancellationToken.None);
+            var running = await conversations.UpdateTurnStatusAsync(
+                created.Id,
+                TurnStatus.Running,
+                routing.Version,
+                Now,
+                CancellationToken.None);
+            await conversations.UpdateTurnStatusAsync(
+                created.Id,
+                status,
+                running.Version,
+                Now,
+                CancellationToken.None);
+            return created.Id;
+        }
+
+        var completedTurn = await CreateTerminalTurnAsync(completedConversation, TurnStatus.Completed);
+        var failedTurn = await CreateTerminalTurnAsync(failedConversation, TurnStatus.Failed);
+        var cancelledTurn = await CreateTerminalTurnAsync(cancelledConversation, TurnStatus.Cancelled);
 
         var audit = new SqliteAuditStore(database);
         await audit.AppendAsync(NewAudit(Now.AddDays(-31)), CancellationToken.None);
@@ -1010,7 +1487,10 @@ public sealed class SqlitePersistenceTests
                 UPDATE conversations SET updated_at_utc = $recent
                 WHERE id = $recent_conversation;
                 UPDATE conversations SET updated_at_utc = $old
-                WHERE id IN ($running_conversation, $approval_conversation, $interrupted_conversation);
+                WHERE id IN (
+                    $running_conversation, $approval_conversation, $interrupted_conversation,
+                    $received_conversation, $routing_conversation, $context_review_conversation,
+                    $completed_conversation, $failed_conversation, $cancelled_conversation);
                 """;
             update.Parameters.AddWithValue("$old", SqliteValueForTest(Now.AddDays(-91)));
             update.Parameters.AddWithValue("$recent", SqliteValueForTest(Now.AddDays(-89)));
@@ -1019,24 +1499,46 @@ public sealed class SqlitePersistenceTests
             update.Parameters.AddWithValue("$running_conversation", runningConversation.Value.ToString("D"));
             update.Parameters.AddWithValue("$approval_conversation", approvalConversation.Value.ToString("D"));
             update.Parameters.AddWithValue("$interrupted_conversation", interruptedConversation.Value.ToString("D"));
+            update.Parameters.AddWithValue("$received_conversation", receivedConversation.Value.ToString("D"));
+            update.Parameters.AddWithValue("$routing_conversation", routingConversation.Value.ToString("D"));
+            update.Parameters.AddWithValue("$context_review_conversation", contextReviewConversation.Value.ToString("D"));
+            update.Parameters.AddWithValue("$completed_conversation", completedConversation.Value.ToString("D"));
+            update.Parameters.AddWithValue("$failed_conversation", failedConversation.Value.ToString("D"));
+            update.Parameters.AddWithValue("$cancelled_conversation", cancelledConversation.Value.ToString("D"));
             await update.ExecuteNonQueryAsync();
         }
 
         var retention = new SqliteRetentionService(database, clock, new SqliteRetentionOptions());
-        Assert.Equal(new SqliteRetentionResult(1, 1), await retention.CleanupExpiredAsync(CancellationToken.None));
+        Assert.Equal(new SqliteRetentionResult(4, 1), await retention.CleanupExpiredAsync(CancellationToken.None));
         Assert.Equal(new SqliteRetentionResult(0, 0), await retention.CleanupExpiredAsync(CancellationToken.None));
         Assert.Empty(await conversations.ReadRecentAsync(oldConversation, 10, CancellationToken.None));
         Assert.Single(await conversations.ReadRecentAsync(retainedConversation, 10, CancellationToken.None));
         Assert.Single(await conversations.ReadRecentAsync(runningConversation, 10, CancellationToken.None));
         Assert.Single(await conversations.ReadRecentAsync(approvalConversation, 10, CancellationToken.None));
         Assert.Single(await conversations.ReadRecentAsync(interruptedConversation, 10, CancellationToken.None));
+        Assert.Single(await conversations.ReadRecentAsync(receivedConversation, 10, CancellationToken.None));
+        Assert.Single(await conversations.ReadRecentAsync(routingConversation, 10, CancellationToken.None));
+        Assert.Single(await conversations.ReadRecentAsync(contextReviewConversation, 10, CancellationToken.None));
+        Assert.Empty(await conversations.ReadRecentAsync(completedConversation, 10, CancellationToken.None));
+        Assert.Empty(await conversations.ReadRecentAsync(failedConversation, 10, CancellationToken.None));
+        Assert.Empty(await conversations.ReadRecentAsync(cancelledConversation, 10, CancellationToken.None));
+        Assert.Null(await conversations.GetTurnAsync(completedTurn, CancellationToken.None));
+        Assert.Null(await conversations.GetTurnAsync(failedTurn, CancellationToken.None));
+        Assert.Null(await conversations.GetTurnAsync(cancelledTurn, CancellationToken.None));
         await using (var connection = await database.OpenConnectionAsync())
         {
             await using var turns = connection.CreateCommand();
-            turns.CommandText = "SELECT id, status FROM turns WHERE id IN ($running, $approval, $interrupted) ORDER BY id;";
+            turns.CommandText = """
+                SELECT id, status FROM turns
+                WHERE id IN ($running, $approval, $interrupted, $received, $routing, $context_review)
+                ORDER BY id;
+                """;
             turns.Parameters.AddWithValue("$running", runningTurn.Value.ToString("D"));
             turns.Parameters.AddWithValue("$approval", approvalTurn.Value.ToString("D"));
             turns.Parameters.AddWithValue("$interrupted", interruptedTurn.Value.ToString("D"));
+            turns.Parameters.AddWithValue("$received", receivedTurn.Value.ToString("D"));
+            turns.Parameters.AddWithValue("$routing", routingTurn.Value.ToString("D"));
+            turns.Parameters.AddWithValue("$context_review", contextReviewTurn.Value.ToString("D"));
             await using var reader = await turns.ExecuteReaderAsync();
             var retainedTurns = new Dictionary<string, string>(StringComparer.Ordinal);
             while (await reader.ReadAsync())
@@ -1044,12 +1546,17 @@ public sealed class SqlitePersistenceTests
                 retainedTurns.Add(reader.GetString(0), reader.GetString(1));
             }
 
-            Assert.Equal(3, retainedTurns.Count);
+            Assert.Equal(6, retainedTurns.Count);
             Assert.Equal(TurnStatus.Running.ToString(), retainedTurns[runningTurn.Value.ToString("D")]);
             Assert.Equal(
                 TurnStatus.WaitingForApproval.ToString(),
                 retainedTurns[approvalTurn.Value.ToString("D")]);
             Assert.Equal(TurnStatus.Interrupted.ToString(), retainedTurns[interruptedTurn.Value.ToString("D")]);
+            Assert.Equal(TurnStatus.Received.ToString(), retainedTurns[receivedTurn.Value.ToString("D")]);
+            Assert.Equal(TurnStatus.Routing.ToString(), retainedTurns[routingTurn.Value.ToString("D")]);
+            Assert.Equal(
+                TurnStatus.ContextReview.ToString(),
+                retainedTurns[contextReviewTurn.Value.ToString("D")]);
         }
         Assert.NotNull(await memory.GetAsync(fact.Id, CancellationToken.None));
         Assert.Equal("Unknown", (await actions.GetAsync(unknownAction.Id, CancellationToken.None))!.Status);
@@ -1319,6 +1826,43 @@ public sealed class SqlitePersistenceTests
         {
             Assert.Equal((UnixFileMode)0, File.GetUnixFileMode(walPermissions) & nonOwnerPermissions);
         }
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task PeriodicCleanupUsesCurrentDurableRetentionAfterOwnerChangesSettings()
+    {
+        using var file = IsolatedDatabaseFile.Create();
+        var database = new SqliteDatabase(file.Path);
+        await database.InitializeAsync();
+        var clock = new MutableClock(Now);
+        var owner = new SqliteOwnerStateStore(database);
+        var startupDefaults = new RetentionSettings(30, 30);
+        await owner.UpdateRetentionAsync(startupDefaults, Now, CancellationToken.None);
+
+        var conversations = new SqliteConversationStore(database, clock);
+        var conversation = new ConversationRecord(
+            ConversationId.New(),
+            "owner",
+            "Keep using updated retention",
+            Now.AddDays(-40),
+            Now.AddDays(-40));
+        await conversations.CreateConversationAsync(conversation, CancellationToken.None);
+        var settingsObservedBeforeUpdate = await owner.GetRetentionAsync(
+            new RetentionSettings(90, 30),
+            CancellationToken.None);
+
+        await owner.UpdateRetentionAsync(new RetentionSettings(90, 30), Now, CancellationToken.None);
+        var retention = new SqliteRetentionService(
+            database,
+            clock,
+            new SqliteRetentionOptions(ConversationRetentionDays: 1, AuditRetentionDays: 1));
+        await ((IHistoryRetentionStore)retention).CleanupExpiredAsync(
+            settingsObservedBeforeUpdate,
+            Now,
+            CancellationToken.None);
+
+        Assert.NotNull(await conversations.GetConversationAsync(conversation.Id, "owner", CancellationToken.None));
     }
 
     [Fact]
@@ -1752,7 +2296,7 @@ public sealed class SqlitePersistenceTests
                 return true;
             });
         await using var connection = await first.OpenConnectionAsync();
-        Assert.Equal(3, await UserVersionAsync(connection));
+        Assert.Equal(4, await UserVersionAsync(connection));
     }
 
     private static async Task<T[]> RunConcurrentlyAsync<T>(params Func<Task<T>>[] operations)
@@ -1845,6 +2389,18 @@ public sealed class SqlitePersistenceTests
         catch (PersistenceConcurrencyException)
         {
             return false;
+        }
+    }
+
+    private static async Task WaitForConversationDeletionAsync(
+        IConversationStore conversations,
+        ConversationId conversationId,
+        CancellationToken cancellationToken)
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(10));
+        while (await conversations.GetConversationAsync(conversationId, "owner", cancellationToken) is not null)
+        {
+            await timer.WaitForNextTickAsync(cancellationToken);
         }
     }
 

@@ -1,5 +1,8 @@
 using Aspire.Hosting.Testing;
 using Aspire.Hosting;
+using System.Net;
+using System.Net.Http.Json;
+using System.Text.Json;
 using PersonalAgent.TestSupport;
 using Xunit;
 
@@ -15,8 +18,13 @@ public sealed class SimulatorCollection : ICollectionFixture<SimulatorHostFixtur
 public sealed class SimulatorHostFixture : IAsyncLifetime
 {
     private static readonly TimeSpan StartupTimeout = TimeSpan.FromSeconds(60);
+    internal const string BootstrapToken = "e2e-only-bootstrap-token";
+    internal const string OwnerPassphrase = "e2e-owner-passphrase-for-tests";
     private IsolatedDirectory? dataDirectory;
     private DistributedApplication? application;
+
+    /// <summary>Gets whether startup bootstraps/signs in the fixture's HTTP client.</summary>
+    public bool AuthenticateOnStart { get; init; } = true;
 
     /// <summary>Gets an HTTP client routed to the managed Web resource.</summary>
     public HttpClient WebClient { get; private set; } = null!;
@@ -35,14 +43,36 @@ public sealed class SimulatorHostFixture : IAsyncLifetime
     public async Task InitializeAsync()
     {
         dataDirectory = IsolatedDirectory.Create();
+        await StartApplicationAsync();
+    }
+
+    /// <summary>Restarts the Aspire resource graph while preserving its isolated application data.</summary>
+    public async Task RestartAsync()
+    {
+        WebClient?.Dispose();
+        ModelClient?.Dispose();
+        HomeAssistantClient?.Dispose();
+        if (application is not null)
+        {
+            await application.DisposeAsync();
+            application = null;
+        }
+
+        await StartApplicationAsync();
+    }
+
+    private async Task StartApplicationAsync()
+    {
         var previousProfile = Environment.GetEnvironmentVariable("JARVIS_PROFILE");
         var previousDataDirectory = Environment.GetEnvironmentVariable("JARVIS_E2E_DATA_DIR");
+        var previousBootstrapToken = Environment.GetEnvironmentVariable("JARVIS_E2E_BOOTSTRAP_TOKEN");
         IDistributedApplicationTestingBuilder appBuilder;
 
         try
         {
             Environment.SetEnvironmentVariable("JARVIS_PROFILE", "E2E");
-            Environment.SetEnvironmentVariable("JARVIS_E2E_DATA_DIR", dataDirectory.Path);
+            Environment.SetEnvironmentVariable("JARVIS_E2E_DATA_DIR", DataDirectoryPath);
+            Environment.SetEnvironmentVariable("JARVIS_E2E_BOOTSTRAP_TOKEN", BootstrapToken);
             appBuilder = await DistributedApplicationTestingBuilder
                 .CreateAsync<Projects.PersonalAgent_AppHost>()
                 .WaitAsync(StartupTimeout);
@@ -51,6 +81,7 @@ public sealed class SimulatorHostFixture : IAsyncLifetime
         {
             Environment.SetEnvironmentVariable("JARVIS_PROFILE", previousProfile);
             Environment.SetEnvironmentVariable("JARVIS_E2E_DATA_DIR", previousDataDirectory);
+            Environment.SetEnvironmentVariable("JARVIS_E2E_BOOTSTRAP_TOKEN", previousBootstrapToken);
         }
 
         application = await appBuilder.BuildAsync().WaitAsync(StartupTimeout);
@@ -65,9 +96,56 @@ public sealed class SimulatorHostFixture : IAsyncLifetime
             .WaitForResourceHealthyAsync("simulator-home-assistant")
             .WaitAsync(StartupTimeout);
 
-        WebClient = application.CreateHttpClient("personalagent-web");
+        using (var discoveredWebClient = application.CreateHttpClient("personalagent-web"))
+        {
+            WebClient = new HttpClient(new HttpClientHandler
+            {
+                CookieContainer = new CookieContainer(),
+                UseCookies = true
+            })
+            {
+                BaseAddress = discoveredWebClient.BaseAddress
+            };
+        }
         ModelClient = application.CreateHttpClient("simulator-model");
         HomeAssistantClient = application.CreateHttpClient("simulator-home-assistant");
+        if (AuthenticateOnStart)
+        {
+            await AuthenticateOwnerAsync();
+        }
+    }
+
+    private async Task AuthenticateOwnerAsync()
+    {
+        using var csrfResponse = await WebClient.GetAsync("/api/auth/csrf");
+        csrfResponse.EnsureSuccessStatusCode();
+        using var csrf = JsonDocument.Parse(await csrfResponse.Content.ReadAsStringAsync());
+        var requestToken = csrf.RootElement.GetProperty("token").GetString();
+        WebClient.DefaultRequestHeaders.Add("X-CSRF-TOKEN", requestToken);
+        using var statusResponse = await WebClient.GetAsync("/api/auth/status");
+        statusResponse.EnsureSuccessStatusCode();
+        using var status = JsonDocument.Parse(await statusResponse.Content.ReadAsStringAsync());
+        var bootstrapRequired = status.RootElement.GetProperty("bootstrapRequired").GetBoolean();
+        using var signIn = bootstrapRequired
+            ? await WebClient.PostAsJsonAsync(
+                "/api/auth/bootstrap",
+                new
+                {
+                    bootstrapToken = BootstrapToken,
+                    passphrase = OwnerPassphrase,
+                    rememberMe = false
+                })
+            : await WebClient.PostAsJsonAsync(
+                "/api/auth/login",
+                new { passphrase = OwnerPassphrase, rememberMe = false });
+        signIn.EnsureSuccessStatusCode();
+        using var authenticatedCsrfResponse = await WebClient.GetAsync("/api/auth/csrf");
+        authenticatedCsrfResponse.EnsureSuccessStatusCode();
+        using var authenticatedCsrf = JsonDocument.Parse(await authenticatedCsrfResponse.Content.ReadAsStringAsync());
+        WebClient.DefaultRequestHeaders.Remove("X-CSRF-TOKEN");
+        WebClient.DefaultRequestHeaders.Add(
+            "X-CSRF-TOKEN",
+            authenticatedCsrf.RootElement.GetProperty("token").GetString());
     }
 
     /// <summary>Stops only resources launched by this fixture and removes its private test data.</summary>

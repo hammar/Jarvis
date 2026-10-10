@@ -196,6 +196,9 @@ public sealed record ContextBuildRequest(
 /// <param name="UserMessageId">Stable message identifier assigned to the request text.</param>
 /// <param name="Text">Bounded, untrusted user text to persist as the turn's user message.</param>
 /// <param name="CreatedAtUtc">UTC acceptance instant.</param>
+/// <param name="RequiredOwnerId">Optional authenticated owner. When supplied, the conversation must already exist and
+/// belong to this owner; the check runs in the same write transaction as duplicate detection and insertion, so the
+/// submission never recreates a deleted conversation. When null, trusted host callers keep the implicit-root behavior.</param>
 public sealed record ConversationTurnSubmission(
     TurnId TurnId,
     ConversationId ConversationId,
@@ -203,7 +206,8 @@ public sealed record ConversationTurnSubmission(
     string RequestFingerprint,
     Guid UserMessageId,
     string Text,
-    DateTimeOffset CreatedAtUtc);
+    DateTimeOffset CreatedAtUtc,
+    string? RequiredOwnerId = null);
 
 /// <summary>Describes the durable turn returned by an atomic submission.</summary>
 /// <param name="Turn">The original or newly created application-owned turn.</param>
@@ -213,6 +217,109 @@ public sealed record SubmittedConversationTurn(
     ConversationTurn Turn,
     Guid UserMessageId,
     bool IsDuplicate);
+
+/// <summary>Describes the owner-visible durable metadata for one conversation.</summary>
+/// <param name="Id">Stable application conversation identifier.</param>
+/// <param name="OwnerId">Stable local owner identifier.</param>
+/// <param name="Title">Bounded display title; it is never used as model instructions.</param>
+/// <param name="CreatedAtUtc">UTC creation instant.</param>
+/// <param name="UpdatedAtUtc">UTC most recent durable conversation update.</param>
+public sealed record ConversationRecord(
+    ConversationId Id,
+    string OwnerId,
+    string Title,
+    DateTimeOffset CreatedAtUtc,
+    DateTimeOffset UpdatedAtUtc);
+
+/// <summary>Contains owner-selected durable history retention windows.</summary>
+/// <param name="ConversationDays">Conversation retention in whole days, from 1 through 3650.</param>
+/// <param name="AuditDays">Audit retention in whole days, from 1 through 3650.</param>
+public sealed record RetentionSettings(int ConversationDays, int AuditDays)
+{
+    /// <summary>Validates that both retention periods are within the supported bounds.</summary>
+    public void Validate()
+    {
+        if (ConversationDays is < 1 or > 3650)
+        {
+            throw new ArgumentOutOfRangeException(nameof(ConversationDays), "Conversation retention must be from 1 through 3650 days.");
+        }
+
+        if (AuditDays is < 1 or > 3650)
+        {
+            throw new ArgumentOutOfRangeException(nameof(AuditDays), "Audit retention must be from 1 through 3650 days.");
+        }
+    }
+}
+
+/// <summary>Persists the single local owner's password verifier without exposing storage details to Web handlers.</summary>
+public interface IOwnerAccountStore
+{
+    /// <summary>Checks whether the owner account has been created.</summary>
+    /// <param name="cancellationToken">Token that cancels the database read.</param>
+    /// <returns><see langword="true"/> when bootstrap has completed.</returns>
+    ValueTask<bool> IsConfiguredAsync(CancellationToken cancellationToken);
+
+    /// <summary>Atomically creates the sole owner account if bootstrap has not already completed.</summary>
+    /// <param name="passwordHash">Adaptive salted password verifier produced by the host authentication service.</param>
+    /// <param name="createdAtUtc">UTC account creation instant.</param>
+    /// <param name="cancellationToken">Token that cancels the write before commit.</param>
+    /// <returns><see langword="true"/> when this call created the owner account.</returns>
+    ValueTask<bool> TryCreateOwnerAsync(
+        string passwordHash,
+        DateTimeOffset createdAtUtc,
+        CancellationToken cancellationToken);
+
+    /// <summary>Reads the stored password verifier for the single owner account.</summary>
+    /// <param name="cancellationToken">Token that cancels the database read.</param>
+    /// <returns>The password verifier, or null until bootstrap completes.</returns>
+    ValueTask<string?> GetPasswordHashAsync(CancellationToken cancellationToken);
+
+    /// <summary>Upgrades the owner verifier only if it still matches the verified value.</summary>
+    /// <param name="expectedHash">Verifier that was successfully checked.</param>
+    /// <param name="replacementHash">New salted verifier using the current hashing policy.</param>
+    /// <param name="cancellationToken">Token that cancels the conditional write.</param>
+    /// <returns>True when the verifier was replaced; false when another write changed it.</returns>
+    ValueTask<bool> TryUpgradePasswordHashAsync(
+        string expectedHash,
+        string replacementHash,
+        CancellationToken cancellationToken);
+}
+
+/// <summary>Loads and updates durable owner retention settings, applying changes to cleanup immediately.</summary>
+public interface IOwnerSettingsService
+{
+    /// <summary>Gets the persisted retention settings or validated host defaults when not yet customized.</summary>
+    /// <param name="defaults">Trusted host defaults used only before the owner saves settings.</param>
+    /// <param name="cancellationToken">Token that cancels the database read.</param>
+    /// <returns>The current effective settings.</returns>
+    ValueTask<RetentionSettings> GetRetentionAsync(
+        RetentionSettings defaults,
+        CancellationToken cancellationToken);
+
+    /// <summary>Persists validated retention settings and immediately removes newly expired eligible history.</summary>
+    /// <param name="settings">New owner-selected retention periods.</param>
+    /// <param name="nowUtc">Current UTC instant for deterministic expiration.</param>
+    /// <param name="cancellationToken">Token that cancels the transaction before commit.</param>
+    /// <returns>The persisted settings.</returns>
+    ValueTask<RetentionSettings> UpdateRetentionAsync(
+        RetentionSettings settings,
+        DateTimeOffset nowUtc,
+        CancellationToken cancellationToken);
+}
+
+/// <summary>Defines host-scheduled cleanup against durable history retention settings.</summary>
+public interface IHistoryRetentionStore
+{
+    /// <summary>Deletes eligible expired history using durable settings read in the cleanup transaction.</summary>
+    /// <param name="defaults">Validated trusted first-run defaults used when no owner settings have been saved.</param>
+    /// <param name="nowUtc">UTC instant used to calculate retention cutoffs.</param>
+    /// <param name="cancellationToken">Token that cancels cleanup before commit.</param>
+    /// <returns>A task that completes after the cleanup transaction commits.</returns>
+    ValueTask CleanupExpiredAsync(
+        RetentionSettings defaults,
+        DateTimeOffset nowUtc,
+        CancellationToken cancellationToken);
+}
 
 /// <summary>Coordinates durable local turns, bounded execution, event retrieval, and cancellation.</summary>
 public interface ILocalTurnCoordinator
@@ -244,6 +351,11 @@ public interface ILocalTurnCoordinator
     /// <returns>The original or newly accepted durable turn.</returns>
     /// <exception cref="TurnQueueFullException">The bounded queue has no available capacity.</exception>
     /// <exception cref="TurnRequestConflictException">The request ID was reused with different request content.</exception>
+    /// <exception cref="ConversationNotFoundException">The request names a required owner and the conversation is
+    /// missing or owned by another account; nothing is persisted or queued.</exception>
+    /// <remarks>Owner-scoped duplicates are always re-accepted through the atomic store submission (rechecking
+    /// ownership and refreshing retention activity), and a full queue does not reject them. Owner-less duplicates
+    /// may be returned from a read-only lookup.</remarks>
     ValueTask<SubmittedConversationTurn> SubmitAsync(LocalTurnRequest request, CancellationToken cancellationToken);
 
     /// <summary>Reads a bounded ordered page of persisted events after an exclusive sequence cursor.</summary>
@@ -275,12 +387,16 @@ public interface ILocalTurnCoordinator
 /// <param name="Text">Untrusted user text within the local context input bound.</param>
 /// <param name="TaskKind">Host-classified routing category; omitted or ambiguous values clarify safely.</param>
 /// <param name="DeadlineOverride">Optional trusted host override; it is validated against coordinator policy.</param>
+/// <param name="RequiredOwnerId">Optional authenticated owner from the host session, never from model or request
+/// body input. When supplied, the conversation must already exist and belong to this owner at persistence time;
+/// it is not part of the idempotency fingerprint. Null preserves implicit conversation creation for trusted host callers.</param>
 public sealed record LocalTurnRequest(
     ConversationId ConversationId,
     string ClientRequestId,
     string Text,
     RoutingTaskKind TaskKind = RoutingTaskKind.Ambiguous,
-    TimeSpan? DeadlineOverride = null);
+    TimeSpan? DeadlineOverride = null,
+    string? RequiredOwnerId = null);
 
 /// <summary>Defines validated per-process limits for local turn acceptance and execution.</summary>
 /// <param name="InteractiveDeadline">Default end-to-end deadline from acceptance through execution; normally 120 seconds.</param>
@@ -320,6 +436,11 @@ public sealed record LocalTurnCoordinatorOptions(
 
 /// <summary>Reports that a bounded turn queue cannot accept another distinct request.</summary>
 public sealed class TurnQueueFullException() : InvalidOperationException("The local turn queue is full.");
+
+/// <summary>Reports that an owner-scoped submission named a conversation that is missing or owned by another account.</summary>
+/// <remarks>Missing and foreign conversations are deliberately indistinguishable so callers cannot probe ownership.</remarks>
+public sealed class ConversationNotFoundException()
+    : InvalidOperationException("The conversation does not exist for the authenticated owner.");
 
 /// <summary>Reports conflicting reuse of a durable client request ID.</summary>
 public sealed class TurnRequestConflictException()
@@ -623,6 +744,34 @@ public sealed record PersistedTurnEvent(
 /// <summary>Persists durable conversation messages and ordered turn events.</summary>
 public interface IConversationStore
 {
+    /// <summary>Creates a conversation owned by the supplied local account.</summary>
+    /// <param name="conversation">Conversation metadata to persist.</param>
+    /// <param name="cancellationToken">Token that cancels before commit.</param>
+    /// <returns>The durable conversation metadata.</returns>
+    ValueTask<ConversationRecord> CreateConversationAsync(
+        ConversationRecord conversation,
+        CancellationToken cancellationToken);
+
+    /// <summary>Reads conversation metadata only when it belongs to the specified owner.</summary>
+    /// <param name="conversationId">Conversation identifier to inspect.</param>
+    /// <param name="ownerId">Authenticated owner identifier.</param>
+    /// <param name="cancellationToken">Token that cancels the read.</param>
+    /// <returns>The conversation, or null when missing or owned by someone else.</returns>
+    ValueTask<ConversationRecord?> GetConversationAsync(
+        ConversationId conversationId,
+        string ownerId,
+        CancellationToken cancellationToken);
+
+    /// <summary>Reads a bounded list of recent conversations belonging to one owner.</summary>
+    /// <param name="ownerId">Authenticated owner identifier.</param>
+    /// <param name="maximumConversations">Maximum results, from 1 through 1000.</param>
+    /// <param name="cancellationToken">Token that cancels the read.</param>
+    /// <returns>Conversations in most-recently-updated order.</returns>
+    ValueTask<IReadOnlyList<ConversationRecord>> ReadRecentConversationsAsync(
+        string ownerId,
+        int maximumConversations,
+        CancellationToken cancellationToken);
+
     /// <summary>Appends a message and assigns its durable sequence.</summary>
     /// <param name="message">Message to persist.</param>
     /// <param name="cancellationToken">Token that cancels before commit.</param>
@@ -648,6 +797,12 @@ public interface IConversationStore
     /// <param name="cancellationToken">Token that cancels before the transaction commits.</param>
     /// <returns>The original matching turn or the newly persisted turn.</returns>
     /// <exception cref="TurnRequestConflictException">A request ID already belongs to different input.</exception>
+    /// <exception cref="ConversationNotFoundException">A required owner was supplied and the conversation is missing
+    /// or belongs to another owner; nothing is written.</exception>
+    /// <remarks>When a required owner is supplied, a matching duplicate is re-accepted: the conversation's UTC update
+    /// time is advanced to <see cref="ConversationTurnSubmission.CreatedAtUtc"/> (never moved backwards) in the same
+    /// transaction, so retention cleanup cannot remove the returned turn immediately after acceptance. Owner-less
+    /// duplicates are read-only.</remarks>
     ValueTask<SubmittedConversationTurn> SubmitTurnAsync(
         ConversationTurnSubmission submission,
         CancellationToken cancellationToken);
@@ -657,13 +812,18 @@ public interface IConversationStore
     /// <param name="clientRequestId">Stable client idempotency key.</param>
     /// <param name="requestFingerprint">SHA-256 fingerprint of the normalized submitted request.</param>
     /// <param name="cancellationToken">Token that cancels the lookup.</param>
+    /// <param name="requiredOwnerId">Optional authenticated owner. When supplied, the conversation must exist and
+    /// belong to this owner in the same read that finds the key.</param>
     /// <returns>The previously accepted turn, or null if no matching key exists.</returns>
     /// <exception cref="TurnRequestConflictException">The key was previously associated with different input.</exception>
+    /// <exception cref="ConversationNotFoundException">A required owner was supplied and the conversation is missing
+    /// or belongs to another owner.</exception>
     ValueTask<SubmittedConversationTurn?> FindSubmittedTurnAsync(
         ConversationId conversationId,
         string clientRequestId,
         string requestFingerprint,
-        CancellationToken cancellationToken);
+        CancellationToken cancellationToken,
+        string? requiredOwnerId = null);
 
     /// <summary>Creates a durable turn in a conversation with the supplied host-owned status.</summary>
     /// <param name="turnId">Stable application turn identifier.</param>
@@ -685,6 +845,26 @@ public interface IConversationStore
     /// <returns>The persisted turn, or null when the identifier is unknown.</returns>
     ValueTask<ConversationTurn?> GetTurnAsync(
         TurnId turnId,
+        CancellationToken cancellationToken);
+
+    /// <summary>Reads a turn only when its parent conversation belongs to the authenticated owner.</summary>
+    /// <param name="turnId">Turn identifier to inspect.</param>
+    /// <param name="ownerId">Authenticated local owner identifier.</param>
+    /// <param name="cancellationToken">Token that cancels the read.</param>
+    /// <returns>The turn, or null when missing or owned by another account.</returns>
+    ValueTask<ConversationTurn?> GetTurnForOwnerAsync(
+        TurnId turnId,
+        string ownerId,
+        CancellationToken cancellationToken);
+
+    /// <summary>Reads the most recently updated turns whose conversations belong to the authenticated owner.</summary>
+    /// <param name="ownerId">Authenticated local owner identifier.</param>
+    /// <param name="maximumTurns">Maximum results, from 1 through 1000.</param>
+    /// <param name="cancellationToken">Token that cancels the read.</param>
+    /// <returns>Turns ordered by update time, with no event payloads or other owners' data.</returns>
+    ValueTask<IReadOnlyList<ConversationTurn>> ReadRecentTurnsForOwnerAsync(
+        string ownerId,
+        int maximumTurns,
         CancellationToken cancellationToken);
 
     /// <summary>Reads a bounded, stable-ordered page of nonterminal turns for recovery inspection.</summary>

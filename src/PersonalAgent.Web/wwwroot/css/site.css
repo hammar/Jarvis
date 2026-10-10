@@ -1,0 +1,76 @@
+:root {
+    color-scheme: light dark;
+    font-family: system-ui, sans-serif;
+    line-height: 1.5;
+    color: #202020;
+    background-color: #ffffff;
+}
+
+[hidden] {
+    display: none !important;
+}
+
+body {
+    margin: 0 auto;
+    max-width: 70rem;
+    padding: 1.5rem;
+}
+
+button,
+input,
+textarea {
+    font: inherit;
+}
+
+button {
+    cursor: pointer;
+    margin: .25rem;
+}
+
+label,
+input,
+textarea {
+    display: block;
+    margin: .5rem 0;
+}
+
+textarea {
+    box-sizing: border-box;
+    min-height: 7rem;
+    width: 100%;
+}
+
+#messages {
+    min-height: 8rem;
+    padding-inline-start: 1.5rem;
+}
+
+#messages li {
+    margin: .75rem 0;
+    overflow-wrap: anywhere;
+}
+
+#error {
+    color: #d04444;
+}
+
+@media (prefers-color-scheme: dark) {
+    :root {
+        color: #ededed;
+        background-color: #121212;
+    }
+
+    #error {
+        color: #ff8585;
+    }
+}
+
+.remember {
+    align-items: center;
+    display: flex;
+    gap: .5rem;
+}
+
+.remember input {
+    margin: 0;
+}
