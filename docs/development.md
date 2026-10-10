@@ -70,6 +70,15 @@ custom proxy prefix, are preserved. Controlled integration tests execute the
 actual Copilot runtime through production Local/Hybrid composition against
 strict completion paths; startup-only checks are not inference evidence.
 
+Local chat preserves the application-owned current question instead of the
+SDK's default date/XML wrapper. Earlier history is explicitly quoted and
+labelled as context, not sent as an opaque provenance packet. Validate a model
+with the opt-in [Local chat comparison](testing.md#local-chat-model-comparison);
+passing controlled-provider tests alone does not establish live model quality.
+Restart the host after updating binaries. Existing accounts/history remain;
+use a new conversation for clean comparisons rather than retaining earlier
+incorrect model responses.
+
 The M1 local coordinator uses a 120-second end-to-end interactive turn
 deadline by default, starting at durable acceptance and including queue wait,
 routing, context construction, and inference. The engine receives only the

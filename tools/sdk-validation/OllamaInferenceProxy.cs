@@ -24,6 +24,7 @@ internal sealed class OllamaInferenceProxy : IAsyncDisposable
     public string BaseUrl { get; }
     public int RequestCount => Volatile.Read(ref _requestCount);
     public ConcurrentQueue<string> Destinations { get; } = new();
+    public Action<string>? ObserveSyntheticRequest { get; set; }
 
     public static Task<OllamaInferenceProxy> StartAsync(string upstreamBaseUrl)
     {
@@ -94,9 +95,18 @@ internal sealed class OllamaInferenceProxy : IAsyncDisposable
         Destinations.Enqueue($"{destination.GetLeftPart(UriPartial.Authority)}{destination.AbsolutePath}");
         Interlocked.Increment(ref _requestCount);
 
+        using var body = new MemoryStream();
+        var input = context.Request.InputStream;
+        if (context.Request.HasEntityBody && ObserveSyntheticRequest is { } observe)
+        {
+            await input.CopyToAsync(body, _shutdown.Token);
+            observe(System.Text.Encoding.UTF8.GetString(body.ToArray()));
+            body.Position = 0;
+            input = body;
+        }
         using var request = new HttpRequestMessage(new HttpMethod(context.Request.HttpMethod), destination)
         {
-            Content = context.Request.HasEntityBody ? new StreamContent(context.Request.InputStream) : null,
+            Content = context.Request.HasEntityBody ? new StreamContent(input) : null,
         };
         if (request.Content is not null && context.Request.ContentType is { Length: > 0 } contentType)
         {

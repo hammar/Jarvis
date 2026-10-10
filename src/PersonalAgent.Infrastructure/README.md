@@ -92,6 +92,15 @@ already-selected context, exact tool catalog, deadline, and maximum tool-call
 count. The adapter does not route, approve context, or authorize a tool;
 callbacks always pass through the host's `IToolDispatcher`.
 
+The adapter uses `LocalChatPrompt` for selected history/current-task framing
+and the supported `OnUserPromptTransformed` hook to keep the model-facing prompt
+identical to the application-owned text. Runtime-added date/XML framing caused
+reproducible refusals in native Llama chat; opaque provenance packets also
+obscured the current task. No runtime/private transcript files are seeded and
+no real prompts are logged. See the
+[prompt reliability investigation](../../docs/tasks/local-chat-prompt-reliability.md)
+and [live comparison commands](../../docs/testing.md#local-chat-model-comparison).
+
 Configure `CopilotAgentEngineOptions` from trusted host configuration. Set
 `RuntimeDirectory` beneath a private application data directory; local and
 cloud provider settings each require an explicit OpenAI-compatible `Model` and

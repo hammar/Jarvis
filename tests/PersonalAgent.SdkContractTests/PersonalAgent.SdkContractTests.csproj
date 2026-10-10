@@ -8,5 +8,6 @@
     <ProjectReference Include="../../src/PersonalAgent.Infrastructure/PersonalAgent.Infrastructure.csproj" />
     <ProjectReference Include="../PersonalAgent.TestSupport/PersonalAgent.TestSupport.csproj" />
     <Compile Include="../../tools/sdk-validation/FakeOpenAiProvider.cs" Link="Fixtures/FakeOpenAiProvider.cs" />
+    <Compile Include="../../tools/sdk-validation/OllamaInferenceProxy.cs" Link="Fixtures/OllamaInferenceProxy.cs" />
   </ItemGroup>
 </Project>

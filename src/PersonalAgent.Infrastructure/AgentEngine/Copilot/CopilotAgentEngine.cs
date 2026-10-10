@@ -5,6 +5,7 @@ using System.Threading.Channels;
 using GitHub.Copilot;
 using Microsoft.Extensions.AI;
 using PersonalAgent.Application;
+using PersonalAgent.Application.Context;
 using PersonalAgent.Domain;
 using PersonalAgent.Infrastructure.Persistence;
 using PermissionDecision = GitHub.Copilot.Rpc.PermissionDecision;
@@ -495,6 +496,12 @@ public sealed class CopilotAgentEngine : IAgentEngine
                     Mode = SystemMessageMode.Replace,
                     Content = request.Instructions
                 },
+                Hooks = new SessionHooks
+                {
+                    // The host owns the bounded prompt; runtime date/XML wrappers change small-model behavior.
+                    OnUserPromptTransformed = (input, _) => Task.FromResult<UserPromptTransformedHookOutput?>(
+                        new UserPromptTransformedHookOutput { ModifiedTransformedPrompt = input.Prompt })
+                },
                 OnPermissionRequest = (_, _) =>
                     Task.FromResult(PermissionDecision.Reject("Only host-registered tools are permitted.")),
                 Tools = tools
@@ -513,12 +520,7 @@ public sealed class CopilotAgentEngine : IAgentEngine
                 }
             });
 
-            var prompt = JsonSerializer.Serialize(new
-            {
-                packetId = request.Context.PacketId,
-                policyVersion = request.Context.PolicyVersion,
-                items = request.Context.Items
-            });
+            var prompt = LocalChatPrompt.Format(request.Context.Items);
             var turn = session.SendAndWaitAsync(new MessageOptions { Prompt = prompt });
             var response = await turn.WaitAsync(cancellationToken);
             var content = response?.Data.Content;

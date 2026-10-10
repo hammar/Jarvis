@@ -17,6 +17,50 @@ are 13.6.0, Playwright for .NET is 1.63.0, and the SDK package/runtime remain
 GitHub.Copilot.SDK 1.0.16 / Copilot CLI 1.0.90. Exact dependency graphs are in
 committed NuGet lock files.
 
+## Local chat model comparison
+
+With native Ollama running and the model already installed, run synthetic-only
+live checks (no household/cloud credentials or real Jarvis data):
+
+```sh
+JARVIS_OLLAMA_MODEL=gemma3:4b \
+  dotnet test tests/PersonalAgent.SdkContractTests -c Release \
+  --filter 'Category=LiveOllama' --logger 'console;verbosity=detailed'
+JARVIS_OLLAMA_MODEL=gemma3:4b \
+  dotnet test tests/PersonalAgent.IntegrationTests -c Release \
+  --filter 'Category=LiveOllama'
+JARVIS_OLLAMA_MODEL=llama3.2:latest \
+  dotnet test tests/PersonalAgent.IntegrationTests -c Release \
+  --filter 'Category=LiveOllama'
+JARVIS_OLLAMA_MODEL=llama3.2:latest \
+  dotnet test tests/PersonalAgent.SdkContractTests -c Release \
+  --filter 'Category=LiveOllama' --logger 'console;verbosity=detailed'
+```
+
+`JARVIS_OLLAMA_BASE_URL`, if set, is the explicit loopback OpenAI API base
+(normally `http://127.0.0.1:11434/v1`). These are optional live evaluations,
+not credential-free CI gates. The tests use the production context builder,
+Copilot engine, isolated SQLite and a loopback observation proxy. They assert
+successive word/symbol arithmetic answers `63`, `15`, `8`, and a context-dependent
+`otter` follow-up. They compare actual SDK output, an exact captured-request
+replay and conventional role-separated direct Ollama requests at matching
+temperature/top-p. Diagnostic output contains only the synthetic fixture
+requests; production hosts do not expose or enable payload logging. Delete
+locally redirected diagnostic logs after investigation; temporary databases
+and runtime directories are disposed by the tests.
+
+The integration-project live check separately exercises authenticated HTTP
+submission, the production coordinator, native Ollama inference, SSE completion
+and durable history. It uses the default native Ollama listener on port 11434
+and no DI replacement for inference. Tests are skipped without the explicit
+model setting and are outside the required CI selectors.
+
+Required credential-free regressions check the exact provider-bound prompt
+through the actual runtime, including no SDK date wrapper, no packet/private
+provenance metadata and quoted ordered history. Live observations cover the
+tested installed model versions only, not correctness across arbitrary models,
+unbounded transcripts or byte-identical Ollama GUI output.
+
 ## Coverage semantics
 
 `tools/PersonalAgent.Validation` consumes VSTest TRX discovery results and
@@ -40,7 +84,8 @@ lines / 85% branches; combined unit+integration first-party runtime at 85% /
 state machine in `AgentEngine/Copilot/CopilotTurnStateMachine.cs` and active
 turn cancellation/runtime lifecycle in `AgentEngine/Copilot/CopilotActiveTurn.cs`,
 and M1 routing/context policy in `Application/Routing/LocalOnlyModelRouter.cs`
-and `Application/Context/ConversationContextBuilder.cs`, plus M1 bounded local
+and `Application/Context/ConversationContextBuilder.cs` and its model-facing
+formatter `Application/Context/LocalChatPrompt.cs`, plus M1 bounded local
 turn lifecycle, queue, and recovery in
 `Application/TurnCoordination/LocalTurnCoordinator.cs`, at 95% / 90%;
 changed executable lines at 90%.

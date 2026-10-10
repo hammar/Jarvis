@@ -14,7 +14,7 @@ depends on SQLite, Copilot SDK or ASP.NET Core. It uses SQLite as the durable
 authority through those contracts; queued model work is never replayed after a
 restart. Context estimates count
 instructions, task text, the serialized tool catalog, selected history and
-packet framing, then reserve 20% margin using a labelled estimate of four
+model-facing prompt framing, then reserve 20% margin using a labelled estimate of four
 UTF-16 characters per token. These estimates are not provider tokenizer
 counts. Fixed M1 limits are 8,000 UTF-16 characters each for task text and
 host instructions; at most 8 tools; and 12 recent history messages of at most
@@ -25,6 +25,11 @@ older messages were omitted. `ContextEstimate.MinimumOmittedHistoryMessages`
 is a known lower bound, not a total count: the builder reads only the latest
 13 rows to cap work. `HasMoreHistory` indicates whether the extra sentinel
 row proves that additional older history exists.
+
+`Context/LocalChatPrompt` supplies shared host chat instructions and formats
+the current task plainly after quoted, role-labelled history. Packet provenance
+and privacy metadata stay application-owned. The estimate counts the same
+formatted text that the Copilot adapter sends.
 
 Entry points: `PersonalAgent.Application.Contracts`,
 `PersonalAgent.Application.TurnOutcomeContracts`,

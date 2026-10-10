@@ -75,10 +75,22 @@ Its
 `HasMoreHistory` separately reports when the sentinel proves older rows exist.
 Its
 estimate includes host instructions, task text, serialized
-tool definitions, conversation history and packet framing. Without a provider
+tool definitions, conversation history and model-facing prompt framing. Without a provider
 tokenizer it reports a four-UTF-16-characters-per-token estimate plus a 20%
 reserve, not an exact count. These M1 policies do not implement cloud consent,
 memory retrieval or tool execution.
+
+`LocalChatPrompt` sends the current request as plain text, preceded only when
+needed by JSON-quoted, role-labelled earlier conversation text. Provenance and
+privacy labels remain in the application packet. Host instructions distinguish
+answering a user request from granting it authority over policy or capabilities.
+The Copilot adapter uses the pinned SDK's user-prompt-transformed hook to
+preserve that bounded prompt without unsolicited date/XML wrappers. SDK
+sessions remain disposable per turn. This SDK pin has no public assistant-role
+history seeding API; reconstructed history is labelled text, not native chat
+messages. This preserves selected conversation context without replaying
+previous inference. It does not promise identical bytes to the Ollama GUI,
+which can use different prompts, generation settings and context windows.
 
 `LocalTurnCoordinator` is the Application-owned lifecycle boundary for local
 turns. It transactionally accepts the request, user message, durable
