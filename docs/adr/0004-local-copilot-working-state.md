@@ -69,6 +69,15 @@ establish safe production compaction under the current context contract.
 Production infinite sessions remain disabled. Truncation/reconstruction is not
 reported as compaction, and A6 remains incomplete.
 
+Further public-state experiments show that `SummaryContent` is not the complete
+compacted provider message. The runtime wraps it with original user instructions
+and additional framing; the first original request survives even when its
+assistant answer is removed. `GetEventsAsync` retains the original user and
+assistant events after compaction rather than exposing only active model
+context. Context attribution/heaviest-message APIs return counts and truncated
+labels, not the full message text. Neither the event archive nor the summary
+alone is therefore a validated substitute for the complete compacted request.
+
 Further work must establish enforceable summary/retained-context accounting
 before inference, including summary failure and oversize rejection, or obtain
 an explicit owner-approved scope change. No acceptance waiver is inferred from

@@ -387,3 +387,47 @@ blocker without changing transport. The owner was unavailable and no choice
 was made. Autonomous continuation is not approval to change accepted
 transport/privacy policy or waive A6. Production compaction stays disabled;
 this task remains incomplete pending that decision and its resulting evidence.
+
+## Continued public-state compaction investigation
+
+To avoid requiring a transport change unnecessarily, inspected the pinned
+public `SessionHooks`, `CopilotSession` and `SessionRpc` members and exercised
+`Metadata.GetContextAttributionAsync`, `GetContextHeaviestMessagesAsync` and
+`GetEventsAsync` around actual manual compaction. Reflection was restricted
+to public members; temporary diagnostic enumeration was removed.
+No private SDK transcript or private API was read or changed.
+
+The public hooks cover prompt submission/transformation, tools, session
+lifecycle and errors, not a complete model-request inspection hook.
+Attribution reports token categories; heaviest-message metadata reports a role,
+token count and truncated label, not complete text. The public event archive
+retains original user/assistant events even after those messages are compacted.
+It is therefore not the active provider message array.
+
+The actual compacted provider message includes the original user request inside
+`<user_message>` framing followed by `SummaryContent` inside `<summary>`.
+The original assistant answer is absent. Short and oversized summary cases
+both demonstrate this behavior with native roles system/user/user.
+Checking returned summary size alone would omit retained source text and
+runtime framing. Added assertions to the existing pinned-runtime contract
+for that distinction, archival events and the emitted roles.
+
+An initial hypothesis that compaction removed the original user request failed
+both targeted cases; the captured synthetic request disproved it. Corrected
+the expectation to assert the observed retained request, not loosen a production
+gate. Subsequent targeted manual-compaction cases passed2/2. This is new
+capability evidence, not production compaction or closure of A6.
+
+After these assertions, `tools/validate.sh sdk-contracts` passed the standalone
+actual-runtime harness and46/46 SDK contracts with discovery;
+`tools/validate.sh docs` and `git diff --check` passed.
+Evidence is under `artifacts/m104-public-state-sdk.log` and
+`artifacts/m104-public-compaction-state.log`.
+A narrow independent review returned only "No significant issues found"
+without supporting checks or dispositions. That response is not sufficient
+review evidence under the repository contract and is not represented as
+independent verification of this latest evidence delta.
+Earlier substantiated reviews and the complete R01-R08 ledger remain intact.
+No new production behavior, configuration, dependencies or acceptance waiver
+was introduced. Linux/coverage/E2E results above remain attributed to10cc799,
+not claimed as rerun for these test-only additions. A6 remains blocking.

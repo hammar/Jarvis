@@ -234,8 +234,31 @@ public sealed class CopilotAgentEngineContractTests(ITestOutputHelper output)
         }
         var context = await session.Rpc.Metadata.ContextInfoAsync(8192, 0, "fixture-model");
         output.WriteLine(JsonSerializer.Serialize(context));
+        var attribution = await session.Rpc.Metadata.GetContextAttributionAsync()
+            .WaitAsync(TimeSpan.FromSeconds(15));
+        var heaviest = await session.Rpc.Metadata.GetContextHeaviestMessagesAsync(100)
+            .WaitAsync(TimeSpan.FromSeconds(15));
+        output.WriteLine($"attribution={JsonSerializer.Serialize(attribution)}");
+        output.WriteLine($"heaviest={JsonSerializer.Serialize(heaviest)}");
+        var publicEvents = await session.GetEventsAsync().WaitAsync(TimeSpan.FromSeconds(15));
+        Assert.Contains(publicEvents.OfType<UserMessageEvent>(),
+            item => item.Data.Content == "Remember the synthetic number 42.");
+        Assert.Contains(publicEvents.OfType<AssistantMessageEvent>(),
+            item => item.Data.Content == "JARVIS_MANUAL_ANSWER");
+        Assert.Equal(summary, Assert.Single(publicEvents.OfType<SessionCompactionCompleteEvent>()).Data.SummaryContent);
         await session.SendAndWaitAsync(new MessageOptions { Prompt = "Recall the synthetic number." });
-        Assert.Contains("JARVIS_MANUAL_SUMMARY", provider.Requests.Last().Body, StringComparison.Ordinal);
+        var compactedRequest = provider.Requests.Last().Body;
+        Assert.Contains("JARVIS_MANUAL_SUMMARY", compactedRequest, StringComparison.Ordinal);
+        Assert.Contains("Remember the synthetic number 42.", compactedRequest, StringComparison.Ordinal);
+        Assert.DoesNotContain("JARVIS_MANUAL_ANSWER", compactedRequest, StringComparison.Ordinal);
+        using var compactedJson = JsonDocument.Parse(compactedRequest);
+        var compactedMessages = compactedJson.RootElement.GetProperty("messages").EnumerateArray().ToArray();
+        Assert.Equal(new[] { "system", "user", "user" }, ReadRoles(compactedRequest));
+        var summaryPrompt = compactedMessages[1].GetProperty("content").GetString();
+        Assert.NotNull(summaryPrompt);
+        Assert.True(summaryPrompt.Length > summary.Length + "Remember the synthetic number 42.".Length);
+        Assert.Contains("<user_message>", summaryPrompt, StringComparison.Ordinal);
+        Assert.Contains("<summary>", summaryPrompt, StringComparison.Ordinal);
     }
 #pragma warning restore GHCP001
 
