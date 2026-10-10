@@ -8,6 +8,8 @@ Read this file, the project specification, relevant accepted ADRs, the task brie
 
 The selected stack is C#, GitHub Copilot SDK behind an application-owned adapter, ASP.NET Core/Razor Pages with SSE, SQLite, Ollama and approved Home Assistant tools. Aspire AppHost and ServiceDefaults are required for development and distributed testing. Cloud inference requires explicit routing and reviewed consent. Preserve configuration, credentials, durable conversations and jobs across updates.
 
+Prefer delegating supported service flows to established, high-quality libraries over modifying or reimplementing those flows in Jarvis. For example, let the Copilot SDK own native conversation compaction. Validate configuration and integration, retain application-owned policy and durable-state boundaries, and disclose dependency limitations. Do not introduce compensating logic for a dependency bug by default; surface it upstream and obtain an explicit owner decision if a workaround is necessary.
+
 An implementation is complete only when its acceptance criteria, meaningful tests, relevant documentation and required checks pass. Do not report mock behavior as SDK validation or live behavior. Never return success stubs, swallow errors to pass tests, disable a failing gate or claim checks that were not run.
 
 ## Scope and coordination
