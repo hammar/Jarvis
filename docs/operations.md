@@ -34,7 +34,9 @@ Startup and hourly maintenance remove idle/orphan engine copies without
 inference; an owner retention update is reflected by the next maintenance pass,
 not synchronously by the settings request. Active or unresolved runtime shutdown
 paths are not pruned. Startup engine-maintenance failure stops startup; hourly
-failures use the existing degraded health/error reporting below. Removing SDK
+failures use the existing degraded health/error reporting below. Startup failures
+log only the error type and propagate a sanitized exception without private
+filesystem paths or inner exception content. Removing SDK
 copies after stopping the host does not delete SQLite conversations, but the next
 turn must reconstruct its selected history. Ready-checkpoint persistence failure
 is explicitly Interrupted (`session_checkpoint_failed`) without committing an

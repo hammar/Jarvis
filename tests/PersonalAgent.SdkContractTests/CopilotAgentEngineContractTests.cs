@@ -1412,6 +1412,182 @@ public sealed class CopilotAgentEngineContractTests(ITestOutputHelper output)
 
     [Fact]
     [Trait("Category", "SdkContract")]
+    public async Task ClaimReadFailureTerminatesEnumerationAndReleasesConversationOwnership()
+    {
+        using var data = IsolatedDirectory.Create();
+        var inner = new SqliteConversationStore(await CreateDatabaseAsync(Path.Combine(data.Path, "jarvis.db")), new TestClock());
+        await using var provider = await FakeOpenAiProvider.StartAsync();
+        var failedReads = 0;
+        var store = new ControlledTurnEventStore(inner, failFirstAppend: false)
+        {
+            BeforeGetTurn = _ => Interlocked.Increment(ref failedReads) == 1
+                ? Task.FromException(new IOException("synthetic claim read failure"))
+                : Task.CompletedTask
+        };
+        var engine = CreateEngine(store, provider.BaseUrl, provider.BaseUrl, Path.Combine(data.Path, "runtime"));
+        var conversation = ConversationId.New();
+        var first = await CreateTurnAsync(inner, conversation);
+        await Assert.ThrowsAsync<IOException>(() => CollectAsync(engine.RunTurnAsync(
+            CreateRequest(first, ProviderKind.Local, "FIRST_REQUEST", conversationId: conversation),
+            CancellationToken.None)).WaitAsync(TimeSpan.FromSeconds(3)));
+        Assert.Empty(provider.Requests);
+        var second = await CreateTurnAsync(inner, conversation);
+        Assert.Single((await CollectAsync(engine.RunTurnAsync(
+            CreateRequest(second, ProviderKind.Local, "SECOND_REQUEST", conversationId: conversation),
+            CancellationToken.None)).WaitAsync(TimeSpan.FromSeconds(15))).OfType<TurnCompleted>());
+    }
+
+    [Fact]
+    [Trait("Category", "SdkContract")]
+    public async Task UnregisteredToolOnResumedSessionCannotInvokeHostDispatcher()
+    {
+        using var data = IsolatedDirectory.Create();
+        var store = new SqliteConversationStore(await CreateDatabaseAsync(Path.Combine(data.Path, "jarvis.db")), new TestClock());
+        await using var provider = await FakeOpenAiProvider.StartAsync();
+        var dispatcher = new RecordingDispatcher(new ToolDispatchResult("Succeeded", "{}", null));
+        var engine = new CopilotAgentEngine(store, dispatcher, new TestClock(),
+            new CopilotAgentEngineOptions(Path.Combine(data.Path, "runtime"),
+                new CopilotProviderOptions("fixture-model", new Uri(provider.BaseUrl)), null));
+        var conversation = ConversationId.New();
+        var prior = await CreateTurnAsync(store, conversation);
+        Assert.Single((await CollectAsync(engine.RunTurnAsync(
+            CreateRequest(prior, ProviderKind.Local, "PRIOR_REQUEST", conversationId: conversation),
+            CancellationToken.None))).OfType<TurnCompleted>());
+        provider.UnsolicitedToolRequestNumber = 2;
+        provider.RequestedTool = "bash";
+        var current = await CreateTurnAsync(store, conversation);
+        var request = CreateRequest(current, ProviderKind.Local, "CURRENT_REQUEST", conversationId: conversation);
+        request = request with
+        {
+            Context = request.Context with
+            {
+                Items =
+                [
+                    new ContextItem("history:user", "PRIOR_REQUEST", "LocalOnly", "user"),
+                    new ContextItem("history:assistant", "streamed fixture answer", "LocalOnly", "assistant"),
+                    request.Context.Items[^1]
+                ]
+            }
+        };
+        var events = await CollectAsync(engine.RunTurnAsync(request, CancellationToken.None));
+        Assert.Single(events.OfType<TurnCompleted>());
+        Assert.Empty(events.OfType<RuntimeContextRebuilt>());
+        Assert.Empty(events.OfType<ToolProposed>());
+        Assert.Equal(0, dispatcher.Calls);
+        Assert.Empty(provider.Requests.SelectMany(item => item.ToolNames));
+    }
+
+    [Theory]
+    [InlineData("model")]
+    [InlineData("instructions")]
+    [InlineData("policy")]
+    [Trait("Category", "SdkContract")]
+    public async Task ChangedCompatibilityReconstructsBoundedContextBeforeInference(string changed)
+    {
+        using var data = IsolatedDirectory.Create();
+        var store = new SqliteConversationStore(await CreateDatabaseAsync(Path.Combine(data.Path, "jarvis.db")), new TestClock());
+        await using var provider = await FakeOpenAiProvider.StartAsync();
+        var runtime = Path.Combine(data.Path, "runtime");
+        var conversation = ConversationId.New();
+        var prior = await CreateTurnAsync(store, conversation);
+        Assert.Single((await CollectAsync(CreateEngine(store, provider.BaseUrl, provider.BaseUrl, runtime)
+            .RunTurnAsync(CreateRequest(prior, ProviderKind.Local, "PRIOR_REQUEST", conversationId: conversation),
+                CancellationToken.None))).OfType<TurnCompleted>());
+        var selectedModel = changed == "model" ? "changed-fixture-model" : "fixture-model";
+        var engine = new CopilotAgentEngine(store,
+            new RecordingDispatcher(new ToolDispatchResult("Succeeded", "{}", null)), new TestClock(),
+            new CopilotAgentEngineOptions(runtime, new CopilotProviderOptions(selectedModel, new Uri(provider.BaseUrl)), null));
+        var current = await CreateTurnAsync(store, conversation);
+        var request = CreateRequest(current, ProviderKind.Local, "CURRENT_REQUEST", conversationId: conversation);
+        request = request with
+        {
+            Instructions = changed == "instructions" ? request.Instructions + " Keep answers concise." : request.Instructions,
+            Context = request.Context with
+            {
+                PolicyVersion = changed == "policy" ? "changed-policy" : request.Context.PolicyVersion,
+                Items =
+                [
+                    new ContextItem("history:user", "PRIOR_REQUEST", "LocalOnly", "user"),
+                    new ContextItem("history:assistant", "streamed fixture answer", "LocalOnly", "assistant"),
+                    request.Context.Items[^1]
+                ]
+            }
+        };
+        var events = await CollectAsync(engine.RunTurnAsync(request, CancellationToken.None));
+        Assert.Single(events.OfType<TurnCompleted>());
+        Assert.Single(events.OfType<RuntimeContextRebuilt>());
+        var outbound = provider.Requests.Last();
+        using var body = JsonDocument.Parse(outbound.Body);
+        Assert.Equal(selectedModel, body.RootElement.GetProperty("model").GetString());
+        Assert.Equal(["system", "user"], ReadRoles(outbound.Body));
+        Assert.Contains("PRIOR_REQUEST", outbound.Body, StringComparison.Ordinal);
+        Assert.Contains("CURRENT_REQUEST", outbound.Body, StringComparison.Ordinal);
+        Assert.Equal(2, provider.RequestCount);
+    }
+
+    [Fact]
+    [Trait("Category", "SdkContract")]
+    public async Task RegistrationWaitsForContestedPruningAndRetainsTheCompletedConversation()
+    {
+        using var data = IsolatedDirectory.Create();
+        var inner = new SqliteConversationStore(await CreateDatabaseAsync(Path.Combine(data.Path, "jarvis.db")), new TestClock());
+        await using var provider = await FakeOpenAiProvider.StartAsync();
+        var runtime = Path.Combine(data.Path, "runtime");
+        var conversation = ConversationId.New();
+        var priorTurn = await CreateTurnAsync(inner, conversation);
+        var firstEngine = CreateEngine(inner, provider.BaseUrl, provider.BaseUrl, runtime);
+        Assert.Single((await CollectAsync(firstEngine.RunTurnAsync(
+            CreateRequest(priorTurn, ProviderKind.Local, "PRIOR_REQUEST", conversationId: conversation),
+            CancellationToken.None))).OfType<TurnCompleted>());
+        var pruneEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releasePrune = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var intercepted = 0;
+        var store = new ControlledTurnEventStore(inner, failFirstAppend: false)
+        {
+            BeforeGetTurn = async id =>
+            {
+                if (id == priorTurn && Interlocked.Exchange(ref intercepted, 1) == 0)
+                {
+                    pruneEntered.TrySetResult();
+                    await releasePrune.Task;
+                }
+            }
+        };
+        var engine = CreateEngine(store, provider.BaseUrl, provider.BaseUrl, runtime);
+        var pruning = engine.CleanupAsync(CancellationToken.None);
+        await pruneEntered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        var current = await CreateTurnAsync(inner, conversation);
+        var request = CreateRequest(current, ProviderKind.Local, "CURRENT_REQUEST", conversationId: conversation);
+        request = request with
+        {
+            Context = request.Context with
+            {
+                Items =
+                [
+                    new ContextItem("history:user", "PRIOR_REQUEST", "LocalOnly", "user"),
+                    new ContextItem("history:assistant", "streamed fixture answer", "LocalOnly", "assistant"),
+                    request.Context.Items[^1]
+                ]
+            }
+        };
+        var execution = CollectAsync(engine.RunTurnAsync(request, CancellationToken.None));
+        try
+        {
+            Assert.False(execution.IsCompleted);
+            Assert.Single(provider.Requests);
+        }
+        finally
+        {
+            releasePrune.TrySetResult();
+        }
+        await pruning.WaitAsync(TimeSpan.FromSeconds(3));
+        Assert.Single((await execution.WaitAsync(TimeSpan.FromSeconds(15))).OfType<TurnCompleted>());
+        Assert.Equal(["system", "user", "assistant", "user"], ReadRoles(provider.Requests.Last().Body));
+        Assert.True(Directory.Exists(Path.Combine(runtime, $"conversation-{conversation.Value:N}")));
+    }
+
+    [Fact]
+    [Trait("Category", "SdkContract")]
     public async Task MaintenancePreservesActiveSessionAndRemovesIdleCopyWithoutAnotherTurn()
     {
         using var data = IsolatedDirectory.Create();
@@ -1681,10 +1857,12 @@ public sealed class CopilotAgentEngineContractTests(ITestOutputHelper output)
     private sealed class ControlledTurnEventStore(
         IConversationStore inner,
         bool blockFirstAppendUntilCancelled = false,
-        bool blockBudgetRejectionUntilCancelled = false)
+        bool blockBudgetRejectionUntilCancelled = false,
+        bool failFirstAppend = true)
         : IConversationStore, IAtomicTurnOutcomeStore
     {
-        private int shouldFail = 1;
+        private int shouldFail = failFirstAppend ? 1 : 0;
+        public Func<TurnId, Task>? BeforeGetTurn { get; init; }
         public TaskCompletionSource BudgetRejectionStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource BudgetRejectionCancelled { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -1738,8 +1916,14 @@ public sealed class CopilotAgentEngineContractTests(ITestOutputHelper output)
             CancellationToken cancellationToken) =>
             inner.CreateTurnAsync(turnId, conversationId, status, createdAtUtc, cancellationToken);
 
-        public ValueTask<ConversationTurn?> GetTurnAsync(TurnId turnId, CancellationToken cancellationToken) =>
-            inner.GetTurnAsync(turnId, cancellationToken);
+        public async ValueTask<ConversationTurn?> GetTurnAsync(TurnId turnId, CancellationToken cancellationToken)
+        {
+            if (BeforeGetTurn is not null)
+            {
+                await BeforeGetTurn(turnId).WaitAsync(cancellationToken);
+            }
+            return await inner.GetTurnAsync(turnId, cancellationToken);
+        }
 
         public ValueTask<ConversationTurn?> GetTurnForOwnerAsync(
             TurnId turnId,

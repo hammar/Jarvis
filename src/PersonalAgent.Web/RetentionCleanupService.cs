@@ -67,7 +67,19 @@ public sealed class RetentionCleanupService : BackgroundService, IHealthCheck
     {
         if (engineState is not null)
         {
-            await engineState.CleanupAsync(stoppingToken);
+            try
+            {
+                await engineState.CleanupAsync(stoppingToken);
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception error)
+            {
+                logger.LogError("Engine startup cleanup failed with {ErrorType}.", error.GetType().Name);
+                throw new InvalidOperationException("Engine startup cleanup failed; inspect private storage availability and permissions.");
+            }
         }
 
         using var timer = new PeriodicTimer(cleanupInterval);

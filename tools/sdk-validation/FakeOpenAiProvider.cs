@@ -25,6 +25,7 @@ internal sealed class FakeOpenAiProvider : IAsyncDisposable
     public ConcurrentQueue<CapturedRequest> Requests { get; } = new();
     public string RequestedTool { get; set; } = "read_only_lookup";
     public bool RepeatTool { get; set; }
+    public int? UnsolicitedToolRequestNumber { get; set; }
     public bool FailInference { get; set; }
     public bool StallInference { get; set; }
     public bool PauseInference { get; set; }
@@ -165,7 +166,7 @@ internal sealed class FakeOpenAiProvider : IAsyncDisposable
             return;
         }
 
-        if ((index == 1 || RepeatTool) && toolNames.Length > 0)
+        if (((index == 1 || RepeatTool) && toolNames.Length > 0) || index == UnsolicitedToolRequestNumber)
         {
             await WriteJsonAsync(context.Response,
                 JsonSerializer.Serialize(new

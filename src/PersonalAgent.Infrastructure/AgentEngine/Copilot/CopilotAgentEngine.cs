@@ -197,6 +197,23 @@ public sealed class CopilotAgentEngine : IAgentEngine, IEngineStateMaintenance
         CancellationToken callerToken,
         CancellationToken consumerStoppedToken)
     {
+        try
+        {
+            await ExecuteTurnCoreAsync(request, active, output, callerToken, consumerStoppedToken);
+        }
+        finally
+        {
+            output.TryComplete();
+        }
+    }
+
+    private async Task ExecuteTurnCoreAsync(
+        AgentTurnRequest request,
+        CopilotActiveTurn active,
+        ChannelWriter<AgentEvent> output,
+        CancellationToken callerToken,
+        CancellationToken consumerStoppedToken)
+    {
         using var deadline = new CancellationTokenSource(request.Deadline);
         using var turnCancellation = new CancellationTokenSource();
         using var eventCancellation = CancellationTokenSource.CreateLinkedTokenSource(

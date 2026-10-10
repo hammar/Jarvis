@@ -142,12 +142,15 @@ public sealed class SqliteAndWebSmokeTests
         }
     }
 
-    [Fact]
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     [Trait("Category", "Integration")]
-    public async Task CleanupFailureAppearsInAuthenticatedWebReadinessWithSafeLogging()
+    public async Task CleanupFailureAppearsInAuthenticatedWebReadinessWithSafeLogging(bool engineFailure)
     {
         using var data = IsolatedDirectory.Create();
         var store = new FailingCleanupStore();
+        var engineState = new FailingEngineMaintenance(failAtStartup: false);
         var logger = new MaintenanceLogger();
         await using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(web =>
         {
@@ -157,8 +160,9 @@ public sealed class SqliteAndWebSmokeTests
             {
                 services.RemoveAll<RetentionCleanupService>();
                 services.AddSingleton(provider => new RetentionCleanupService(
-                    store, provider.GetRequiredService<IClock>(), new RetentionSettings(1, 1),
-                    TimeSpan.FromMilliseconds(20), logger));
+                    engineFailure ? new SuccessfulCleanupStore() : store,
+                    provider.GetRequiredService<IClock>(), new RetentionSettings(1, 1),
+                    TimeSpan.FromMilliseconds(20), logger, engineFailure ? engineState : null));
             });
         });
         using var client = factory.CreateClient();
@@ -173,7 +177,8 @@ public sealed class SqliteAndWebSmokeTests
             rememberMe = false
         });
         bootstrap.EnsureSuccessStatusCode();
-        await store.RetryStarted.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        await (engineFailure ? engineState.RetryStarted.Task : store.RetryStarted.Task)
+            .WaitAsync(TimeSpan.FromSeconds(3));
         using var ready = await client.GetAsync("/health/ready");
         Assert.Equal(HttpStatusCode.OK, ready.StatusCode);
         using var report = JsonDocument.Parse(await ready.Content.ReadAsStringAsync());
@@ -183,6 +188,50 @@ public sealed class SqliteAndWebSmokeTests
         Assert.Contains(TimeSpan.FromMilliseconds(20).ToString(), message, StringComparison.Ordinal);
         Assert.DoesNotContain("private-maintenance-detail", message, StringComparison.Ordinal);
         Assert.False(factory.Services.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping.IsCancellationRequested);
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task StartupEngineMaintenanceFailureStopsWorkerWithoutDisclosingPrivateException()
+    {
+        var logger = new MaintenanceLogger();
+        using var worker = new RetentionCleanupService(
+            new SuccessfulCleanupStore(), new SystemClock(), new RetentionSettings(1, 1),
+            TimeSpan.FromHours(1), logger, new FailingEngineMaintenance(failAtStartup: true));
+        await worker.StartAsync(CancellationToken.None);
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            worker.ExecuteTask!.WaitAsync(TimeSpan.FromSeconds(3)));
+        Assert.DoesNotContain("private-maintenance-detail", error.ToString(), StringComparison.Ordinal);
+        Assert.Null(error.InnerException);
+        var message = await logger.Failure.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        Assert.Contains("InvalidOperationException", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("private-maintenance-detail", message, StringComparison.Ordinal);
+    }
+
+    private sealed class SuccessfulCleanupStore : IHistoryRetentionStore
+    {
+        public ValueTask CleanupExpiredAsync(RetentionSettings defaults, DateTimeOffset nowUtc, CancellationToken cancellationToken) =>
+            ValueTask.CompletedTask;
+    }
+
+    private sealed class FailingEngineMaintenance(bool failAtStartup) : IEngineStateMaintenance
+    {
+        private int attempts;
+        public TaskCompletionSource RetryStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async Task CleanupAsync(CancellationToken cancellationToken)
+        {
+            var attempt = Interlocked.Increment(ref attempts);
+            if (attempt == (failAtStartup ? 1 : 2))
+            {
+                throw new InvalidOperationException("private-maintenance-detail");
+            }
+            if (attempt > 2)
+            {
+                RetryStarted.TrySetResult();
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            }
+        }
     }
 
     private sealed class FailingCleanupStore : IHistoryRetentionStore

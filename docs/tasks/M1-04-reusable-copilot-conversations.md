@@ -246,3 +246,58 @@ waive these. The coherent checkpoint exceeds the roughly 400-line review target
 because it includes actual-runtime capability experiments, recovery,
 context-boundary regressions and their evidence; no unrelated refactor is
 included.
+
+## Continued regression and platform evidence
+
+At `3834e04`, Linux aarch64 `tools/validate.sh build`, unit (96), integration
+(188), architecture (6), SDK contracts (40 plus standalone actual runtime),
+coverage and docs all passed in `mcr.microsoft.com/dotnet/sdk:10.0.401-noble`.
+The unchanged scripts used private source archives and a synthetic local Git
+baseline; no checkout Git configuration or credentials entered the container.
+Logs/TRX/coverage are under `artifacts/m104-linux/`. Containers were removed
+after exit. Initial Linux attempts failed because Aspire setup needed a writable
+tool cache and copying the entire shared package cache exceeded available tmpfs.
+The successful run retained the shared package cache read-only and installed
+the pinned Aspire CLI in an isolated writable tool cache instead. No shared
+Docker storage was pruned or thresholds changed.
+
+The originally failed browser scenario passed in isolation. A subsequent full
+`tools/validate.sh browser-e2e` passed **23/23**, including the required discovery
+check and deliberately failing browser gate probe. Earlier failure is retained
+above; its simulator-startup root cause remains unestablished, not silently
+declared fixed. This is native macOS evidence, not Linux browser/E2E evidence.
+
+Additional automated regression work:
+
+- `RegistrationWaitsForContestedPruningAndRetainsTheCompletedConversation`
+  deterministically holds the pruning checkpoint read while same-conversation
+  registration contests the gate, then verifies native continuity and retained
+  state. This fills M104-R03's contested-registration gap.
+- `ChangedCompatibilityReconstructsBoundedContextBeforeInference` covers
+  selected model, host instructions and context-policy changes with actual
+  provider-bound model/context assertions.
+- `UnregisteredToolOnResumedSessionCannotInvokeHostDispatcher` forces a `bash`
+  proposal without any advertised tool on a resumed session; no host dispatcher
+  or tool proposal event is invoked.
+- Startup and hourly engine-maintenance failure tests now exercise the actual
+  worker. Startup logs only error type and throws a sanitized host-stopping
+  exception; hourly failure remains degraded and privacy-filtered.
+- M104-R07's unconditional output completion now encloses the entire execution,
+  including pre-claim reads. `ClaimReadFailureTerminatesEnumerationAndReleasesConversationOwnership`
+  injects that earlier failure and verifies another turn can execute.
+
+Before that last execution-wrapper regression, native build, full integration
+**195/195**, SDK **45/45** plus standalone harness, coverage (302/314 changed
+lines, 96.2%) and docs passed. Initial targeted adversarial-test compilation used
+incorrect fixture property names; corrected before the successful actual-runtime
+run. Those results are not claimed for later unvalidated edits. Final affected
+gates and fix review remain pending.
+
+The compaction blocker is not just an arbitrary threshold choice: the public
+SDK API provides summary results and token metadata, not a reviewed pre-provider
+hook that can validate the complete compacted model-facing request with the
+host's selected-history and UTF-16 accounting contract. Prompt instructions or
+an advisory TokenLimit cannot enforce untrusted summary size. Using a new
+provider-interception boundary, changing the context contract, or refreshing SDK
+APIs would be material design work requiring compatibility/policy validation,
+not a quick fallback. No such architectural change or scope waiver is inferred.
