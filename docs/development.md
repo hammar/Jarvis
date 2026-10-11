@@ -135,7 +135,10 @@ Unicode scalar values; no model call is involved. Owners can rename through the
 authenticated chat UI, and the manual choice is retained across restarts and
 never replaced by automatic naming. The authenticated
 `PATCH /api/conversations/{id}` mutation requires CSRF validation and accepts a
-trimmed, nonempty title of at most 200 characters without control characters.
+trimmed title of at most 200 characters without control characters and with
+displayable text. Format-only titles are rejected; format characters alongside
+visible text, including emoji joiners, are preserved. The same validation
+applies to nonblank titles supplied when creating a conversation.
 
 The root page provides Chat, Settings, and Activity. Chat submits bounded
 requests with stable IDs and reconnects through the SSE `Last-Event-ID`

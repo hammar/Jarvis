@@ -34,8 +34,7 @@ public static class ConversationTitlePolicy
         }
         var title = string.Join(' ', normalized.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
         var scalars = title.EnumerateRunes().ToArray();
-        if (!scalars.Any(rune => !Rune.IsWhiteSpace(rune) &&
-            Rune.GetUnicodeCategory(rune) != UnicodeCategory.Format))
+        if (!ContainsDisplayableText(title))
         {
             return "Message without displayable text";
         }
@@ -51,16 +50,22 @@ public static class ConversationTitlePolicy
     /// <summary>Trims and validates a manually selected conversation title.</summary>
     /// <param name="title">Owner-provided title text.</param>
     /// <returns>The trimmed title suitable for durable storage.</returns>
-    /// <exception cref="ArgumentException">The title is empty, too long, or contains control characters.</exception>
+    /// <exception cref="ArgumentException">The title has no displayable text, is too long,
+    /// or contains control characters.</exception>
     public static string ValidateManualTitle(string title)
     {
         ArgumentNullException.ThrowIfNull(title);
         var normalized = title.Trim();
-        if (normalized.Length is 0 or > 200 || normalized.Any(char.IsControl))
+        if (normalized.Length is 0 or > 200 || normalized.Any(char.IsControl) ||
+            !ContainsDisplayableText(normalized))
         {
-            throw new ArgumentException("Conversation title must contain 1 through 200 non-control characters.", nameof(title));
+            throw new ArgumentException("Conversation title must contain displayable text within 1 through 200 non-control characters.", nameof(title));
         }
 
         return normalized;
     }
+
+    private static bool ContainsDisplayableText(string title) =>
+        title.EnumerateRunes().Any(rune => !Rune.IsWhiteSpace(rune) &&
+            Rune.GetUnicodeCategory(rune) != UnicodeCategory.Format);
 }

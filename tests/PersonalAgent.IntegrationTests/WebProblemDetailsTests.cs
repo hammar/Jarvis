@@ -281,7 +281,14 @@ public sealed class WebProblemDetailsTests
         }
         client.DefaultRequestHeaders.Add("X-CSRF-TOKEN", csrfToken);
 
-        foreach (var invalidTitle in new string?[] { null, "", "  ", new string('x', 201), "line\nbreak" })
+        foreach (var formatOnlyTitle in new[] { "\u200B\u2060", " \u200B \u2060 " })
+        {
+            using var invalidCreation = await client.PostAsJsonAsync(
+                "/api/conversations", new { title = formatOnlyTitle });
+            await AssertProblemAsync(invalidCreation, HttpStatusCode.BadRequest, "Conversation title is invalid.");
+        }
+
+        foreach (var invalidTitle in new string?[] { null, "", "  ", new string('x', 201), "line\nbreak", "\u200B\u2060", " \u200B \u2060 " })
         {
             using var invalid = await client.PatchAsJsonAsync(
                 $"/api/conversations/{owned.Id.Value:D}", new { title = invalidTitle });
@@ -289,6 +296,21 @@ public sealed class WebProblemDetailsTests
                 invalid.StatusCode == HttpStatusCode.BadRequest,
                 $"Unexpected status {invalid.StatusCode} for manual title '{invalidTitle}'.");
             await AssertProblemAsync(invalid, HttpStatusCode.BadRequest, "Conversation title is invalid.");
+            var unchanged = await store.GetConversationAsync(owned.Id, "owner", CancellationToken.None);
+            Assert.NotNull(unchanged);
+            Assert.Equal(string.Empty, unchanged.Title);
+            Assert.False(unchanged.TitleIsManual);
+        }
+
+        foreach (var visibleTitle in new[] { "👩\u200D💻 plans", "Visible\u2060text" })
+        {
+            using var visible = await client.PatchAsJsonAsync(
+                $"/api/conversations/{owned.Id.Value:D}", new { title = visibleTitle });
+            visible.EnsureSuccessStatusCode();
+            var persisted = await store.GetConversationAsync(owned.Id, "owner", CancellationToken.None);
+            Assert.NotNull(persisted);
+            Assert.Equal(visibleTitle, persisted.Title);
+            Assert.True(persisted.TitleIsManual);
         }
 
         using var renamed = await client.PatchAsJsonAsync(

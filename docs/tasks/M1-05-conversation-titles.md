@@ -43,7 +43,7 @@ and browser recovery scenarios.
 ## Behavior and assumptions
 
 - Reuse the existing 200 UTF-16 code-unit manual-title bound. Manual titles are
-  trimmed, nonempty, and reject control characters.
+  trimmed, contain displayable text, and reject control characters.
 - Automatic titles normalize Unicode to NFC, collapse all whitespace to one
   space, preserve visible punctuation, and cap at 80 Unicode scalar values
   (using an ellipsis when shortened). Control/format-only messages use the deterministic
@@ -96,6 +96,7 @@ and browser recovery scenarios.
 | R16 (medium) | The initial R15 guard suppressed a current sidebar-refresh failure after successful rename advanced the generation. | Fixed and independently re-reviewed: track the current feedback generation after the successful header mutation. Passing browser regression verifies saved header and visible list-refresh failure, while obsolete failure coverage remains. |
 | R17 (medium) | Away/back navigation during a pending rename could retain an old active-header title. | Fixed and independently reviewed: successful rename updates the selected conversation without invalidating newer navigation; reads overlapping that rename reconcile the returned title with its committed result. Passing controlled browser coverage exercises the old same-conversation read completing both before and after PATCH. |
 | R18 (Previously missed, medium) | Format-only Unicode first messages persisted a visually empty title. | Fixed and independently reviewed: normalized text containing only whitespace/format runes uses the existing deterministic fallback. Passing unit and real HTTP/SQLite regression cases cover U+200B/U+2060, whitespace mixing, preservation of visible emoji ZWJ text and later-turn title stability. |
+| R19 (Previously missed, medium) | Format-only manual titles persisted with permanent manual precedence and no readable label. | Fixed and independently reviewed: share the displayable-text predicate with automatic naming and reject format-only manual titles. Passing policy/API regressions cover rename rejection without title/provenance mutation, nonblank creation rejection, and preservation of visible text with joiners. |
 
 The independent reviewer found no new significant issues in the complete
 current diff. Review was against the current uncommitted worktree on macOS.
@@ -170,6 +171,14 @@ checks. Narrow independent inspection against the diff on `645baff` verified
 fallback behavior, visible format-character preservation, existing bounds and
 durable/later-turn API assertions with no concrete bugs. The reviewer did not
 rerun the suites. CI must validate the pushed revision.
+
+R19 passed native macOS build (zero warnings/errors), unit (115), integration
+(216), coverage (137/142 changed executable lines, 96.5%), docs and whitespace
+checks. Narrow independent review against the diff on `c666eeb` verified the
+shared predicate, creation/rename rejection, persisted provenance invariants
+and preservation of visible joined text with no significant issues. No schema
+change or rewriting of existing titles is involved. CI must validate the
+pushed revision.
 
 ## Completion criteria
 

@@ -43,6 +43,8 @@ public sealed class ConversationTitlePolicyTests
 
     [Theory]
     [InlineData("  Renamed  ", "Renamed")]
+    [InlineData(" 👩\u200D💻 plans ", "👩\u200D💻 plans")]
+    [InlineData(" Visible\u2060text ", "Visible\u2060text")]
     [Trait("Category", "Unit")]
     public void ManualTitleIsTrimmed(string input, string expected)
     {
@@ -53,6 +55,8 @@ public sealed class ConversationTitlePolicyTests
     [InlineData("")]
     [InlineData("   ")]
     [InlineData("bad\ntitle")]
+    [InlineData("\u200B\u2060")]
+    [InlineData(" \u200B \u2060 ")]
     [InlineData("too long")]
     [Trait("Category", "Unit")]
     public void InvalidManualTitlesAreRejected(string title)
