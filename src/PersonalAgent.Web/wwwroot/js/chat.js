@@ -202,6 +202,7 @@ document.getElementById("rename-form").addEventListener("submit", async event =>
     event.preventDefault();
     if (!conversationId || activeTurnId || turnSubmissionInFlight) return;
     const id = conversationId;
+    const renameSelectionGeneration = ++conversationSelectionGeneration;
     const title = document.getElementById("conversation-title-input").value;
     document.getElementById("save-title").disabled = true;
     clearError();
@@ -211,7 +212,7 @@ document.getElementById("rename-form").addEventListener("submit", async event =>
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ title })
         });
-        if (id === conversationId) {
+        if (id === conversationId && renameSelectionGeneration === conversationSelectionGeneration) {
             ++conversationSelectionGeneration;
             conversationTitle = renamed.title;
             document.getElementById("conversation-title").textContent = conversationTitle;

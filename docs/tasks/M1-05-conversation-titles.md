@@ -87,6 +87,7 @@ and browser recovery scenarios.
 | R8 (Previously missed, medium) | Local timestamps repeated during a daylight-saving fold without identifying the UTC offset. | Fixed and independently reviewed: append the instant-specific numeric UTC offset; browser regression compares both New York fallback instants. |
 | R9 (Previously missed, medium) | Navigating while rename was pending skipped the successful sidebar refresh. | Fixed and independently reviewed: only the active-header mutation is selection-gated; the sidebar always refreshes. Browser regression holds PATCH response, navigates, then checks sidebar update and unchanged selected header. |
 | R10 (Previously missed, low) | The submission contract incorrectly promised a first-message check instead of the documented blank/non-manual migration condition. | Fixed and independently reviewed: documentation describes non-duplicate submission, blank/non-manual title and legacy conversations with existing messages. |
+| R11 (Previously missed, medium) | A pending rename response could invalidate newer navigation before its conversation GET completed. | Fixed and independently reviewed: rename invalidates older reads at initiation, captures that generation, and mutates the header only if it remains current. The passing controlled browser regression completes PATCH before releasing the newer navigation GET. |
 
 The independent reviewer found no new significant issues in the complete
 current diff. Review was against the current uncommitted worktree on macOS.
@@ -130,6 +131,11 @@ findings from the review at `c714da2`. R8-R10 fixes passed native macOS build
 probe), docs and diff whitespace checks. Independent follow-up review against
 the worktree diff on `c714da2` confirmed all three fixes, reran build/browser/docs,
 and found no new meaningful bugs.
+
+R11 received a narrow independent review on `230b7e4` verifying both newer
+navigation arbitration and preservation of R3/R9 behavior, with no new bugs.
+Native macOS build, full browser E2E (24 plus expected failure probe), docs
+and whitespace checks passed for this follow-up.
 
 ## Completion criteria
 
