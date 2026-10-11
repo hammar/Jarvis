@@ -675,7 +675,6 @@ a:focus-visible {
 
     .conversation-list button {
         min-height: 2.75rem;
-        height: 100%;
     }
 
     .sidebar-actions {

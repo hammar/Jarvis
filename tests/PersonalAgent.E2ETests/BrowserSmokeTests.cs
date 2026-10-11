@@ -120,6 +120,14 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
                 Assert.True(sendHeight >= 44,
                     $"Send target is only {sendHeight}px high at {width}px.");
                 Assert.True(await page.Locator("#conversation-list time").IsVisibleAsync());
+                Assert.True(await page.EvaluateAsync<bool>(
+                    """
+                    () => {
+                        const list = document.getElementById("conversation-list").getBoundingClientRect();
+                        const timestamp = document.querySelector("#conversation-list time").getBoundingClientRect();
+                        return timestamp.top >= list.top && timestamp.bottom <= list.bottom;
+                    }
+                    """), $"Creation timestamp is clipped by the conversation list at {width}px.");
                 Assert.True(await page.Locator("#conversation-title-input").IsVisibleAsync());
             }
 

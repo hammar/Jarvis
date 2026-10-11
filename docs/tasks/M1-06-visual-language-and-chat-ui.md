@@ -105,3 +105,27 @@ contract change is expected from M1-06 itself.
 - Independent agentic review findings have explicit dispositions; handoff
   states exact revision/check evidence, platform/runtime limitations,
   unexercised behavior, and residual risks.
+
+## Main integration and review
+
+The owner's requested main integration uses a merge rather than a rebase:
+`f73bad3` checkpoints the previously uncommitted M1-06 work, and `b25b55e`
+merges main's `91aaa9a` (PR #43) without rewriting either history.
+Four textual conflicts in the specification, testing map, Razor page, and
+JavaScript were reconciled by preserving both task entries and combining
+M1-05's metadata/rename behavior with the approved presentation.
+
+The schema-v5 migration and backend naming implementation are imported
+unchanged. Header/list titles retain manual precedence, accepted-turn metadata
+updates, timestamp descriptions, and stale-list/read protections. Rename and
+timestamp styles use the existing design tokens. The conversation container
+uses flex layout so showing the optional rename form does not displace the
+message/composer grid tracks.
+
+Independent read-only agentic review examined `b25b55e` against both parents
+and the M1-05 cumulative ledger. It did not execute tests or browser rendering.
+Its scope was merge-specific correctness, not a full M1-06 design review.
+
+| Ref | Finding | Disposition and evidence |
+|---|---|---|
+| MI-01 | Medium: M1-05's timestamp sibling could be clipped on mobile by M1-06's full-height conversation button within a vertically clipped horizontal list. | Fixed: remove the mobile button's `height: 100%`. Extend `SoftEditorialChatReflowsWithoutOverflowAndKeepsLongMessagesReadable` to assert timestamp bounds lie within the list, not merely DOM visibility, at 1440/768/390/320px. |
