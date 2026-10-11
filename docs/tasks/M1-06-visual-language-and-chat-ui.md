@@ -212,3 +212,26 @@ explicitly surfaced storage-failure limitation preserving safe retry identity).
 The full reviewer independently confirmed both dispositions; there are no
 new FR findings or unresolved review findings. This review supersedes the
 earlier scope limitation for PR readiness, not the owner's final merge decision.
+
+## GitHub review follow-up
+
+GitHub's reviews of `cbe2848` and `e9f63ca` subsequently raised the following
+findings. These supplement, not erase, MI-01 and CF-01 above. The second
+review's summary-only "Previously missed" keyboard concern duplicates GR-03
+and is explicitly included in its disposition.
+
+| Ref | Severity and concern | Disposition and verifying behavior |
+|---|---|---|
+| GR-01 | Medium: completed assistant answers were not announced. | Fixed: a dedicated polite atomic region receives the final answer from refreshed durable history once per completed turn; deltas and failed/cancelled/interrupted turns do not publish partial answers as final. Browser assertions cover silence during streaming, exact final content and one update. |
+| GR-02 | Low: assistant prose did not use the documented serif font. | Fixed: shared assistant content selector uses the serif token for streamed and persisted messages; browser computed-style assertions cover both. User prose and labels retain sans-serif typography. |
+| GR-03 | Low: modified Enter and IME guards lacked browser assertions, including the summary-only "Previously missed" duplicate. | Fixed: Alt/Control/Meta Enter and synthetic composing/keyCode-229 events retain draft text, submit no request, and composing events remain unintercepted; existing plain/Shift Enter assertions remain. Synthetic composition does not establish native IME certification. |
+| GR-04 | Low: responsive coverage omitted other surfaces, themes, motion and zoom. | Fixed: auth/chat/settings/activity assertions cover 1440/768/390/320px and 1280px at 200% CSS layout zoom, both light/dark schemes, reduced-motion emulation and visible horizontally unclipped controls. CSS layout zoom does not establish native browser zoom controls or assistive-technology certification. |
+
+Native macOS follow-up checks: `tools/validate.sh build` passed; four focused
+browser cases passed; full `tools/validate.sh browser-e2e` passed 29/29 with
+the deliberate failing probe verified; `tools/validate.sh docs` and
+`git diff --check` passed. Logs are in
+`artifacts/m106-main-integration/review-followup-*.log`. The first announcement
+test exposed that final text is persisted in history rather than delivered as
+an AssistantMessage event; the implementation now uses authoritative refreshed
+history, and both focused and full gates passed afterward.

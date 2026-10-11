@@ -41,6 +41,23 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
             });
 
             var prompt = page.GetByLabel("Message");
+            foreach (var chord in new[] { "Alt+Enter", "Control+Enter", "Meta+Enter" })
+            {
+                await prompt.FillAsync("Guarded draft");
+                await prompt.PressAsync(chord);
+                Assert.Equal("Guarded draft", await prompt.InputValueAsync());
+                Assert.Equal(0, Volatile.Read(ref submitCount));
+            }
+            foreach (var options in new[] { new { isComposing = true, keyCode = 13 }, new { isComposing = false, keyCode = 229 } })
+            {
+                Assert.True(await prompt.EvaluateAsync<bool>(
+                    """
+                    (element, options) => element.dispatchEvent(new KeyboardEvent("keydown",
+                        { key: "Enter", bubbles: true, cancelable: true, ...options }))
+                    """, options));
+                Assert.Equal("Guarded draft", await prompt.InputValueAsync());
+                Assert.Equal(0, Volatile.Read(ref submitCount));
+            }
             await prompt.FillAsync("First line");
             await prompt.PressAsync("Shift+Enter");
             await prompt.PressSequentiallyAsync("second line");
@@ -100,6 +117,16 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
                 await route.FulfillAsync(new RouteFulfillOptions { Response = response });
             });
             var prompt = page.GetByLabel("Message");
+            await page.EvaluateAsync(
+                """
+                () => {
+                    window.responseAnnouncements = [];
+                    new MutationObserver(() => {
+                        const text = document.getElementById("response-announcement").textContent;
+                        if (text) window.responseAnnouncements.push(text);
+                    }).observe(document.getElementById("response-announcement"), { childList: true });
+                }
+                """);
             await prompt.FillAsync("A controlled message");
             await prompt.PressAsync("Enter");
             await reached.Task.WaitAsync(TimeSpan.FromSeconds(15));
@@ -116,6 +143,13 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
             Assert.Equal(editWhileSending ? "My next draft" : "", await prompt.InputValueAsync());
             await page.WaitForFunctionAsync("() => activeTurnId === '' && !turnSubmissionInFlight");
             Assert.Equal(editWhileSending ? "My next draft" : "", await prompt.InputValueAsync());
+            Assert.Equal("polite", await page.Locator("#response-announcement").GetAttributeAsync("aria-live"));
+            Assert.Equal("true", await page.Locator("#response-announcement").GetAttributeAsync("aria-atomic"));
+            var completedReply = await page.Locator("#messages .assistant-message .message-content").Last.InnerTextAsync();
+            Assert.Equal($"Jarvis: {completedReply}", await page.Locator("#response-announcement").InnerTextAsync());
+            Assert.Single(await page.EvaluateAsync<string[]>("window.responseAnnouncements"));
+            Assert.Contains("Georgia", await page.Locator("#messages .assistant-message .message-content").Last
+                .EvaluateAsync<string>("element => getComputedStyle(element).fontFamily"));
             await page.EvaluateAsync("saved => sessionStorage.setItem('jarvis.pending-turn.v1', saved)", acceptedRecovery);
             await page.ReloadAsync();
             await page.Locator("#chat").WaitForAsync();
@@ -216,6 +250,82 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
             Assert.NotEqual("none", focus.GetProperty("outlineStyle").GetString());
             Assert.True(double.Parse(focus.GetProperty("outlineWidth").GetString()!.TrimEnd('p', 'x'),
                 System.Globalization.CultureInfo.InvariantCulture) >= 3);
+        }
+        finally
+        {
+            await isolated.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "BrowserE2E")]
+    public async Task SoftEditorialSurfacesReflowInBothThemesWithZoomAndReducedMotion()
+    {
+        var isolated = new SimulatorHostFixture();
+        await isolated.InitializeAsync();
+        try
+        {
+            using var playwright = await Playwright.CreateAsync();
+            await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+            var page = await browser.NewPageAsync();
+            await page.GotoAsync(isolated.WebClient.BaseAddress!.ToString());
+            await page.Locator("#auth").WaitForAsync();
+            await AssertReflowAsync("#auth", "#passphrase, #auth-submit");
+            await page.GetByLabel("Passphrase").FillAsync(SimulatorHostFixture.OwnerPassphrase);
+            await page.Locator("#auth-submit").ClickAsync();
+            await page.WaitForFunctionAsync("() => !authenticationInFlight && !document.getElementById('chat').hidden");
+            await page.Locator("#new-conversation").ClickAsync();
+            await page.WaitForFunctionAsync("() => conversationId !== '' && !conversationCreationInFlight");
+            await AssertReflowAsync("#conversation", "#prompt, #send-turn");
+            await page.Locator("#settings-button").ClickAsync();
+            await page.Locator("#settings").WaitForAsync();
+            await AssertReflowAsync("#settings", "#conversation-days, #audit-days, #retention-form button");
+            await page.Locator("#activity-button").ClickAsync();
+            await page.Locator("#activity").WaitForAsync();
+            await AssertReflowAsync("#activity", "#activity-button");
+
+            async Task AssertReflowAsync(string surface, string controls)
+            {
+                foreach (var scheme in new[] { ColorScheme.Light, ColorScheme.Dark })
+                {
+                    await page.EmulateMediaAsync(new PageEmulateMediaOptions
+                    {
+                        ColorScheme = scheme,
+                        ReducedMotion = ReducedMotion.Reduce
+                    });
+                    foreach (var (width, zoom) in new[] { (1440, 1), (768, 1), (390, 1), (320, 1), (1280, 2) })
+                    {
+                        await page.SetViewportSizeAsync(width, 900);
+                        // CSS zoom exercises layout scaling; device scale alone would not test reflow.
+                        await page.EvaluateAsync("zoom => document.documentElement.style.zoom = String(zoom)", zoom);
+                        Assert.True(await page.Locator(surface).IsVisibleAsync());
+                        Assert.True(await page.EvaluateAsync<bool>(
+                            """
+                            () => document.documentElement.scrollWidth <= document.documentElement.clientWidth
+                            """), $"{surface} overflows at {width}px, {zoom * 100}% CSS zoom, {scheme}.");
+                        foreach (var control in await page.Locator(controls).AllAsync())
+                        {
+                            Assert.True(await control.IsVisibleAsync());
+                            Assert.True(await control.EvaluateAsync<bool>(
+                                """
+                                element => {
+                                    const bounds = element.getBoundingClientRect();
+                                    return bounds.width > 0 && bounds.left >= 0 &&
+                                        bounds.right <= window.innerWidth + 1;
+                                }
+                                """), $"{controls} is clipped at {width}px, {zoom * 100}% CSS zoom, {scheme}.");
+                        }
+                        Assert.Equal(scheme == ColorScheme.Dark ? "dark" : "light",
+                            await page.EvaluateAsync<string>("() => getComputedStyle(document.documentElement).colorScheme"));
+                        Assert.True(await page.Locator(controls).First.EvaluateAsync<bool>(
+                            """
+                            element => getComputedStyle(element).transitionDuration.split(",")
+                                .every(duration => parseFloat(duration) <= .00001)
+                            """));
+                    }
+                }
+                await page.EvaluateAsync("() => document.documentElement.style.zoom = ''");
+            }
         }
         finally
         {
@@ -1532,6 +1642,9 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
                 .Filter(new LocatorFilterOptions { HasText = "Controlled streaming " });
             await partialReply.WaitForAsync(new LocatorWaitForOptions { Timeout = 15_000 });
             Assert.DoesNotContain("response", await partialReply.InnerTextAsync(), StringComparison.Ordinal);
+            Assert.Equal("", await page.Locator("#response-announcement").InnerTextAsync());
+            Assert.Contains("Georgia", await partialReply.Locator(".message-content")
+                .EvaluateAsync<string>("element => getComputedStyle(element).fontFamily"));
             await page.EvaluateAsync("window.__holdRefresh = true");
             await page.GetByText("Controlled streaming response", new PageGetByTextOptions { Exact = false })
                 .WaitForAsync(new LocatorWaitForOptions { Timeout = 30_000 });

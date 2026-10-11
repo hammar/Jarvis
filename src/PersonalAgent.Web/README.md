@@ -136,12 +136,19 @@ inference.
 
 The root page has Chat, Settings, and Activity surfaces. Its Soft editorial
 presentation uses locally available system sans-serif controls, system-serif
-headings/message prose, warm paper surfaces, charcoal text and a restrained
+headings/assistant message prose, warm paper surfaces, charcoal text and a restrained
 terracotta accent. Its dark color-scheme variant uses warm charcoal surfaces
 and soft terracotta. It does not request third-party fonts or assets. Keyboard
 focus remains visible, reduced-motion preferences are honored, and the layout
 reflows for narrow viewports. Do not infer WCAG conformance beyond the
 automated checks recorded in `docs/testing.md`.
+Streaming deltas do not update live regions. On successful completion, the
+final assistant answer from refreshed durable history is announced once in
+a dedicated polite, atomic status region. Failed/cancelled/interrupted turns
+retain lifecycle/error notices without announcing a partial answer as final.
+Browser coverage measures light/dark authentication, chat, settings and activity
+at narrow/desktop widths and 200% CSS zoom, with reduced-motion emulation;
+it does not certify real screen-reader speech or native browser zoom controls.
 
 The chat composer sends when Enter is pressed and inserts a newline with
 Shift+Enter. Modified Enter chords and IME composition are not intercepted.

@@ -419,6 +419,10 @@ a:focus-visible {
     white-space: pre-wrap;
 }
 
+.assistant-message .message-content {
+    font-family: var(--serif);
+}
+
 .composer {
     flex: 0 0 auto;
     min-width: 0;

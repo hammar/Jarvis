@@ -205,6 +205,7 @@ async function openConversation(id) {
     document.getElementById("settings").hidden = true;
     document.getElementById("activity").hidden = true;
     document.getElementById("conversation").hidden = false;
+    return data;
 }
 
 document.getElementById("rename-conversation").addEventListener("click", () => {
@@ -528,9 +529,11 @@ function connectEvents(turnId, lastSequence) {
     const source = new EventSource(`/api/turns/${encodeURIComponent(turnId)}/events`, { withCredentials: true });
     eventSource = source;
     let streamedReply = null;
+    let terminalReceived = false;
+    document.getElementById("response-announcement").textContent = "";
     let recoveryError = "";
     const handleEvent = async event => {
-        if (eventSource !== source || activeTurnId !== turnId) return;
+        if (eventSource !== source || activeTurnId !== turnId || terminalReceived) return;
         if (recoveryError && errorBox.textContent === recoveryError) clearError();
         recoveryError = "";
         lastSequence = Number(event.lastEventId || lastSequence);
@@ -548,6 +551,7 @@ function connectEvents(turnId, lastSequence) {
             list.append(createMessageItem("assistant", payload.text || payload.Text));
         }
         if (["TurnCompleted", "TurnFailed", "TurnCancelled", "TurnInterrupted"].includes(event.type)) {
+            terminalReceived = true;
             document.getElementById("stream-status").textContent =
                 event.type === "TurnCompleted" ? "Response complete." : "Response ended.";
             if (event.type === "TurnFailed") {
@@ -559,7 +563,12 @@ function connectEvents(turnId, lastSequence) {
             document.getElementById("cancel-turn").hidden = true;
             try {
                 await loadConversations();
-                await openConversation(activeTurnConversationId);
+                const history = await openConversation(activeTurnConversationId);
+                const reply = history?.messages.at(-1);
+                if (event.type === "TurnCompleted" && eventSource === source && activeTurnId === turnId &&
+                    reply?.role === "assistant") {
+                    document.getElementById("response-announcement").textContent = `Jarvis: ${reply.content}`;
+                }
             } catch (error) {
                 showError(error.message);
             } finally {
