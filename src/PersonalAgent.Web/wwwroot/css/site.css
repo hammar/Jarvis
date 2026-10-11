@@ -230,6 +230,23 @@ a:focus-visible {
     background: var(--surface);
 }
 
+.conversation-list time,
+.conversation-created {
+    display: block;
+    color: var(--muted);
+    font-size: .72rem;
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+}
+
+.conversation-list time {
+    padding: .2rem .7rem .6rem;
+}
+
+.conversation-created {
+    margin: .35rem 0 0;
+}
+
 .sidebar-actions {
     display: grid;
     gap: .15rem;
@@ -292,16 +309,54 @@ a:focus-visible {
 }
 
 .conversation-view {
-    display: grid;
+    display: flex;
+    flex-direction: column;
     min-width: 0;
     min-height: 0;
-    grid-template-rows: auto minmax(0, 1fr) auto auto;
     padding-top: 1rem;
 }
 
 .conversation-heading {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: .75rem;
     min-width: 0;
     padding: .45rem 0 1.1rem;
+}
+
+.conversation-heading > div {
+    min-width: 0;
+}
+
+.conversation-heading > button {
+    flex: 0 0 auto;
+}
+
+.rename-form {
+    display: grid;
+    gap: .6rem;
+    margin-bottom: 1rem;
+    padding: .8rem;
+    border: 1px solid var(--line);
+    border-radius: .65rem;
+    background: var(--surface);
+}
+
+.rename-form input {
+    width: 100%;
+    min-width: 0;
+    min-height: 2.75rem;
+    padding: .45rem .65rem;
+    border: 1px solid var(--line);
+    border-radius: .5rem;
+    background: var(--surface);
+}
+
+.rename-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: .5rem;
 }
 
 .conversation-heading h2,
@@ -319,6 +374,7 @@ a:focus-visible {
     display: flex;
     min-width: 0;
     flex-direction: column;
+    flex: 1 1 auto;
     align-items: stretch;
     gap: 1rem;
     margin: 0;
@@ -364,6 +420,7 @@ a:focus-visible {
 }
 
 .composer {
+    flex: 0 0 auto;
     min-width: 0;
     padding: .7rem .8rem .6rem;
     border: 1px solid var(--line);

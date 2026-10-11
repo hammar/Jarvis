@@ -54,7 +54,13 @@ profile; normal Simulator, Local, and Hybrid hosts generate a fresh token.
 - `GET /api/auth/status`, `GET /api/auth/csrf`, `POST /api/auth/bootstrap`,
   `POST /api/auth/login`, and authenticated `POST /api/auth/logout`.
 - Authenticated `GET/POST /api/conversations` and
-  `GET /api/conversations/{id}`. `POST /api/conversations/{id}/turns`
+  `GET /api/conversations/{id}`, and CSRF-protected `PATCH
+  /api/conversations/{id}` with `{ "title": "..." }` for owner-scoped manual
+  renaming. A title is trimmed, nonempty, bounded to 200 characters, and
+  rejects control characters. The first durably accepted message automatically
+  sets an 80-Unicode-scalar normalized excerpt only when the title remains blank
+  and has not been manually selected.
+  `POST /api/conversations/{id}/turns`
   accepts `{ "requestId": "...", "text": "..." }`; retries with the same
   conversation/request ID and same content return the original turn.
 - `GET /api/turns/{id}/events` streams stored ordered events using SSE and
@@ -154,6 +160,13 @@ They override the trusted host defaults from
 `JARVIS_CONVERSATION_RETENTION_DAYS` and `JARVIS_AUDIT_RETENTION_DAYS`.
 Conversation/audit retention settings are read together in one SQLite
 snapshot, matching their atomic updates.
+Recent conversations display their stored creation instant in the browser's
+local time zone, including after the automatic or manual title is set. Local
+clock times repeated during daylight-saving fallback are distinguished by the
+numeric UTC offset shown beside the time-zone name. Empty
+titles display as “New conversation.” Existing nonempty titles survive schema
+upgrade unchanged; legacy blank titles are eligible for automatic naming on
+their next accepted user message.
 Lowering a period removes newly expired eligible conversation/audit history
 when saved; conversations with unresolved turns are retained.
 The hourly maintenance worker logs failure type (not private exception text),

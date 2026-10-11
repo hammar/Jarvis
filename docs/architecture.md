@@ -240,6 +240,12 @@ key/value table for 1–3650-day history retention. The Web layer hashes the
 owner passphrase using ASP.NET Identity; Infrastructure persists only that
 verifier. ASP.NET Data Protection keys are stored below the owner-private data
 directory, separate from the database.
+Migration 005 adds durable manual-title provenance without rewriting existing
+titles or creation instants. The first accepted user message may set a
+deterministic normalized excerpt in the same SQLite transaction as its turn,
+but only when the title is still blank and not manually selected. The owner
+rename operation sets the explicit manual flag under the same immediate-write
+transaction discipline. Conversation titles are display metadata only.
 
 `SqliteBackupRestoreService` uses SQLite's online backup facility and verifies
 integrity plus foreign keys. Restore first copies the backup, migrates and

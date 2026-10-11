@@ -2268,6 +2268,14 @@ public sealed class CopilotAgentEngineContractTests(ITestOutputHelper output)
             CancellationToken cancellationToken) =>
             inner.ReadRecentConversationsAsync(ownerId, maximumConversations, cancellationToken);
 
+        public ValueTask<ConversationRecord?> RenameConversationAsync(
+            ConversationId conversationId,
+            string ownerId,
+            string title,
+            DateTimeOffset updatedAtUtc,
+            CancellationToken cancellationToken) =>
+            inner.RenameConversationAsync(conversationId, ownerId, title, updatedAtUtc, cancellationToken);
+
         public ValueTask<ConversationMessage> AppendMessageAsync(
             ConversationMessage message,
             CancellationToken cancellationToken) =>

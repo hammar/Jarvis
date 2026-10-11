@@ -46,8 +46,18 @@
                     <div>
                         <p class="eyebrow">Conversation</p>
                         <h2 id="conversation-title">Conversation</h2>
+                        <p id="conversation-created" class="conversation-created"></p>
                     </div>
+                    <button id="rename-conversation" class="button button-secondary" type="button">Rename</button>
                 </header>
+                <form id="rename-form" class="rename-form" hidden>
+                    <label for="conversation-title-input">Conversation title</label>
+                    <input id="conversation-title-input" name="title" maxlength="200" required />
+                    <div class="rename-actions">
+                        <button id="save-title" class="button button-primary" type="submit">Save title</button>
+                        <button id="cancel-title" class="button button-secondary" type="button">Cancel</button>
+                    </div>
+                </form>
                 <ol id="messages" class="messages" aria-label="Conversation history"></ol>
                 <p id="stream-status" class="sr-only" role="status" aria-live="polite"></p>
                 <form id="turn-form" class="composer">

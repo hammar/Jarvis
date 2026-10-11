@@ -14,9 +14,8 @@ for future reference; Soft editorial is the primary production direction.
   coverage gates), and 21 (agentic development and review).
 - Existing M1-03/#11 browser and API behavior is preserved.
 - Conversation title, excerpt, rename, and creation-time presentation integrates
-  M1-05/#40's accepted behavior. Issue #40 is open; this task must coordinate
-  with its resulting API/UI contract rather than duplicate its persistence or
-  title-generation work.
+  M1-05/#40's accepted behavior from merged PR #43, including its schema-v5
+  title provenance and race-safe browser updates.
 
 ## Scope
 
@@ -69,10 +68,10 @@ contract change is expected from M1-06 itself.
 
 - M1-03/#11 is the baseline; existing Razor markup, CSS/JavaScript, and
   Playwright/Aspire composition are the implementation surface.
-- M1-05/#40 is open and specifies persistent first-message titles, manual
-  renaming, and secondary creation timestamps. Integrate its agreed surface
-  when available; if it has not merged, do not invent a competing contract or
-  claim naming-presentation acceptance complete.
+- M1-05/#40 was merged in PR #43 (`91aaa9a`). Retain its schema migration,
+  accepted-turn metadata, manual-title precedence, timestamp descriptions,
+  and stale-read/rename protections. Style its controls without replacing its
+  application or persistence logic.
 - The primary production visual direction is approved, but the owner may
   change their preference later; retain both previews for reference.
 - Preserve the pre-existing light/dark system color-scheme behavior with

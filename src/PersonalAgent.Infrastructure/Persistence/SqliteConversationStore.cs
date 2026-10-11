@@ -56,12 +56,13 @@ public sealed class SqliteConversationStore : IConversationStore, IAtomicTurnOut
         await using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = """
-            INSERT INTO conversations (id, owner_id, title, created_at_utc, updated_at_utc)
-            VALUES ($id, $owner, $title, $created, $updated);
+            INSERT INTO conversations (id, owner_id, title, created_at_utc, updated_at_utc, title_is_manual)
+            VALUES ($id, $owner, $title, $created, $updated, $title_is_manual);
             """;
         command.Parameters.AddWithValue("$id", SqliteValue.Guid(conversation.Id.Value));
         command.Parameters.AddWithValue("$owner", conversation.OwnerId);
         command.Parameters.AddWithValue("$title", conversation.Title);
+        command.Parameters.AddWithValue("$title_is_manual", conversation.TitleIsManual ? 1 : 0);
         command.Parameters.AddWithValue("$created", createdAt);
         command.Parameters.AddWithValue("$updated", updatedAt);
         await command.ExecuteNonQueryAsync(cancellationToken);
@@ -83,7 +84,7 @@ public sealed class SqliteConversationStore : IConversationStore, IAtomicTurnOut
         await using var connection = await database.OpenConnectionAsync(cancellationToken);
         await using var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT id, owner_id, title, created_at_utc, updated_at_utc
+            SELECT id, owner_id, title, created_at_utc, updated_at_utc, title_is_manual
             FROM conversations WHERE id = $id AND owner_id = $owner;
             """;
         command.Parameters.AddWithValue("$id", SqliteValue.Guid(conversationId.Value));
@@ -107,7 +108,7 @@ public sealed class SqliteConversationStore : IConversationStore, IAtomicTurnOut
         await using var connection = await database.OpenConnectionAsync(cancellationToken);
         await using var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT id, owner_id, title, created_at_utc, updated_at_utc
+            SELECT id, owner_id, title, created_at_utc, updated_at_utc, title_is_manual
             FROM conversations WHERE owner_id = $owner
             ORDER BY updated_at_utc DESC, id
             LIMIT $maximum;
@@ -122,6 +123,59 @@ public sealed class SqliteConversationStore : IConversationStore, IAtomicTurnOut
         }
 
         return conversations;
+    }
+
+    /// <inheritdoc />
+    public async ValueTask<ConversationRecord?> RenameConversationAsync(
+        ConversationId conversationId,
+        string ownerId,
+        string title,
+        DateTimeOffset updatedAtUtc,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(ownerId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(title);
+        if (ownerId.Length > 128 || title.Length > 200 || title.Any(char.IsControl))
+        {
+            throw new ArgumentException("Conversation owner or title exceeds its supported format.", nameof(title));
+        }
+
+        var updated = SqliteValue.Utc(updatedAtUtc);
+        await using var connection = await database.OpenConnectionWithDefaultTimeoutAsync(1, cancellationToken);
+        await using var transaction = await SqliteDatabase.BeginImmediateTransactionAsync(connection, cancellationToken);
+        await using (var command = connection.CreateCommand())
+        {
+            command.Transaction = transaction;
+            command.CommandText = """
+                UPDATE conversations
+                SET title = $title, title_is_manual = 1,
+                    updated_at_utc = CASE WHEN updated_at_utc < $updated THEN $updated ELSE updated_at_utc END
+                WHERE id = $id AND owner_id = $owner;
+                """;
+            command.Parameters.AddWithValue("$title", title);
+            command.Parameters.AddWithValue("$updated", updated);
+            command.Parameters.AddWithValue("$id", SqliteValue.Guid(conversationId.Value));
+            command.Parameters.AddWithValue("$owner", ownerId);
+            if (await command.ExecuteNonQueryAsync(cancellationToken) == 0)
+            {
+                await transaction.CommitAsync(cancellationToken);
+                return null;
+            }
+        }
+
+        await using var read = connection.CreateCommand();
+        read.Transaction = transaction;
+        read.CommandText = """
+            SELECT id, owner_id, title, created_at_utc, updated_at_utc, title_is_manual
+            FROM conversations WHERE id = $id AND owner_id = $owner;
+            """;
+        read.Parameters.AddWithValue("$id", SqliteValue.Guid(conversationId.Value));
+        read.Parameters.AddWithValue("$owner", ownerId);
+        await using var reader = await read.ExecuteReaderAsync(cancellationToken);
+        var result = await reader.ReadAsync(cancellationToken) ? ReadConversation(reader) : null;
+        await reader.DisposeAsync();
+        await transaction.CommitAsync(cancellationToken);
+        return result;
     }
 
     /// <inheritdoc />
@@ -279,6 +333,12 @@ public sealed class SqliteConversationStore : IConversationStore, IAtomicTurnOut
         }
 
         ValidateRequiredOwner(submission.RequiredOwnerId, nameof(submission));
+        if (submission.AutomaticTitle is { } automaticTitle
+            && (automaticTitle.EnumerateRunes().Count() > 80 || automaticTitle.Any(char.IsControl)))
+        {
+            throw new ArgumentException("Automatic conversation title exceeds its supported format.", nameof(submission));
+        }
+
         var createdAtUtc = submission.CreatedAtUtc.ToUniversalTime();
         var createdAt = SqliteValue.Utc(createdAtUtc);
         await using var connection = await database.OpenConnectionWithDefaultTimeoutAsync(1, cancellationToken);
@@ -370,6 +430,20 @@ public sealed class SqliteConversationStore : IConversationStore, IAtomicTurnOut
             conversation.Parameters.AddWithValue("$id", SqliteValue.Guid(submission.ConversationId.Value));
             conversation.Parameters.AddWithValue("$created", createdAt);
             await conversation.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        if (!string.IsNullOrWhiteSpace(submission.AutomaticTitle))
+        {
+            await using var title = connection.CreateCommand();
+            title.Transaction = transaction;
+            title.CommandText = """
+                UPDATE conversations
+                SET title = $title
+                WHERE id = $id AND title = '' AND title_is_manual = 0;
+                """;
+            title.Parameters.AddWithValue("$title", submission.AutomaticTitle);
+            title.Parameters.AddWithValue("$id", SqliteValue.Guid(submission.ConversationId.Value));
+            await title.ExecuteNonQueryAsync(cancellationToken);
         }
 
         await using (var insertTurn = connection.CreateCommand())
@@ -1141,7 +1215,8 @@ public sealed class SqliteConversationStore : IConversationStore, IAtomicTurnOut
             reader.GetString(1),
             reader.GetString(2),
             SqliteValue.DateTimeOffset(reader.GetString(3)),
-            SqliteValue.DateTimeOffset(reader.GetString(4)));
+            SqliteValue.DateTimeOffset(reader.GetString(4)),
+            reader.GetInt64(5) != 0);
 
     private static bool CanTransition(TurnStatus current, TurnStatus next) =>
         (current, next) switch

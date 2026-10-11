@@ -295,7 +295,8 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
                         messageId,
                         request.Text,
                         clock.UtcNow,
-                        request.RequiredOwnerId),
+                        request.RequiredOwnerId,
+                        ConversationTitlePolicy.CreateAutomaticTitle(request.Text)),
                     cancellationToken);
                 if (submitted.IsDuplicate)
                 {
