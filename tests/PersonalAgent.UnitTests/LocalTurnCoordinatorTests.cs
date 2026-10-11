@@ -2160,6 +2160,14 @@ public sealed class LocalTurnCoordinatorTests
             CancellationToken cancellationToken) =>
             throw new NotSupportedException();
 
+        public ValueTask<ConversationRecord?> RenameConversationAsync(
+            ConversationId conversationId,
+            string ownerId,
+            string title,
+            DateTimeOffset updatedAtUtc,
+            CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
         public ValueTask<ConversationMessage> AppendMessageAsync(
             ConversationMessage message,
             CancellationToken cancellationToken)

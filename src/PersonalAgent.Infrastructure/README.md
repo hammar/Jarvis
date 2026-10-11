@@ -22,6 +22,10 @@ Migration 004 adds the single-owner password-verifier row and constrained
 owner retention settings. It does not store plaintext passphrases or
 credentials. The passphrase hash is produced by ASP.NET Identity in Web; owner
 settings remain Application contracts backed here by SQLite.
+Migration 005 adds the manual-title provenance flag without changing existing
+titles or UTC creation instants. The first accepted user message can set a
+normalized automatic display title atomically with the turn; owner rename is
+owner-scoped and durably prevents later automatic replacement.
 If only the previous AppHost `PersonalAgent` default contains a database, the
 Web host continues using that location; if both defaults contain a database,
 configure `JARVIS_DATA_DIR` explicitly.

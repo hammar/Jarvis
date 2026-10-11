@@ -127,6 +127,15 @@ stable across restarts; moving it or using a different symlink alias requires
 sign-in again. Upgrading from the earlier fixed-cookie names also requires
 one sign-in; account credentials and durable history are unchanged.
 
+Conversation titles are durable display metadata: empty conversations show
+“New conversation” and their creation instant in the browser's local time zone.
+The first accepted user message supplies a normalized excerpt of at most 80
+Unicode scalar values; no model call is involved. Owners can rename through the
+authenticated chat UI, and the manual choice is retained across restarts and
+never replaced by automatic naming. The authenticated
+`PATCH /api/conversations/{id}` mutation requires CSRF validation and accepts a
+trimmed, nonempty title of at most 200 characters without control characters.
+
 The root page provides Chat, Settings, and Activity. Chat submits bounded
 requests with stable IDs and reconnects through the SSE `Last-Event-ID`
 sequence. Closing the browser stream does not stop inference; use Cancel for

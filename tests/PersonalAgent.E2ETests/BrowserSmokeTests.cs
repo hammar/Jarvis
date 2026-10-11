@@ -755,6 +755,126 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
 
     [Fact]
     [Trait("Category", "BrowserE2E")]
+    public async Task ConversationTitlesAndCreationTimesRemainDistinctAndManualNamesPersist()
+    {
+        var isolated = new SimulatorHostFixture();
+        await isolated.InitializeAsync();
+        try
+        {
+            using var playwright = await Playwright.CreateAsync();
+            await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+            var page = await browser.NewPageAsync();
+            await page.GotoAsync(isolated.WebClient.BaseAddress!.ToString());
+            await page.GetByLabel("Passphrase").FillAsync(SimulatorHostFixture.OwnerPassphrase);
+            await page.Locator("#auth-submit").ClickAsync();
+            await page.Locator("#new-conversation").WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible });
+
+            await page.Locator("#new-conversation").ClickAsync();
+            await page.WaitForFunctionAsync("() => conversationId !== '' && !conversationCreationInFlight");
+            Assert.Equal("New conversation", await page.Locator("#conversation-title").InnerTextAsync());
+            Assert.Contains("Created ", await page.Locator("#conversation-created").InnerTextAsync(), StringComparison.Ordinal);
+
+            await page.Locator("#rename-conversation").ClickAsync();
+            const string manualTitle = "<img src=x> Manual before first message";
+            await page.GetByLabel("Conversation title").FillAsync(manualTitle);
+            await page.Locator("#save-title").ClickAsync();
+            await page.GetByRole(AriaRole.Button, new PageGetByRoleOptions { Name = manualTitle }).WaitForAsync();
+
+            var manualConversationId = await page.EvaluateAsync<string>("conversationId");
+            await page.Locator("#new-conversation").ClickAsync();
+            await page.WaitForFunctionAsync("id => conversationId !== id && !conversationCreationInFlight", manualConversationId);
+            var automaticConversationId = await page.EvaluateAsync<string>("conversationId");
+            Assert.Equal(2, await page.Locator("#conversation-list time").CountAsync());
+            foreach (var timestamp in await page.Locator("#conversation-list time").AllInnerTextsAsync())
+            {
+                Assert.Contains("(", timestamp, StringComparison.Ordinal);
+            }
+
+            const string firstMessage = "  A distinct   first request asks about café plans.  ";
+            using (var delayFrameControl = await isolated.ModelClient.PostAsync(
+                "/fixture/control/delay-after-first-frame",
+                content: null))
+            {
+                delayFrameControl.EnsureSuccessStatusCode();
+            }
+
+            await page.Locator("#prompt").FillAsync(firstMessage);
+            await page.Locator("#send-turn").ClickAsync();
+            await page.WaitForFunctionAsync("() => activeTurnId !== ''");
+            Assert.Equal(
+                "A distinct first request asks about café plans.",
+                await page.Locator("#conversation-title").InnerTextAsync());
+            using (var firstFrame = await isolated.ModelClient.GetAsync("/fixture/control/wait-for-first-frame"))
+            {
+                firstFrame.EnsureSuccessStatusCode();
+            }
+
+            Assert.NotEqual("", await page.EvaluateAsync<string>("activeTurnId"));
+            await page.GetByRole(AriaRole.Button,
+                new PageGetByRoleOptions { Name = "A distinct first request asks about café plans." }).WaitForAsync();
+            await page.WaitForFunctionAsync("() => activeTurnId === ''");
+            await page.Locator("#conversation-list").GetByRole(AriaRole.Button,
+                new LocatorGetByRoleOptions { Name = manualTitle }).WaitForAsync();
+
+            await page.EvaluateAsync(
+                """
+                async id => {
+                    let releaseRead;
+                    let signalReadStarted;
+                    window.__titleReadStarted = new Promise(resolve => { signalReadStarted = resolve; });
+                    window.__releaseTitleRead = () => releaseRead();
+                    const originalFetch = window.fetch.bind(window);
+                    window.fetch = async (input, init = {}) => {
+                        const url = typeof input === "string" ? input : input.url;
+                        const method = (init.method || (input instanceof Request ? input.method : "GET")).toUpperCase();
+                        const response = await originalFetch(input, init);
+                        if (method === "GET" && url === `/api/conversations/${encodeURIComponent(id)}`) {
+                            signalReadStarted();
+                            await new Promise(resolve => { releaseRead = resolve; });
+                        }
+                        return response;
+                    };
+                    window.__staleTitleOpen = openConversation(id);
+                    await window.__titleReadStarted;
+                }
+                """,
+                automaticConversationId);
+            const string renamedAfterFirstMessage = "Renamed while an older read is pending";
+            await page.Locator("#rename-conversation").ClickAsync();
+            await page.GetByLabel("Conversation title").FillAsync(renamedAfterFirstMessage);
+            await page.Locator("#save-title").ClickAsync();
+            await page.Locator("#conversation-list").GetByRole(AriaRole.Button,
+                new LocatorGetByRoleOptions { Name = renamedAfterFirstMessage }).WaitForAsync();
+            Assert.Equal(renamedAfterFirstMessage, await page.Locator("#conversation-title").InnerTextAsync());
+            await page.EvaluateAsync("window.__releaseTitleRead()");
+            await page.EvaluateAsync("window.__staleTitleOpen");
+            Assert.Equal(renamedAfterFirstMessage, await page.Locator("#conversation-title").InnerTextAsync());
+
+            await page.Locator("#conversation-list").GetByRole(AriaRole.Button,
+                new LocatorGetByRoleOptions { Name = manualTitle }).ClickAsync();
+            await page.WaitForFunctionAsync("id => conversationId === id", manualConversationId);
+            await page.Locator("#prompt").FillAsync("This first message must not replace the manual title.");
+            await page.Locator("#send-turn").ClickAsync();
+            await page.WaitForFunctionAsync("() => activeTurnId === ''");
+            Assert.Equal(manualTitle, await page.Locator("#conversation-title").InnerTextAsync());
+
+            await page.ReloadAsync();
+            await page.Locator("#conversation-list").GetByRole(AriaRole.Button,
+                new LocatorGetByRoleOptions { Name = manualTitle }).WaitForAsync();
+            await page.Locator("#conversation-list").GetByRole(AriaRole.Button,
+                new LocatorGetByRoleOptions { Name = renamedAfterFirstMessage }).WaitForAsync();
+            Assert.Equal(2, await page.Locator("#conversation-list time").CountAsync());
+            Assert.Equal(0, await page.Locator("#conversation-list img, #conversation-title img").CountAsync());
+            Assert.NotEqual(manualConversationId, automaticConversationId);
+        }
+        finally
+        {
+            await isolated.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "BrowserE2E")]
     public async Task PlaywrightSignsInAndStreamsASimulatorChat()
     {
         using var playwright = await Playwright.CreateAsync();

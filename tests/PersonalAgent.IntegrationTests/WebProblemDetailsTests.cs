@@ -160,6 +160,27 @@ public sealed class WebProblemDetailsTests
         Assert.DoesNotContain("application/problem+json", events, StringComparison.Ordinal);
     }
 
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task TurnWithControlCharactersIsAcceptedAndReturnsSanitizedAutomaticTitle()
+    {
+        using var data = IsolatedDirectory.Create();
+        await using var factory = CreateFactory(data.Path);
+        using var client = factory.CreateClient();
+        await BootstrapAsync(factory, client);
+        using var created = await client.PostAsJsonAsync("/api/conversations", new { title = "" });
+        Assert.Equal(HttpStatusCode.Created, created.StatusCode);
+        using var conversation = JsonDocument.Parse(await created.Content.ReadAsStringAsync());
+        var id = conversation.RootElement.GetProperty("id").GetProperty("value").GetGuid();
+        using var accepted = await client.PostAsJsonAsync(
+            $"/api/conversations/{id:D}/turns",
+            new { requestId = "control-title-test", text = "Original\u001B[31mtext" });
+
+        Assert.Equal(HttpStatusCode.Accepted, accepted.StatusCode);
+        using var response = JsonDocument.Parse(await accepted.Content.ReadAsStringAsync());
+        Assert.Equal("Original [31mtext", response.RootElement.GetProperty("conversation").GetProperty("title").GetString());
+    }
+
     [Theory]
     [InlineData("Production", "Bad Request")]
     [InlineData("Development", "The request could not be read.")]
@@ -204,6 +225,55 @@ public sealed class WebProblemDetailsTests
                 attempt < 20 ? HttpStatusCode.Unauthorized : HttpStatusCode.TooManyRequests,
                 attempt < 20 ? "Sign-in failed." : "Too Many Requests");
         }
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task ConversationRenameRequiresCsrfOwnerAndAValidNonemptyTitle()
+    {
+        using var data = IsolatedDirectory.Create();
+        await using var factory = CreateFactory(data.Path);
+        using var client = factory.CreateClient();
+        await BootstrapAsync(factory, client);
+        var now = factory.Services.GetRequiredService<IClock>().UtcNow;
+        var store = factory.Services.GetRequiredService<IConversationStore>();
+        var owned = await store.CreateConversationAsync(
+            new ConversationRecord(ConversationId.New(), "owner", string.Empty, now, now), CancellationToken.None);
+        var otherOwned = await store.CreateConversationAsync(
+            new ConversationRecord(ConversationId.New(), "other", string.Empty, now, now), CancellationToken.None);
+
+        var csrfToken = Assert.Single(client.DefaultRequestHeaders.GetValues("X-CSRF-TOKEN"));
+        client.DefaultRequestHeaders.Remove("X-CSRF-TOKEN");
+        using (var noCsrf = await client.PatchAsJsonAsync(
+            $"/api/conversations/{owned.Id.Value:D}", new { title = "Renamed" }))
+        {
+            await AssertProblemAsync(noCsrf, HttpStatusCode.BadRequest, "Invalid request token.");
+        }
+        client.DefaultRequestHeaders.Add("X-CSRF-TOKEN", csrfToken);
+
+        foreach (var invalidTitle in new string?[] { null, "", "  ", new string('x', 201), "line\nbreak" })
+        {
+            using var invalid = await client.PatchAsJsonAsync(
+                $"/api/conversations/{owned.Id.Value:D}", new { title = invalidTitle });
+            Assert.True(
+                invalid.StatusCode == HttpStatusCode.BadRequest,
+                $"Unexpected status {invalid.StatusCode} for manual title '{invalidTitle}'.");
+            await AssertProblemAsync(invalid, HttpStatusCode.BadRequest, "Conversation title is invalid.");
+        }
+
+        using var renamed = await client.PatchAsJsonAsync(
+            $"/api/conversations/{owned.Id.Value:D}", new { title = "  <img> owner title  " });
+        renamed.EnsureSuccessStatusCode();
+        using var body = JsonDocument.Parse(await renamed.Content.ReadAsStringAsync());
+        Assert.Equal("<img> owner title", body.RootElement.GetProperty("title").GetString());
+        Assert.True(body.RootElement.GetProperty("titleIsManual").GetBoolean());
+
+        using var foreign = await client.PatchAsJsonAsync(
+            $"/api/conversations/{otherOwned.Id.Value:D}", new { title = "Not yours" });
+        await AssertProblemAsync(foreign, HttpStatusCode.NotFound, "Not Found");
+        using var missing = await client.PatchAsJsonAsync(
+            $"/api/conversations/{ConversationId.New().Value:D}", new { title = "Missing" });
+        await AssertProblemAsync(missing, HttpStatusCode.NotFound, "Not Found");
     }
 
     private static WebApplicationFactory<Program> CreateFactory(string dataDirectory) =>

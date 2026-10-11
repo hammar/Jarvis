@@ -210,6 +210,8 @@ public sealed record ContextBuildRequest(
 /// <param name="RequiredOwnerId">Optional authenticated owner. When supplied, the conversation must already exist and
 /// belong to this owner; the check runs in the same write transaction as duplicate detection and insertion, so the
 /// submission never recreates a deleted conversation. When null, trusted host callers keep the implicit-root behavior.</param>
+/// <param name="AutomaticTitle">Optional application-derived title to apply only when this new user message is the first,
+/// the stored title is empty, and the owner has not manually renamed the conversation.</param>
 public sealed record ConversationTurnSubmission(
     TurnId TurnId,
     ConversationId ConversationId,
@@ -218,7 +220,8 @@ public sealed record ConversationTurnSubmission(
     Guid UserMessageId,
     string Text,
     DateTimeOffset CreatedAtUtc,
-    string? RequiredOwnerId = null);
+    string? RequiredOwnerId = null,
+    string? AutomaticTitle = null);
 
 /// <summary>Describes the durable turn returned by an atomic submission.</summary>
 /// <param name="Turn">The original or newly created application-owned turn.</param>
@@ -235,12 +238,14 @@ public sealed record SubmittedConversationTurn(
 /// <param name="Title">Bounded display title; it is never used as model instructions.</param>
 /// <param name="CreatedAtUtc">UTC creation instant.</param>
 /// <param name="UpdatedAtUtc">UTC most recent durable conversation update.</param>
+/// <param name="TitleIsManual">Whether an owner explicitly selected the current title.</param>
 public sealed record ConversationRecord(
     ConversationId Id,
     string OwnerId,
     string Title,
     DateTimeOffset CreatedAtUtc,
-    DateTimeOffset UpdatedAtUtc);
+    DateTimeOffset UpdatedAtUtc,
+    bool TitleIsManual = false);
 
 /// <summary>Contains owner-selected durable history retention windows.</summary>
 /// <param name="ConversationDays">Conversation retention in whole days, from 1 through 3650.</param>
@@ -784,6 +789,20 @@ public interface IConversationStore
     ValueTask<IReadOnlyList<ConversationRecord>> ReadRecentConversationsAsync(
         string ownerId,
         int maximumConversations,
+        CancellationToken cancellationToken);
+
+    /// <summary>Atomically sets an owner-selected title and prevents automatic naming from replacing it.</summary>
+    /// <param name="conversationId">Conversation to rename.</param>
+    /// <param name="ownerId">Authenticated owner identity.</param>
+    /// <param name="title">Validated, trimmed title of 1 through 200 characters.</param>
+    /// <param name="updatedAtUtc">UTC instant of the rename.</param>
+    /// <param name="cancellationToken">Token that cancels before the update commits.</param>
+    /// <returns>The updated conversation, or null when it is missing or belongs to another owner.</returns>
+    ValueTask<ConversationRecord?> RenameConversationAsync(
+        ConversationId conversationId,
+        string ownerId,
+        string title,
+        DateTimeOffset updatedAtUtc,
         CancellationToken cancellationToken);
 
     /// <summary>Appends a message and assigns its durable sequence.</summary>

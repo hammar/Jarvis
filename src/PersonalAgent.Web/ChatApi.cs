@@ -135,20 +135,65 @@ internal static class ChatApi
                 return Results.Problem(statusCode: StatusCodes.Status400BadRequest, title: "Invalid request token.");
             }
 
-            if (request.Title is { Length: > 200 })
+            string title;
+            try
             {
-                return Results.Problem(statusCode: StatusCodes.Status400BadRequest, title: "Conversation title is too long.");
+                title = string.IsNullOrWhiteSpace(request.Title)
+                    ? string.Empty
+                    : ConversationTitlePolicy.ValidateManualTitle(request.Title);
+            }
+            catch (ArgumentException)
+            {
+                return Results.Problem(statusCode: StatusCodes.Status400BadRequest, title: "Conversation title is invalid.");
             }
 
             var now = clock.UtcNow;
             var conversation = new ConversationRecord(
                 ConversationId.New(),
                 OwnerHttpSecurity.GetOwnerId(context.User)!,
-                request.Title?.Trim() ?? string.Empty,
+                title,
                 now,
-                now);
+                now,
+                TitleIsManual: title.Length > 0);
             var created = await conversations.CreateConversationAsync(conversation, ct);
             return Results.Created($"/api/conversations/{created.Id.Value:D}", created);
+        });
+        api.MapPatch("/conversations/{id:guid}", async (
+            Guid id,
+            RenameConversationRequest request,
+            HttpContext context,
+            IAntiforgery antiforgery,
+            IConversationStore conversations,
+            IClock clock,
+            CancellationToken ct) =>
+        {
+            if (!await OwnerHttpSecurity.ValidateCsrfAsync(antiforgery, context, ct))
+            {
+                return Results.Problem(statusCode: StatusCodes.Status400BadRequest, title: "Invalid request token.");
+            }
+
+            if (request.Title is null)
+            {
+                return Results.Problem(statusCode: StatusCodes.Status400BadRequest, title: "Conversation title is invalid.");
+            }
+
+            string title;
+            try
+            {
+                title = ConversationTitlePolicy.ValidateManualTitle(request.Title);
+            }
+            catch (ArgumentException)
+            {
+                return Results.Problem(statusCode: StatusCodes.Status400BadRequest, title: "Conversation title is invalid.");
+            }
+
+            var renamed = await conversations.RenameConversationAsync(
+                new ConversationId(id),
+                OwnerHttpSecurity.GetOwnerId(context.User)!,
+                title,
+                clock.UtcNow,
+                ct);
+            return renamed is null ? Results.NotFound() : Results.Ok(renamed);
         });
         api.MapGet("/conversations/{id:guid}", async (
             Guid id,
@@ -207,9 +252,11 @@ internal static class ChatApi
                         RoutingTaskKind.TextConversation,
                         RequiredOwnerId: owner),
                     ct);
+                var acceptedConversation = await conversations.GetConversationAsync(conversationId, owner, ct)
+                    ?? throw new InvalidOperationException("Accepted conversation was unavailable after durable submission.");
                 return Results.Accepted(
                     $"/api/turns/{submitted.Turn.Id.Value:D}/events",
-                    new { turnId = submitted.Turn.Id, submitted.Turn.Status, submitted.IsDuplicate });
+                    new { turnId = submitted.Turn.Id, submitted.Turn.Status, submitted.IsDuplicate, conversation = acceptedConversation });
             }
             catch (ConversationNotFoundException)
             {
@@ -380,6 +427,7 @@ internal static class ChatApi
     internal sealed record BootstrapRequest(string BootstrapToken, string Passphrase, bool RememberMe);
     internal sealed record LoginRequest(string Passphrase, bool RememberMe);
     internal sealed record CreateConversationRequest(string? Title);
+    internal sealed record RenameConversationRequest(string? Title);
     internal sealed record SubmitTurnRequest(string RequestId, string Text);
 }
 
