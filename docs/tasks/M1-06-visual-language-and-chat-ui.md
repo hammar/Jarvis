@@ -83,6 +83,12 @@ contract change is expected from M1-06 itself.
   cancellation, reconnect, provider-failure, and recovery behavior covered.
 - Verify Enter-to-send and Shift+Enter newline handling through Playwright,
   including exactly one request per Enter and no submission for the newline.
+- Clear submitted composer text only after confirmed acceptance; keep failed
+  or uncertain requests retryable, preserve edits made while awaiting
+  acceptance, and do not restore accepted text into the composer on reload.
+  `AcceptedSendClearsSubmittedTextWithoutDiscardingANewerDraft` covers
+  successful acceptance and an in-flight draft edit; the keyboard rejection
+  scenario also asserts retained text.
 - Add Playwright assertions for desktop/tablet/mobile layout; representative
   authentication/chat/settings/activity states; long messages and titles;
   visible keyboard focus and keyboard operation; and supported zoom/reflow.

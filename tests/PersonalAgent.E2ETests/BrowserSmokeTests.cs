@@ -52,6 +52,75 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
             await page.GetByRole(AriaRole.Alert).Filter(new LocatorFilterOptions { HasText = "Controlled turn rejection." })
                 .WaitForAsync();
             Assert.Equal(1, Volatile.Read(ref submitCount));
+            Assert.Equal("First line\nsecond line", await prompt.InputValueAsync());
+        }
+        finally
+        {
+            await isolated.DisposeAsync();
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("Category", "BrowserE2E")]
+    public async Task AcceptedSendClearsSubmittedTextWithoutDiscardingANewerDraft(bool editWhileSending)
+    {
+        var isolated = new SimulatorHostFixture();
+        await isolated.InitializeAsync();
+        try
+        {
+            using var playwright = await Playwright.CreateAsync();
+            await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+            var page = await browser.NewPageAsync();
+            await page.GotoAsync(isolated.WebClient.BaseAddress!.ToString());
+            await page.GetByLabel("Passphrase").FillAsync(SimulatorHostFixture.OwnerPassphrase);
+            await page.Locator("#auth-submit").ClickAsync();
+            await page.WaitForFunctionAsync("() => !authenticationInFlight && !document.getElementById('chat').hidden");
+            await page.Locator("#new-conversation").ClickAsync();
+            await page.WaitForFunctionAsync("() => conversationId !== '' && !conversationCreationInFlight");
+            var reached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            string? acceptedRecovery = null;
+            await page.RouteAsync("**/api/conversations/*/turns", async route =>
+            {
+                var response = await route.FetchAsync();
+                Assert.Equal(202, response.Status);
+                using var request = JsonDocument.Parse(route.Request.PostData!);
+                using var result = JsonDocument.Parse(await response.TextAsync());
+                acceptedRecovery = JsonSerializer.Serialize(new
+                {
+                    conversationId = route.Request.Url.Split('/')[^2],
+                    text = request.RootElement.GetProperty("text").GetString(),
+                    requestId = request.RootElement.GetProperty("requestId").GetString(),
+                    turnId = result.RootElement.GetProperty("turnId").GetProperty("value").GetString()
+                });
+                reached.TrySetResult();
+                await release.Task.WaitAsync(TimeSpan.FromSeconds(15));
+                await route.FulfillAsync(new RouteFulfillOptions { Response = response });
+            });
+            var prompt = page.GetByLabel("Message");
+            await prompt.FillAsync("A controlled message");
+            await prompt.PressAsync("Enter");
+            await reached.Task.WaitAsync(TimeSpan.FromSeconds(15));
+            try
+            {
+                Assert.Equal("A controlled message", await prompt.InputValueAsync());
+                if (editWhileSending) await prompt.FillAsync("My next draft");
+            }
+            finally
+            {
+                release.TrySetResult();
+            }
+            await page.WaitForFunctionAsync("() => pendingTurnSubmission?.turnId || pendingTurnSubmission === null");
+            Assert.Equal(editWhileSending ? "My next draft" : "", await prompt.InputValueAsync());
+            await page.WaitForFunctionAsync("() => activeTurnId === '' && !turnSubmissionInFlight");
+            Assert.Equal(editWhileSending ? "My next draft" : "", await prompt.InputValueAsync());
+            await page.EvaluateAsync("saved => sessionStorage.setItem('jarvis.pending-turn.v1', saved)", acceptedRecovery);
+            await page.ReloadAsync();
+            await page.Locator("#chat").WaitForAsync();
+            await page.WaitForFunctionAsync("() => activeTurnId === '' && pendingTurnSubmission === null");
+            Assert.Equal("", await prompt.InputValueAsync());
         }
         finally
         {

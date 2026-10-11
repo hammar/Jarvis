@@ -145,6 +145,10 @@ automated checks recorded in `docs/testing.md`.
 
 The chat composer sends when Enter is pressed and inserts a newline with
 Shift+Enter. Modified Enter chords and IME composition are not intercepted.
+The submitted text clears after the server confirms acceptance, not on the
+initial keypress. Failed or uncertain sends retain their text for retry.
+A draft edited while acceptance is pending is preserved. Reload recovery of
+an already accepted turn does not put its sent text back in the composer.
 Settings show only provider/model and connection configuration status, never
 secret values.
 The profile status distinguishes signed-in chat from sign-in guidance,

@@ -306,7 +306,6 @@ async function showChat() {
         activeTurnConversationId = pendingTurnSubmission.conversationId;
         conversationId = activeTurnConversationId;
         document.getElementById("conversation-title").textContent = "Recovering conversation";
-        document.getElementById("prompt").value = pendingTurnSubmission.text;
         document.getElementById("conversation").hidden = false;
         setTurnNavigationLocked(true);
         document.getElementById("send-turn").disabled = true;
@@ -496,6 +495,8 @@ document.getElementById("turn-form").addEventListener("submit", async event => {
         return;
     }
     activeTurnId = result.turnId.value || result.turnId;
+    const prompt = document.getElementById("prompt");
+    if (prompt.value === text) prompt.value = "";
     document.getElementById("stream-status").textContent = "Jarvis is responding.";
     pendingTurnSubmission.turnId = activeTurnId;
     try {
