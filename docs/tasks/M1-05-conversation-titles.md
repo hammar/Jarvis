@@ -97,6 +97,7 @@ and browser recovery scenarios.
 | R17 (medium) | Away/back navigation during a pending rename could retain an old active-header title. | Fixed and independently reviewed: successful rename updates the selected conversation without invalidating newer navigation; reads overlapping that rename reconcile the returned title with its committed result. Passing controlled browser coverage exercises the old same-conversation read completing both before and after PATCH. |
 | R18 (Previously missed, medium) | Format-only Unicode first messages persisted a visually empty title. | Fixed and independently reviewed: normalized text containing only whitespace/format runes uses the existing deterministic fallback. Passing unit and real HTTP/SQLite regression cases cover U+200B/U+2060, whitespace mixing, preservation of visible emoji ZWJ text and later-turn title stability. |
 | R19 (Previously missed, medium) | Format-only manual titles persisted with permanent manual precedence and no readable label. | Fixed and independently reviewed: share the displayable-text predicate with automatic naming and reject format-only manual titles. Passing policy/API regressions cover rename rejection without title/provenance mutation, nonblank creation rejection, and preservation of visible text with joiners. |
+| R20 (Previously missed, medium) | Variation-selector-only titles bypassed the format-only predicate. | Fixed and independently reviewed: require a visible base rune, excluding standalone marks and default-ignorable Hangul fillers. Passing regressions cover BMP/supplementary variation selectors, combining marks, automatic fallback, rejected creation/rename without mutation, and preserved emoji selectors/accents. |
 
 The independent reviewer found no new significant issues in the complete
 current diff. Review was against the current uncommitted worktree on macOS.
@@ -179,6 +180,15 @@ shared predicate, creation/rename rejection, persisted provenance invariants
 and preservation of visible joined text with no significant issues. No schema
 change or rewriting of existing titles is involved. CI must validate the
 pushed revision.
+
+R20 passed native macOS build (zero warnings/errors), unit (126), integration
+(219), coverage (141/146 changed executable lines, 96.6%), docs and whitespace.
+Independent review against the diff on `805a204` ran 30 title-policy cases and
+eight targeted HTTP/SQLite cases from the existing Release build; all passed.
+No significant issues or blocking regression gaps were found. Standalone
+spacing-combining/enclosing mark exclusion is explicit in the predicate but
+not separately exercised by these cases. No schema or existing-data rewrite.
+CI must validate the pushed revision.
 
 ## Completion criteria
 

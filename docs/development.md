@@ -136,8 +136,10 @@ authenticated chat UI, and the manual choice is retained across restarts and
 never replaced by automatic naming. The authenticated
 `PATCH /api/conversations/{id}` mutation requires CSRF validation and accepts a
 trimmed title of at most 200 characters without control characters and with
-displayable text. Format-only titles are rejected; format characters alongside
-visible text, including emoji joiners, are preserved. The same validation
+displayable text with a visible base rune. Format/mark-only titles (including
+variation selectors) and default-ignorable Hangul fillers are rejected; format
+characters and marks alongside visible text, including emoji joiners and
+variation selectors, are preserved. The same validation
 applies to nonblank titles supplied when creating a conversation.
 
 The root page provides Chat, Settings, and Activity. Chat submits bounded

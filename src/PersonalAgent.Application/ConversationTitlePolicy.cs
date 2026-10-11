@@ -12,7 +12,7 @@ public static class ConversationTitlePolicy
     /// <summary>Normalizes and shortens the first accepted user message for display as a title.</summary>
     /// <param name="message">Untrusted user message text.</param>
     /// <returns>A nonempty, whitespace-normalized title of at most 80 Unicode scalar values.
-    /// Uses "Message without displayable text" when only whitespace or Unicode format characters remain.
+    /// Uses "Message without displayable text" when no visible base rune remains.
     /// Preserves format characters accompanying visible text, including emoji joiners.</returns>
     public static string CreateAutomaticTitle(string message)
     {
@@ -65,7 +65,12 @@ public static class ConversationTitlePolicy
         return normalized;
     }
 
+    // Default-ignorable Hangul fillers are letters, unlike format characters and marks.
     private static bool ContainsDisplayableText(string title) =>
         title.EnumerateRunes().Any(rune => !Rune.IsWhiteSpace(rune) &&
-            Rune.GetUnicodeCategory(rune) != UnicodeCategory.Format);
+            rune.Value is not (0x115F or 0x1160 or 0x3164 or 0xFFA0) &&
+            Rune.GetUnicodeCategory(rune) is not (
+                UnicodeCategory.Control or UnicodeCategory.Format or
+                UnicodeCategory.NonSpacingMark or UnicodeCategory.SpacingCombiningMark or
+                UnicodeCategory.EnclosingMark or UnicodeCategory.OtherNotAssigned));
 }

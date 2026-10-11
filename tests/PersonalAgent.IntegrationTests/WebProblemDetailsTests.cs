@@ -183,6 +183,9 @@ public sealed class WebProblemDetailsTests
     [InlineData("Original\u001B[31mtext", "Original [31mtext")]
     [InlineData("\u001B\u0000\u007F", "Message without displayable text")]
     [InlineData("\u200B\u2060", "Message without displayable text")]
+    [InlineData("\uFE0E\uFE0F", "Message without displayable text")]
+    [InlineData("\U000E0100", "Message without displayable text")]
+    [InlineData("❤\uFE0F plans", "❤\uFE0F plans")]
     [InlineData("👩\u200D💻 plans", "👩\u200D💻 plans")]
     [Trait("Category", "Integration")]
     public async Task TurnWithControlCharactersIsAcceptedAndReturnsSanitizedAutomaticTitle(string text, string expectedTitle)
@@ -281,14 +284,14 @@ public sealed class WebProblemDetailsTests
         }
         client.DefaultRequestHeaders.Add("X-CSRF-TOKEN", csrfToken);
 
-        foreach (var formatOnlyTitle in new[] { "\u200B\u2060", " \u200B \u2060 " })
+        foreach (var formatOnlyTitle in new[] { "\u200B\u2060", " \u200B \u2060 ", "\uFE0E\uFE0F", "\U000E0100" })
         {
             using var invalidCreation = await client.PostAsJsonAsync(
                 "/api/conversations", new { title = formatOnlyTitle });
             await AssertProblemAsync(invalidCreation, HttpStatusCode.BadRequest, "Conversation title is invalid.");
         }
 
-        foreach (var invalidTitle in new string?[] { null, "", "  ", new string('x', 201), "line\nbreak", "\u200B\u2060", " \u200B \u2060 " })
+        foreach (var invalidTitle in new string?[] { null, "", "  ", new string('x', 201), "line\nbreak", "\u200B\u2060", " \u200B \u2060 ", "\uFE0E\uFE0F", "\U000E0100" })
         {
             using var invalid = await client.PatchAsJsonAsync(
                 $"/api/conversations/{owned.Id.Value:D}", new { title = invalidTitle });
@@ -302,7 +305,7 @@ public sealed class WebProblemDetailsTests
             Assert.False(unchanged.TitleIsManual);
         }
 
-        foreach (var visibleTitle in new[] { "👩\u200D💻 plans", "Visible\u2060text" })
+        foreach (var visibleTitle in new[] { "👩\u200D💻 plans", "Visible\u2060text", "❤\uFE0F plans", "Cafe\u0301" })
         {
             using var visible = await client.PatchAsJsonAsync(
                 $"/api/conversations/{owned.Id.Value:D}", new { title = visibleTitle });

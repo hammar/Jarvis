@@ -15,6 +15,11 @@ public sealed class ConversationTitlePolicyTests
     [InlineData(" \u200B \u2060 ", "Message without displayable text")]
     [InlineData("👩\u200D💻 plans", "👩\u200D💻 plans")]
     [InlineData("Visible\u2060text", "Visible\u2060text")]
+    [InlineData("\uFE0E\uFE0F", "Message without displayable text")]
+    [InlineData("\U000E0100", "Message without displayable text")]
+    [InlineData("\u0301\u034F", "Message without displayable text")]
+    [InlineData("\u115F\u1160\u3164\uFFA0", "Message without displayable text")]
+    [InlineData("❤\uFE0F plans", "❤\uFE0F plans")]
     [Trait("Category", "Unit")]
     public void AutomaticTitleNormalizesUnicodeAndCollapsesWhitespace(string input, string expected)
     {
@@ -45,6 +50,8 @@ public sealed class ConversationTitlePolicyTests
     [InlineData("  Renamed  ", "Renamed")]
     [InlineData(" 👩\u200D💻 plans ", "👩\u200D💻 plans")]
     [InlineData(" Visible\u2060text ", "Visible\u2060text")]
+    [InlineData(" ❤\uFE0F plans ", "❤\uFE0F plans")]
+    [InlineData(" Cafe\u0301 ", "Cafe\u0301")]
     [Trait("Category", "Unit")]
     public void ManualTitleIsTrimmed(string input, string expected)
     {
@@ -57,6 +64,10 @@ public sealed class ConversationTitlePolicyTests
     [InlineData("bad\ntitle")]
     [InlineData("\u200B\u2060")]
     [InlineData(" \u200B \u2060 ")]
+    [InlineData("\uFE0E\uFE0F")]
+    [InlineData("\U000E0100")]
+    [InlineData("\u0301\u034F")]
+    [InlineData("\u115F\u1160\u3164\uFFA0")]
     [InlineData("too long")]
     [Trait("Category", "Unit")]
     public void InvalidManualTitlesAreRejected(string title)
