@@ -19,6 +19,226 @@ public sealed class LocalTurnCoordinatorTests
 
     [Fact]
     [Trait("Category", "Integration")]
+    public async Task ActualRuntimeDelayedShutdownPreservesStateBlocksReuseThenMaintenanceDeletesWithoutInference()
+    {
+        using var directory = IsolatedDirectory.Create();
+        var clock = new MutableClock(Now);
+        var database = new SqliteDatabase(Path.Combine(directory.Path, "jarvis.db"));
+        await database.InitializeAsync();
+        var store = new SqliteConversationStore(database, clock);
+        await using var provider = await FakeOpenAiProvider.StartAsync();
+        var runtimeDirectory = Path.Combine(directory.Path, "runtime");
+        var releaseShutdown = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        CopilotClientShutdown? shutdown = null;
+        var runtimeCount = 0;
+        var engine = new CopilotAgentEngine(store, new RejectingToolDispatcher(), clock,
+            new CopilotAgentEngineOptions(runtimeDirectory,
+                new CopilotProviderOptions("fixture-model", new Uri(provider.BaseUrl)), null), null,
+            client => Interlocked.Increment(ref runtimeCount) == 1
+                ? shutdown = new CopilotClientShutdown(
+                async () =>
+                {
+                    await client.ForceStopAsync();
+                    await releaseShutdown.Task;
+                },
+                () => client.DisposeAsync().AsTask(),
+                TimeSpan.FromMilliseconds(50))
+                : new CopilotClientShutdown(client.ForceStopAsync, () => client.DisposeAsync().AsTask()));
+        var conversation = ConversationId.New();
+        var first = TurnId.New();
+        await store.CreateTurnAsync(first, conversation, TurnStatus.Received, Now, CancellationToken.None);
+        var events = new List<AgentEvent>();
+        try
+        {
+            await foreach (var item in engine.RunTurnAsync(Request(first), CancellationToken.None))
+            {
+                events.Add(item);
+            }
+            Assert.Single(events.OfType<TurnInterrupted>());
+            Assert.Empty(events.OfType<TurnCompleted>());
+            Assert.Equal(TurnStatus.Interrupted, (await store.GetTurnAsync(first, CancellationToken.None))!.Status);
+            Assert.True(Directory.Exists(Path.Combine(runtimeDirectory, $"conversation-{conversation.Value:N}")));
+            await engine.CleanupAsync(CancellationToken.None);
+            Assert.True(Directory.Exists(Path.Combine(runtimeDirectory, $"conversation-{conversation.Value:N}")));
+            var blocked = TurnId.New();
+            await store.CreateTurnAsync(blocked, conversation, TurnStatus.Received, Now, CancellationToken.None);
+            await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            {
+                await foreach (var _ in engine.RunTurnAsync(Request(blocked), CancellationToken.None))
+                {
+                }
+            });
+            Assert.Single(provider.Requests);
+        }
+        finally
+        {
+            releaseShutdown.TrySetResult();
+            if (shutdown is not null)
+            {
+                await shutdown.StopAsync();
+            }
+        }
+        await engine.CleanupAsync(CancellationToken.None);
+        Assert.Empty(Directory.EnumerateDirectories(runtimeDirectory, "conversation-*"));
+        Assert.Single(provider.Requests);
+        var next = TurnId.New();
+        await store.CreateTurnAsync(next, conversation, TurnStatus.Received, Now, CancellationToken.None);
+        events.Clear();
+        await foreach (var item in engine.RunTurnAsync(Request(next), CancellationToken.None))
+        {
+            events.Add(item);
+        }
+        Assert.Single(events.OfType<TurnCompleted>());
+        Assert.Equal(2, provider.RequestCount);
+
+        AgentTurnRequest Request(TurnId id) => new(id, conversation, ProviderKind.Local,
+            "Answer the synthetic request briefly.",
+            new ContextPacket("fixture", "fixture",
+                [new ContextItem("request:current", "CURRENT_REQUEST", "LocalOnly", "user")],
+                new ContextEstimate(0, 0, 0, 0, 0, 0, 0, 0, 8192, 0, false, false, "fixture")),
+            [], TimeSpan.FromSeconds(15), 0);
+    }
+
+    [Theory]
+    [InlineData("message-count", 8, 0)]
+    [InlineData("oversized-answer", 2, 8001)]
+    [InlineData("token-budget", 6, 7200)]
+    [Trait("Category", "Integration")]
+    public async Task ProductionNativeHistoryCannotRetainMessagesOmittedByHostSelection(
+        string boundary, int turns, int answerPadding)
+    {
+        using var directory = IsolatedDirectory.Create();
+        var clock = new MutableClock(Now);
+        var database = new SqliteDatabase(Path.Combine(directory.Path, "jarvis.db"));
+        await database.InitializeAsync();
+        var store = new SqliteConversationStore(database, clock);
+        await using var provider = await FakeOpenAiProvider.StartAsync();
+        var answerCount = 0;
+        provider.ResponseContentSelector = _ =>
+            (Interlocked.Increment(ref answerCount) == 1 ? "OLD_ANSWER_SENTINEL " : "NEW_ANSWER_SENTINEL ")
+            + new string('a', answerPadding);
+        var engine = new CopilotAgentEngine(store, new RejectingToolDispatcher(), clock,
+            new CopilotAgentEngineOptions(Path.Combine(directory.Path, "runtime"),
+                new CopilotProviderOptions("fixture-model", new Uri(provider.BaseUrl)), null));
+        var conversation = ConversationId.New();
+        await using var scope = new CoordinatorScope(CreateCoordinator(store, engine, clock));
+        await scope.Coordinator.StartAsync(CancellationToken.None);
+        TurnId last = default;
+        for (var index = 0; index < turns; index++)
+        {
+            var accepted = await scope.Coordinator.SubmitAsync(new LocalTurnRequest(
+                conversation, $"{boundary}-{index}",
+                index == 0 ? "OLD_REQUEST_SENTINEL" : $"CURRENT_REQUEST_{index}",
+                RoutingTaskKind.TextConversation), CancellationToken.None);
+            last = accepted.Turn.Id;
+            await WaitForTerminalAsync(store, last);
+            Assert.Equal(TurnStatus.Completed, (await store.GetTurnAsync(last, CancellationToken.None))!.Status);
+        }
+
+        using var outbound = JsonDocument.Parse(provider.Requests.Last().Body);
+        var messages = outbound.RootElement.GetProperty("messages").EnumerateArray().ToArray();
+        Assert.Equal(["system", "user"], messages.Select(item => item.GetProperty("role").GetString()));
+        var prompt = messages[1].GetProperty("content").GetString()!;
+        Assert.Contains($"CURRENT_REQUEST_{turns - 1}", prompt, StringComparison.Ordinal);
+        if (boundary is "oversized-answer" or "token-budget")
+        {
+            Assert.DoesNotContain("OLD_ANSWER_SENTINEL", prompt, StringComparison.Ordinal);
+        }
+        else
+        {
+            Assert.DoesNotContain("OLD_REQUEST_SENTINEL", prompt, StringComparison.Ordinal);
+        }
+        var characters = messages.Sum(item => item.GetProperty("content").GetString()!.Length);
+        var estimatedTokens = (characters + 3) / 4;
+        Assert.True(estimatedTokens + (estimatedTokens * 20 + 99) / 100 <= 8192);
+        var events = await store.ReadTurnEventsAfterAsync(last, 0, 100, CancellationToken.None);
+        Assert.Single(events, item => item.EventType == nameof(RuntimeContextRebuilt));
+        var durable = await store.ReadRecentAsync(conversation, 100, CancellationToken.None);
+        Assert.Equal(turns * 2, durable.Count);
+        Assert.Contains(durable, item => item.Content == "OLD_REQUEST_SENTINEL");
+        Assert.Equal(turns, provider.RequestCount);
+    }
+
+    [Theory]
+    [InlineData("missing")]
+    [InlineData("corrupt-marker")]
+    [InlineData("restore")]
+    [Trait("Category", "Integration")]
+    public async Task ProductionCoordinatorRebuildsReplaceableSessionFromSQLiteWithoutReplayingTurns(string recovery)
+    {
+        using var directory = IsolatedDirectory.Create();
+        var clock = new MutableClock(Now);
+        var database = new SqliteDatabase(Path.Combine(directory.Path, "jarvis.db"));
+        await database.InitializeAsync();
+        var store = new SqliteConversationStore(database, clock);
+        await using var provider = await FakeOpenAiProvider.StartAsync();
+        var runtimeDirectory = Path.Combine(directory.Path, "runtime");
+        var engineOptions = new CopilotAgentEngineOptions(runtimeDirectory,
+            new CopilotProviderOptions("fixture-model", new Uri(provider.BaseUrl)), null);
+        var engine = new CopilotAgentEngine(store, new RejectingToolDispatcher(), clock, engineOptions);
+        var conversation = ConversationId.New();
+        var backupPath = Path.Combine(directory.Path, "checkpoint.db");
+        var backups = new SqliteBackupRestoreService(database);
+        await using (var before = new CoordinatorScope(CreateCoordinator(store, engine, clock)))
+        {
+            await before.Coordinator.StartAsync(CancellationToken.None);
+            var first = await before.Coordinator.SubmitAsync(new LocalTurnRequest(
+                conversation, "first", "DURABLE_FIRST_REQUEST", RoutingTaskKind.TextConversation),
+                CancellationToken.None);
+            await WaitForTerminalAsync(store, first.Turn.Id);
+            Assert.Equal(TurnStatus.Completed, (await store.GetTurnAsync(first.Turn.Id, CancellationToken.None))!.Status);
+            if (recovery == "restore")
+            {
+                await backups.CreateBackupAsync(backupPath);
+                var newer = await before.Coordinator.SubmitAsync(new LocalTurnRequest(
+                    conversation, "newer", "ROLLED_BACK_PRIVATE_REQUEST", RoutingTaskKind.TextConversation),
+                    CancellationToken.None);
+                await WaitForTerminalAsync(store, newer.Turn.Id);
+                Assert.Equal(TurnStatus.Completed, (await store.GetTurnAsync(newer.Turn.Id, CancellationToken.None))!.Status);
+            }
+            await before.Coordinator.StopAsync(CancellationToken.None);
+        }
+
+        var localState = Path.Combine(runtimeDirectory, $"conversation-{conversation.Value:N}", "local");
+        if (recovery == "missing")
+        {
+            Directory.Delete(Path.Combine(localState, "runtime"), recursive: true);
+        }
+        else if (recovery == "corrupt-marker")
+        {
+            await File.WriteAllTextAsync(Path.Combine(localState, ".jarvis-copilot-session.json"), "{invalid");
+        }
+        else
+        {
+            await backups.RestoreAsync(backupPath);
+        }
+
+        var beforeRequests = provider.RequestCount;
+        var restarted = new CopilotAgentEngine(store, new RejectingToolDispatcher(), clock, engineOptions);
+        await using var after = new CoordinatorScope(CreateCoordinator(store, restarted, clock));
+        await after.Coordinator.StartAsync(CancellationToken.None);
+        var request = new LocalTurnRequest(conversation, "recovered", "CURRENT_RECOVERED_REQUEST", RoutingTaskKind.TextConversation);
+        var recovered = await after.Coordinator.SubmitAsync(request, CancellationToken.None);
+        await WaitForTerminalAsync(store, recovered.Turn.Id);
+        Assert.Equal(TurnStatus.Completed, (await store.GetTurnAsync(recovered.Turn.Id, CancellationToken.None))!.Status);
+        var duplicate = await after.Coordinator.SubmitAsync(request, CancellationToken.None);
+        Assert.True(duplicate.IsDuplicate);
+        Assert.Equal(recovered.Turn.Id, duplicate.Turn.Id);
+        Assert.Equal(beforeRequests + 1, provider.RequestCount);
+        var body = provider.Requests.Last().Body;
+        Assert.Contains("DURABLE_FIRST_REQUEST", body, StringComparison.Ordinal);
+        Assert.Contains("CURRENT_RECOVERED_REQUEST", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("ROLLED_BACK_PRIVATE_REQUEST", body, StringComparison.Ordinal);
+        Assert.Empty(provider.Requests.SelectMany(item => item.ToolNames));
+        var events = await store.ReadTurnEventsAfterAsync(recovered.Turn.Id, 0, 100, CancellationToken.None);
+        Assert.Single(events, item => item.EventType == nameof(RuntimeContextRebuilt));
+        Assert.Single(events, item => item.EventType == nameof(TurnCompleted));
+        var messages = await store.ReadRecentAsync(conversation, 10, CancellationToken.None);
+        Assert.Equal(2, messages.Count(item => item.Role == "assistant"));
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
     public async Task CoordinatorPersistsOneCompletedAnswerAndReturnsDuplicateRequest()
     {
         using var directory = IsolatedDirectory.Create();

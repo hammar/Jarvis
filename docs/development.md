@@ -70,6 +70,24 @@ custom proxy prefix, are preserved. Controlled integration tests execute the
 actual Copilot runtime through production Local/Hybrid composition against
 strict completion paths; startup-only checks are not inference evidence.
 
+Local chat preserves the application-owned current question instead of the
+SDK's default date/XML wrapper on create and resume. Tool-free Local turns reuse
+native SDK history only when it matches the host-selected SQLite context.
+Reconstruction quotes/labels earlier history instead of sending an opaque
+provenance packet. Each turn still launches its own runtime. Working copies are
+private, bounded and replaceable. The SDK owns automatic compaction for tool-free
+Local sessions using registered-model input/output limits of 8,192/2,048 tokens.
+Configure Ollama's actual context allocation for at least their 10,240-token sum;
+Jarvis does not modify the native server or assume automatic discovery.
+The host's character estimate still bounds selected input/reconstruction, not
+SDK summary text. See the accepted reliance and upstream limitation in
+[ADR 0004](adr/0004-local-copilot-working-state.md). Validate a model
+with the opt-in [Local chat comparison](testing.md#local-chat-model-comparison);
+passing controlled-provider tests alone does not establish live model quality.
+Restart the host after updating binaries. Existing accounts/history remain;
+use a new conversation for clean comparisons rather than retaining earlier
+incorrect model responses.
+
 The M1 local coordinator uses a 120-second end-to-end interactive turn
 deadline by default, starting at durable acceptance and including queue wait,
 routing, context construction, and inference. The engine receives only the

@@ -69,6 +69,7 @@ public enum CancellationCause
 
 /// <summary>Contains explicit, bounded inputs for one engine turn.</summary>
 /// <param name="TurnId">Application-owned turn identifier.</param>
+/// <param name="ConversationId">Stable application conversation identifier used to bind replaceable engine state.</param>
 /// <param name="Provider">Provider selected by host routing; never inferred by the engine.</param>
 /// <param name="Instructions">Host-supplied instructions for this turn.</param>
 /// <param name="Context">The selected context packet; it excludes unapproved private content.</param>
@@ -85,6 +86,7 @@ public enum CancellationCause
 /// cancellation cause, including None. Terminal selection consults it even when callback publication is delayed.</param>
 public sealed record AgentTurnRequest(
     TurnId TurnId,
+    ConversationId ConversationId,
     ProviderKind Provider,
     string Instructions,
     ContextPacket Context,
@@ -124,6 +126,15 @@ public interface IAgentEngine
     /// <param name="cancellationToken">Token that bounds the stop request.</param>
     /// <returns>A task that completes when the bounded stop request is processed.</returns>
     ValueTask StopAsync(TurnId turnId, CancellationToken cancellationToken);
+}
+
+/// <summary>Maintains replaceable engine state without executing model turns or replaying tool effects.</summary>
+public interface IEngineStateMaintenance
+{
+    /// <summary>Removes idle, excess, or orphaned engine copies while preserving active runtime ownership.</summary>
+    /// <param name="cancellationToken">Token that bounds maintenance; failures remain visible to host health reporting.</param>
+    /// <returns>A task completing after the cleanup pass.</returns>
+    Task CleanupAsync(CancellationToken cancellationToken);
 }
 
 /// <summary>Describes an item selected for an inspectable context packet.</summary>
@@ -472,6 +483,9 @@ public static class LocalContextLimits
 
     /// <summary>Maximum approximate input tokens, including the reserved margin.</summary>
     public const int MaximumEstimatedInputTokens = 8_192;
+
+    /// <summary>Maximum output tokens reserved in the Local SDK model's configured total context window.</summary>
+    public const int MaximumOutputTokens = 2_048;
 
     /// <summary>Character-to-token ratio used when no exact tokenizer is available.</summary>
     public const int EstimatedCharactersPerToken = 4;
@@ -1190,6 +1204,28 @@ public sealed record RouteSelected(
     DateTimeOffset OccurredAtUtc,
     ProviderKind Provider,
     string ReasonCode) : AgentEvent(TurnId, OccurredAtUtc);
+
+/// <summary>Reports pre-inference reconstruction of replaceable Local SDK history from host-selected context.</summary>
+/// <param name="TurnId">Application-owned turn identifier; no previous inference is replayed.</param>
+/// <param name="OccurredAtUtc">UTC observation instant.</param>
+/// <param name="ReasonCode">Safe reason identifying missing state or changed context/compatibility.</param>
+public sealed record RuntimeContextRebuilt(
+    TurnId TurnId,
+    DateTimeOffset OccurredAtUtc,
+    string ReasonCode) : AgentEvent(TurnId, OccurredAtUtc);
+
+/// <summary>Reports an SDK-owned compaction outcome without persisting its sensitive summary or filesystem paths.</summary>
+/// <param name="TurnId">Application turn during which compaction was observed.</param>
+/// <param name="OccurredAtUtc">UTC observation instant.</param>
+/// <param name="Succeeded">SDK-reported summary generation outcome, not a guarantee of semantic recall or budget compliance.</param>
+/// <param name="PromptTokenLimit">SDK-reported input budget in tokens, when available.</param>
+/// <param name="PostCompactionTokens">SDK-estimated post-compaction tokens, when available; not the host's character estimate.</param>
+public sealed record RuntimeContextCompacted(
+    TurnId TurnId,
+    DateTimeOffset OccurredAtUtc,
+    bool Succeeded,
+    long? PromptTokenLimit,
+    long? PostCompactionTokens) : AgentEvent(TurnId, OccurredAtUtc);
 
 /// <summary>Signals that context must be inspected or approved before inference.</summary>
 /// <param name="TurnId">Application-owned turn identifier.</param>

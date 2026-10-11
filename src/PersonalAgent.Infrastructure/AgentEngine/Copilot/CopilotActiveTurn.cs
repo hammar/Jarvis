@@ -11,6 +11,7 @@ internal sealed class CopilotActiveTurn
     private readonly CancellationTokenSource eventStop = new();
     private readonly SemaphoreSlim abortGate = new(1, 1);
     private readonly object sync = new();
+    private readonly Func<CopilotClient, CopilotClientShutdown>? shutdownFactory;
     private CopilotClient? client;
     private CopilotSession? session;
     private CopilotClientShutdown? clientShutdown;
@@ -22,7 +23,13 @@ internal sealed class CopilotActiveTurn
     private bool terminal;
     private string? failureCode;
 
-    public CopilotActiveTurn(int maximumToolCalls) => MaximumToolCalls = maximumToolCalls;
+    public CopilotActiveTurn(
+        int maximumToolCalls,
+        Func<CopilotClient, CopilotClientShutdown>? shutdownFactory = null)
+    {
+        MaximumToolCalls = maximumToolCalls;
+        this.shutdownFactory = shutdownFactory;
+    }
 
     public int MaximumToolCalls { get; }
     public CancellationToken CancellationToken => stop.Token;
@@ -45,13 +52,21 @@ internal sealed class CopilotActiveTurn
         lock (sync)
         {
             client = value;
-            clientShutdown = new CopilotClientShutdown(
+            SetClientShutdown(shutdownFactory?.Invoke(value) ?? new CopilotClientShutdown(
                 value.ForceStopAsync,
-                () => CopilotAgentEngine.DisposeBoundedAsync(value.DisposeAsync().AsTask()));
+                () => CopilotAgentEngine.DisposeBoundedAsync(value.DisposeAsync().AsTask())));
         }
     }
 
     public void SetSession(CopilotSession value) => Volatile.Write(ref session, value);
+
+    internal void SetClientShutdown(CopilotClientShutdown shutdown)
+    {
+        lock (sync)
+        {
+            clientShutdown = shutdown;
+        }
+    }
 
     public bool CancelByHost()
     {

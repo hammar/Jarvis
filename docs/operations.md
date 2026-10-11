@@ -18,6 +18,40 @@ does not automatically retry an
 interrupted inference. On startup, nonterminal turns are persisted as
 interrupted and remain available for review; they are not replayed.
 
+Tool-free Local SDK copies live under private
+`conversation-<ConversationId>/local/{runtime,workspace}` roots beneath the
+configured runtime directory. They are sensitive working copies, not the
+authoritative conversation store or part of SQLite backups. Do not edit private
+SDK transcripts. A missing/corrupt/incompatible checkpoint or changed selected
+history reconstructs from bounded SQLite context; missing native state during
+pre-inference resume also reconstructs and processes the current request once.
+No uncertain inference or completed tool action is retried. Cloud/tool turns
+start fresh. Tool-free Local sessions delegate automatic compaction to the SDK.
+The configured model budget is 8,192 input + 2,048 output tokens. Ensure Ollama's
+actual context allocation is at least 10,240 tokens (app/server context settings
+or a model's `num_ctx`); inspect it with `ollama ps`. The 2,048 output tokens
+are an SDK context reservation, not a verified wire generation cap. The OpenAI-compatible
+endpoint does not set this allocation for Jarvis. No server settings are changed
+automatically. A model's theoretical maximum is not its current allocation.
+SDK compaction can lose detail; the observed oversized-summary/truncation defect
+is explicitly accepted for upstream follow-up, not claimed fixed. SQLite history
+survives. SDK-reported failures and size metrics are persisted as
+`RuntimeContextCompacted`, without summary text or private paths.
+See [ADR 0004](adr/0004-local-copilot-working-state.md).
+
+The cache retains at most 32 conversation roots, with a 30-day idle limit.
+Startup and hourly maintenance remove idle/orphan engine copies without
+inference; an owner retention update is reflected by the next maintenance pass,
+not synchronously by the settings request. Active or unresolved runtime shutdown
+paths are not pruned. Startup engine-maintenance failure stops startup; hourly
+failures use the existing degraded health/error reporting below. Startup failures
+log only the error type and propagate a sanitized exception without private
+filesystem paths or inner exception content. Removing SDK
+copies after stopping the host does not delete SQLite conversations, but the next
+turn must reconstruct its selected history. Ready-checkpoint persistence failure
+is explicitly Interrupted (`session_checkpoint_failed`) without committing an
+assistant answer, even if partial text was streamed.
+
 During graceful shutdown the coordinator stops accepting work, interrupts
 queued turns, and asks the engine to stop active turns within a bounded
 deadline. Persistence or shutdown timeout failures are surfaced and make

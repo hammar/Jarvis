@@ -12,6 +12,7 @@ public sealed class RetentionCleanupService : BackgroundService, IHealthCheck
     private readonly RetentionSettings defaults;
     private readonly TimeSpan cleanupInterval;
     private readonly ILogger<RetentionCleanupService> logger;
+    private readonly IEngineStateMaintenance? engineState;
     private volatile bool cleanupFailed;
 
     /// <summary>Creates the periodic cleanup worker using trusted first-run defaults.</summary>
@@ -20,12 +21,14 @@ public sealed class RetentionCleanupService : BackgroundService, IHealthCheck
     /// <param name="defaults">Validated trusted defaults used when no durable owner settings exist.</param>
     /// <param name="cleanupInterval">Positive interval between background cleanup passes.</param>
     /// <param name="logger">Privacy-safe maintenance failure reporting.</param>
+    /// <param name="engineState">Optional replaceable engine-copy cleanup, performed without inference.</param>
     public RetentionCleanupService(
         IHistoryRetentionStore retentionStore,
         IClock clock,
         RetentionSettings defaults,
         TimeSpan cleanupInterval,
-        ILogger<RetentionCleanupService> logger)
+        ILogger<RetentionCleanupService> logger,
+        IEngineStateMaintenance? engineState = null)
     {
         ArgumentNullException.ThrowIfNull(retentionStore);
         ArgumentNullException.ThrowIfNull(clock);
@@ -42,6 +45,7 @@ public sealed class RetentionCleanupService : BackgroundService, IHealthCheck
         this.defaults = defaults;
         this.cleanupInterval = cleanupInterval;
         this.logger = logger;
+        this.engineState = engineState;
     }
 
     /// <summary>Reports degraded readiness after a failed pass until a subsequent cleanup succeeds.</summary>
@@ -61,12 +65,33 @@ public sealed class RetentionCleanupService : BackgroundService, IHealthCheck
     /// <inheritdoc />
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        if (engineState is not null)
+        {
+            try
+            {
+                await engineState.CleanupAsync(stoppingToken);
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception error)
+            {
+                logger.LogError("Engine startup cleanup failed with {ErrorType}.", error.GetType().Name);
+                throw new InvalidOperationException("Engine startup cleanup failed; inspect private storage availability and permissions.");
+            }
+        }
+
         using var timer = new PeriodicTimer(cleanupInterval);
         while (await timer.WaitForNextTickAsync(stoppingToken))
         {
             try
             {
                 await retentionStore.CleanupExpiredAsync(defaults, clock.UtcNow, stoppingToken);
+                if (engineState is not null)
+                {
+                    await engineState.CleanupAsync(stoppingToken);
+                }
                 cleanupFailed = false;
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)

@@ -631,6 +631,7 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
 
             var engineRequest = new AgentTurnRequest(
                 item.TurnId,
+                item.ConversationId,
                 ProviderKind.Local,
                 hostInstructions,
                 context,

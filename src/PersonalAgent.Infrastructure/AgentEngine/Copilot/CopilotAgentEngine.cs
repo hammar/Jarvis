@@ -1,26 +1,34 @@
 using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Threading.Channels;
 using GitHub.Copilot;
 using Microsoft.Extensions.AI;
 using PersonalAgent.Application;
+using PersonalAgent.Application.Context;
 using PersonalAgent.Domain;
 using PersonalAgent.Infrastructure.Persistence;
 using PermissionDecision = GitHub.Copilot.Rpc.PermissionDecision;
+using RemoteRpcException = GitHub.Copilot.RemoteRpcException;
 
 namespace PersonalAgent.Infrastructure.AgentEngine.Copilot;
 
 /// <summary>Runs bounded application turns in disposable, explicitly configured Copilot runtimes.</summary>
 /// <remarks>
-/// Each turn receives a fresh SDK client, runtime directory, session, provider configuration, and exact
-/// host-registered tool catalog. Runtime state is replaceable; turn status and ordered events are persisted
+/// Each turn receives a fresh SDK client and explicit provider configuration. Tool-free Local turns may
+/// resume conversation-bound SDK history only while it matches the host-selected context. Cloud and tool
+/// turns always start fresh. Runtime state is replaceable; turn status and ordered events are persisted
 /// through application-owned contracts. The native runtime is a trusted dependency per ADR 0001; this class
 /// does not claim OS-enforced network containment.
 /// </remarks>
-public sealed class CopilotAgentEngine : IAgentEngine
+public sealed class CopilotAgentEngine : IAgentEngine, IEngineStateMaintenance
 {
     private const int EventChannelCapacity = 128;
+    private const int MaximumRetainedLocalSessions = 32;
+    private static readonly TimeSpan LocalSessionIdleTimeout = TimeSpan.FromDays(30);
+    private const string SessionMarkerFileName = ".jarvis-copilot-session.json";
     internal static readonly TimeSpan CleanupTimeout = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan TerminalPersistenceTimeout = TimeSpan.FromSeconds(5);
     private readonly IConversationStore conversations;
@@ -29,7 +37,11 @@ public sealed class CopilotAgentEngine : IAgentEngine
     private readonly CopilotAgentEngineOptions options;
     private readonly ISecretResolver? secretResolver;
     private readonly CopilotTurnStateMachine stateMachine;
+    private readonly Func<CopilotClient, CopilotClientShutdown>? shutdownFactory;
     private readonly ConcurrentDictionary<TurnId, CopilotActiveTurn> activeTurns = new();
+    private readonly ConcurrentDictionary<ConversationId, TurnId> activeConversations = new();
+    private readonly ConcurrentDictionary<ConversationId, CopilotActiveTurn> unresolvedRuntimeCleanups = new();
+    private readonly SemaphoreSlim sessionOwnership = new(1, 1);
 
     /// <summary>Creates an engine using durable application event storage and explicit provider settings.</summary>
     /// <param name="conversations">Authoritative application turn and ordered-event store.</param>
@@ -60,16 +72,55 @@ public sealed class CopilotAgentEngine : IAgentEngine
         ArgumentException.ThrowIfNullOrWhiteSpace(options.RuntimeDirectory);
     }
 
+    internal CopilotAgentEngine(
+        IConversationStore conversations,
+        IToolDispatcher dispatcher,
+        IClock clock,
+        CopilotAgentEngineOptions options,
+        ISecretResolver? secretResolver,
+        Func<CopilotClient, CopilotClientShutdown> shutdownFactory)
+        : this(conversations, dispatcher, clock, options, secretResolver)
+    {
+        this.shutdownFactory = shutdownFactory ?? throw new ArgumentNullException(nameof(shutdownFactory));
+    }
+
     /// <inheritdoc />
     public async IAsyncEnumerable<AgentEvent> RunTurnAsync(
         AgentTurnRequest request,
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
         ValidateRequest(request);
-        var active = new CopilotActiveTurn(request.MaximumToolCalls);
-        if (!activeTurns.TryAdd(request.TurnId, active))
+        var active = new CopilotActiveTurn(request.MaximumToolCalls, shutdownFactory);
+        if (!await sessionOwnership.WaitAsync(CleanupTimeout))
         {
-            throw new InvalidOperationException("An engine turn with this identifier is already active.");
+            throw new TimeoutException("Conversation runtime ownership could not be acquired.");
+        }
+        try
+        {
+            if (unresolvedRuntimeCleanups.TryGetValue(request.ConversationId, out var previous))
+            {
+                if (!previous.CanDeleteRuntimeDirectory)
+                {
+                    throw new InvalidOperationException("The previous conversation runtime has not finished shutting down.");
+                }
+
+                DeleteTurnDirectory(GetLocalSessionRoot(request.ConversationId));
+                unresolvedRuntimeCleanups.TryRemove(request.ConversationId, out _);
+            }
+
+            if (!activeTurns.TryAdd(request.TurnId, active))
+            {
+                throw new InvalidOperationException("An engine turn with this identifier is already active.");
+            }
+            if (!activeConversations.TryAdd(request.ConversationId, request.TurnId))
+            {
+                activeTurns.TryRemove(new KeyValuePair<TurnId, CopilotActiveTurn>(request.TurnId, active));
+                throw new InvalidOperationException("An engine turn for this conversation is already active.");
+            }
+        }
+        finally
+        {
+            sessionOwnership.Release();
         }
 
         var events = Channel.CreateBounded<AgentEvent>(new BoundedChannelOptions(EventChannelCapacity)
@@ -108,9 +159,15 @@ public sealed class CopilotAgentEngine : IAgentEngine
             finally
             {
                 activeTurns.TryRemove(new KeyValuePair<TurnId, CopilotActiveTurn>(request.TurnId, active));
+                activeConversations.TryRemove(
+                    new KeyValuePair<ConversationId, TurnId>(request.ConversationId, request.TurnId));
             }
         }
     }
+
+    /// <inheritdoc />
+    public Task CleanupAsync(CancellationToken cancellationToken) =>
+        PruneLocalSessionsAsync(cancellationToken);
 
     /// <inheritdoc />
     public async ValueTask CancelAsync(TurnId turnId, CancellationToken cancellationToken)
@@ -147,6 +204,23 @@ public sealed class CopilotAgentEngine : IAgentEngine
     }
 
     private async Task ExecuteTurnAsync(
+        AgentTurnRequest request,
+        CopilotActiveTurn active,
+        ChannelWriter<AgentEvent> output,
+        CancellationToken callerToken,
+        CancellationToken consumerStoppedToken)
+    {
+        try
+        {
+            await ExecuteTurnCoreAsync(request, active, output, callerToken, consumerStoppedToken);
+        }
+        finally
+        {
+            output.TryComplete();
+        }
+    }
+
+    private async Task ExecuteTurnCoreAsync(
         AgentTurnRequest request,
         CopilotActiveTurn active,
         ChannelWriter<AgentEvent> output,
@@ -239,6 +313,15 @@ public sealed class CopilotAgentEngine : IAgentEngine
         }
 
         var claimCandidate = await stateMachine.GetClaimCandidateAsync(request.TurnId);
+        if (claimCandidate.ConversationId != request.ConversationId)
+        {
+            output.TryComplete();
+            throw new ArgumentException("The requested conversation must own the durable turn.", nameof(request));
+        }
+
+        string? localSessionDirectory = request.Provider == ProviderKind.Local && request.Tools.Count == 0
+            ? GetLocalSessionDirectory(request.ConversationId)
+            : null;
         try
         {
             await stateMachine.EnsureRunningAsync(claimCandidate, turnCancellation.Token);
@@ -309,6 +392,7 @@ public sealed class CopilotAgentEngine : IAgentEngine
                 apiKey,
                 active,
                 observed.Writer,
+                localSessionDirectory,
                 turnCancellation.Token);
             (terminalStatus, terminalEvent) = CopilotTurnStateMachine.CreateTerminalOutcome(
                 request.TurnId,
@@ -406,11 +490,34 @@ public sealed class CopilotAgentEngine : IAgentEngine
             }
 
             using var terminalPersistence = new CancellationTokenSource(TerminalPersistenceTimeout);
+            if (terminalStatus == TurnStatus.Completed && localSessionDirectory is not null)
+            {
+                try
+                {
+                    // A ready marker is usable only after its checkpoint turn is durably Completed.
+                    // Publish it first so a cache-write failure cannot contradict a committed success.
+                    await WriteSessionMarkerAsync(
+                        localSessionDirectory,
+                        GetLocalSessionId(request.ConversationId),
+                        "ready",
+                        request,
+                        finalMessage,
+                        terminalPersistence.Token);
+                }
+                catch (Exception error) when (
+                    error is IOException or UnauthorizedAccessException or OperationCanceledException)
+                {
+                    terminalStatus = TurnStatus.Interrupted;
+                    terminalEvent = new TurnInterrupted(request.TurnId, clock.UtcNow, "session_checkpoint_failed");
+                }
+            }
+
+            using var outcomePersistence = new CancellationTokenSource(TerminalPersistenceTimeout);
             await stateMachine.SetTerminalOutcomeAsync(
                 request.TurnId,
                 terminalStatus,
                 terminalEvent,
-                terminalPersistence.Token,
+                outcomePersistence.Token,
                 finalAssistantMessage: terminalStatus == TurnStatus.Completed && finalMessage is not null
                     ? new ConversationMessage(
                         Guid.NewGuid(),
@@ -439,6 +546,31 @@ public sealed class CopilotAgentEngine : IAgentEngine
         }
         finally
         {
+            CompleteOutputAfterCleanup(output, () =>
+            {
+                if (localSessionDirectory is not null && terminalStatus != TurnStatus.Completed)
+                {
+                    if (active.CanDeleteRuntimeDirectory)
+                    {
+                        DeleteTurnDirectory(GetLocalSessionRoot(request.ConversationId));
+                    }
+                    else
+                    {
+                        unresolvedRuntimeCleanups[request.ConversationId] = active;
+                    }
+                }
+            });
+        }
+    }
+
+    internal static void CompleteOutputAfterCleanup(ChannelWriter<AgentEvent> output, Action cleanup)
+    {
+        try
+        {
+            cleanup();
+        }
+        finally
+        {
             output.TryComplete();
         }
     }
@@ -449,78 +581,207 @@ public sealed class CopilotAgentEngine : IAgentEngine
         string? apiKey,
         CopilotActiveTurn active,
         ChannelWriter<AgentEvent> events,
+        string? localSessionDirectory,
         CancellationToken cancellationToken)
     {
-        var turnDirectory = Path.Combine(options.RuntimeDirectory, $"turn-{request.TurnId.Value:N}");
+        var isReusableLocalSession = localSessionDirectory is not null;
+        var turnDirectory = localSessionDirectory
+            ?? Path.Combine(options.RuntimeDirectory, $"turn-{request.TurnId.Value:N}");
+        var sessionDirectory = localSessionDirectory ?? turnDirectory;
         var runtimeDirectory = Path.Combine(turnDirectory, "runtime");
         var workingDirectory = Path.Combine(turnDirectory, "workspace");
         CopilotClient? client = null;
         CopilotSession? session = null;
         IDisposable? subscription = null;
+        var isResuming = false;
         try
         {
+            if (isReusableLocalSession)
+            {
+                await PruneLocalSessionsAsync(cancellationToken);
+                var marker = await ReadSessionMarkerAsync(sessionDirectory);
+                var checkpoint = marker?.LastTurnId is { } lastTurnId
+                    ? await conversations.GetTurnAsync(new TurnId(lastTurnId), cancellationToken)
+                    : null;
+                isResuming = marker is { State: "ready" } &&
+                    marker.SessionId == GetLocalSessionId(request.ConversationId) &&
+                    checkpoint is { Status: TurnStatus.Completed } &&
+                    checkpoint.ConversationId == request.ConversationId &&
+                    marker.CompatibilityHash == GetCompatibilityHash(request) &&
+                    marker.HistoryHash == GetHistoryHash(request.Context.Items.Take(request.Context.Items.Count - 1));
+                if (!isResuming)
+                {
+                    if (Directory.Exists(sessionDirectory))
+                    {
+                        await WriteObservedEventAsync(events, active,
+                            new RuntimeContextRebuilt(request.TurnId, clock.UtcNow, "session_context_or_compatibility_changed"),
+                            cancellationToken);
+                    }
+                    DeleteTurnDirectory(sessionDirectory);
+                }
+            }
+
             EnsurePrivateDirectory(turnDirectory);
             EnsurePrivateDirectory(runtimeDirectory);
             EnsurePrivateDirectory(workingDirectory);
 
-            client = new CopilotClient(new CopilotClientOptions
-            {
-                Mode = CopilotClientMode.Empty,
-                BaseDirectory = runtimeDirectory,
-                WorkingDirectory = workingDirectory,
-                UseLoggedInUser = false,
-                LogLevel = CopilotLogLevel.None,
-                Environment = CreateRuntimeEnvironment(runtimeDirectory)
-            });
-            active.SetClient(client);
+            client = CreateAndAssignClient(runtimeDirectory, workingDirectory, active);
             await client.StartAsync().WaitAsync(cancellationToken);
             var tools = request.Tools.Select(tool =>
                 new CopilotToolFunction(tool, dispatcher, request.TurnId, events, active, clock)).ToArray();
+            var hooks = new SessionHooks
+            {
+                // The host owns the bounded prompt; runtime date/XML wrappers change small-model behavior.
+                OnUserPromptTransformed = (input, _) => Task.FromResult<UserPromptTransformedHookOutput?>(
+                    new UserPromptTransformedHookOutput { ModifiedTransformedPrompt = input.Prompt })
+            };
+            var systemMessage = new SystemMessageConfig
+            {
+                Mode = SystemMessageMode.Replace,
+                Content = request.Instructions
+            };
+            var infiniteSessions = new InfiniteSessionConfig
+            {
+                Enabled = isReusableLocalSession,
+                BackgroundCompactionThreshold = 0.80,
+                BufferExhaustionThreshold = 0.95
+            };
+            var providerConfig = new ProviderConfig
+            {
+                Type = "openai",
+                BaseUrl = provider.BaseUrl.AbsoluteUri,
+                WireApi = provider.WireApi,
+                ApiKey = apiKey
+            };
+            var availableTools = tools.Select(tool => $"custom:{tool.Name}").ToArray();
             var sessionConfig = new SessionConfig
             {
+                SessionId = isReusableLocalSession ? GetLocalSessionId(request.ConversationId) : null,
                 Model = provider.Model,
-                Provider = new ProviderConfig
-                {
-                    Type = "openai",
-                    BaseUrl = provider.BaseUrl.AbsoluteUri,
-                    WireApi = provider.WireApi,
-                    ApiKey = apiKey
-                },
-                AvailableTools = tools.Select(tool => $"custom:{tool.Name}").ToArray(),
+                Provider = providerConfig,
+                AvailableTools = availableTools,
                 EnableSessionStore = false,
-                InfiniteSessions = new InfiniteSessionConfig { Enabled = false },
+                InfiniteSessions = infiniteSessions,
                 Streaming = true,
-                SystemMessage = new SystemMessageConfig
-                {
-                    Mode = SystemMessageMode.Replace,
-                    Content = request.Instructions
-                },
+                SystemMessage = systemMessage,
+                Hooks = hooks,
                 OnPermissionRequest = (_, _) =>
                     Task.FromResult(PermissionDecision.Reject("Only host-registered tools are permitted.")),
                 Tools = tools
             };
-            session = await client.CreateSessionAsync(sessionConfig).WaitAsync(cancellationToken);
+            if (isReusableLocalSession)
+            {
+                ConfigureLocalModelBudget(sessionConfig, provider, apiKey);
+            }
+            if (isResuming)
+            {
+                try
+                {
+                    var resumeConfig = new ResumeSessionConfig
+                    {
+                        Model = provider.Model,
+                        Provider = providerConfig,
+                        AvailableTools = availableTools,
+                        EnableSessionStore = false,
+                        InfiniteSessions = infiniteSessions,
+                        Streaming = true,
+                        SystemMessage = systemMessage,
+                        Hooks = hooks,
+                        OnPermissionRequest = sessionConfig.OnPermissionRequest,
+                        Tools = tools
+                    };
+                    ConfigureLocalModelBudget(resumeConfig, provider, apiKey);
+                    session = await client.ResumeSessionAsync(
+                        GetLocalSessionId(request.ConversationId),
+                        resumeConfig).WaitAsync(cancellationToken);
+                }
+                catch (IOException exception) when (
+                    exception.InnerException is RemoteRpcException { ErrorCode: -32603 } rpc &&
+                    rpc.Message.Contains("Session not found", StringComparison.OrdinalIgnoreCase))
+                {
+                    // Resume failed before any Send/tool callback. Stop the old client before rebuilding;
+                    // inference and tool failures never enter this path.
+                    await active.StopClientAsync(cancellationToken);
+                    DeleteTurnDirectory(sessionDirectory);
+                    EnsurePrivateDirectory(turnDirectory);
+                    EnsurePrivateDirectory(runtimeDirectory);
+                    EnsurePrivateDirectory(workingDirectory);
+                    client = CreateAndAssignClient(runtimeDirectory, workingDirectory, active);
+                    await client.StartAsync().WaitAsync(cancellationToken);
+                    isResuming = false;
+                    await WriteObservedEventAsync(events, active,
+                        new RuntimeContextRebuilt(request.TurnId, clock.UtcNow, "session_state_missing"),
+                        cancellationToken);
+                    session = await client.CreateSessionAsync(sessionConfig).WaitAsync(cancellationToken);
+                }
+            }
+            else
+            {
+                session = await client.CreateSessionAsync(sessionConfig).WaitAsync(cancellationToken);
+            }
+
             active.SetSession(session);
+            if (isReusableLocalSession)
+            {
+                await WriteSessionMarkerAsync(
+                    sessionDirectory,
+                    GetLocalSessionId(request.ConversationId),
+                    "pending",
+                    request,
+                    cancellationToken: cancellationToken);
+            }
+
+            var compactionGate = new object();
+            TaskCompletionSource? pendingCompaction = null;
             subscription = session.On<SessionEvent>(item =>
             {
-                if (item is AssistantMessageDeltaEvent delta)
+                AgentEvent? observed = null;
+                if (item is SessionCompactionStartEvent)
                 {
-                    var textDelta = new TextDelta(request.TurnId, clock.UtcNow, delta.Data.DeltaContent);
-                    if (!active.TryAcceptEvent(textDelta) || !events.TryWrite(textDelta))
+                    lock (compactionGate)
                     {
-                        active.FailForEventBudget();
+                        pendingCompaction = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                    }
+                }
+                else if (item is SessionCompactionCompleteEvent compacted)
+                {
+                    observed = new RuntimeContextCompacted(
+                        request.TurnId, clock.UtcNow, compacted.Data.Success,
+                        compacted.Data.TokenLimit, compacted.Data.PostCompactionTokens);
+                }
+                else if (item is AssistantMessageDeltaEvent delta)
+                {
+                    observed = new TextDelta(request.TurnId, clock.UtcNow, delta.Data.DeltaContent);
+                }
+                if (observed is not null && (!active.TryAcceptEvent(observed) || !events.TryWrite(observed)))
+                {
+                    active.FailForEventBudget();
+                }
+                if (item is SessionCompactionCompleteEvent)
+                {
+                    lock (compactionGate)
+                    {
+                        pendingCompaction?.TrySetResult();
                     }
                 }
             });
 
-            var prompt = JsonSerializer.Serialize(new
-            {
-                packetId = request.Context.PacketId,
-                policyVersion = request.Context.PolicyVersion,
-                items = request.Context.Items
-            });
+            var prompt = isResuming
+                ? GetCurrentRequest(request.Context.Items)
+                : LocalChatPrompt.Format(request.Context.Items);
             var turn = session.SendAndWaitAsync(new MessageOptions { Prompt = prompt });
             var response = await turn.WaitAsync(cancellationToken);
+            Task? compaction;
+            lock (compactionGate)
+            {
+                compaction = pendingCompaction?.Task;
+            }
+            // Each turn owns its runtime. Let an already-started SDK compaction settle before disposal,
+            // bounded by the same cancellation/deadline as inference; Jarvis does not replace its algorithm.
+            if (compaction is not null)
+            {
+                await compaction.WaitAsync(cancellationToken);
+            }
             var content = response?.Data.Content;
             if (string.IsNullOrWhiteSpace(content) || content.Length > 1_000_000)
             {
@@ -552,10 +813,241 @@ public sealed class CopilotAgentEngine : IAgentEngine
                         throw new InvalidOperationException("The Copilot runtime may still be using its turn directory.");
                     }
 
-                    DeleteTurnDirectory(turnDirectory);
+                    if (!isReusableLocalSession)
+                    {
+                        DeleteTurnDirectory(isReusableLocalSession
+                            ? GetLocalSessionRoot(request.ConversationId)
+                            : turnDirectory);
+                    }
                 });
         }
     }
+
+    // The pinned public named-model API is experimental; ordinary capability overrides are ignored.
+#pragma warning disable GHCP001
+    private static void ConfigureLocalModelBudget(
+        SessionConfigBase config, CopilotProviderOptions provider, string? apiKey)
+    {
+        const string name = "jarvis-local";
+        config.Provider = null;
+        config.Model = $"{name}/local";
+        config.EnableSessionTelemetry = false;
+        config.Providers =
+        [
+            new NamedProviderConfig
+            {
+                Name = name, Type = "openai", BaseUrl = provider.BaseUrl.AbsoluteUri,
+                WireApi = provider.WireApi, ApiKey = apiKey
+            }
+        ];
+        config.Models =
+        [
+            new ProviderModelConfig
+            {
+                Id = "local", WireModel = provider.Model, Provider = name,
+                MaxPromptTokens = LocalContextLimits.MaximumEstimatedInputTokens,
+                MaxOutputTokens = LocalContextLimits.MaximumOutputTokens,
+                MaxContextWindowTokens = LocalContextLimits.MaximumEstimatedInputTokens + LocalContextLimits.MaximumOutputTokens
+            }
+        ];
+    }
+#pragma warning restore GHCP001
+
+    private CopilotClient CreateAndAssignClient(
+        string runtimeDirectory,
+        string workingDirectory,
+        CopilotActiveTurn active)
+    {
+        var client = new CopilotClient(new CopilotClientOptions
+        {
+            Mode = CopilotClientMode.Empty,
+            BaseDirectory = runtimeDirectory,
+            WorkingDirectory = workingDirectory,
+            UseLoggedInUser = false,
+            LogLevel = CopilotLogLevel.None,
+            Environment = CreateRuntimeEnvironment(runtimeDirectory)
+        });
+        active.SetClient(client);
+        return client;
+    }
+
+    private string GetLocalSessionDirectory(ConversationId conversationId) =>
+        Path.Combine(GetLocalSessionRoot(conversationId), "local");
+
+    private string GetLocalSessionRoot(ConversationId conversationId) =>
+        Path.Combine(options.RuntimeDirectory, $"conversation-{conversationId.Value:N}");
+
+    private static string GetLocalSessionId(ConversationId conversationId) =>
+        $"jarvis-local-{conversationId.Value:N}";
+
+    private static string GetCurrentRequest(IReadOnlyList<ContextItem> items)
+    {
+        var currentRequests = items.Where(item =>
+            item.SourceId == "request:current" && item.Role == "user").ToArray();
+        return currentRequests.Length == 1 && !string.IsNullOrWhiteSpace(currentRequests[0].Text)
+            ? currentRequests[0].Text
+            : throw new InvalidOperationException("The Local context must contain one current user request.");
+    }
+
+    private async Task PruneLocalSessionsAsync(CancellationToken cancellationToken)
+    {
+        // Registration and eviction use the same gate; an eviction cannot race a new owner.
+        await sessionOwnership.WaitAsync(cancellationToken);
+        try
+        {
+            await PruneLocalSessionsCoreAsync(cancellationToken);
+        }
+        finally
+        {
+            sessionOwnership.Release();
+        }
+    }
+
+    private async Task PruneLocalSessionsCoreAsync(CancellationToken cancellationToken)
+    {
+        ReconcileDeferredCleanups(
+            unresolvedRuntimeCleanups,
+            id => activeConversations.ContainsKey(id),
+            id => DeleteTurnDirectory(GetLocalSessionRoot(id)),
+            cancellationToken);
+
+        if (!Directory.Exists(options.RuntimeDirectory))
+        {
+            return;
+        }
+
+        var activeDirectories = activeConversations.Keys
+            .Concat(unresolvedRuntimeCleanups.Keys)
+            .Select(GetLocalSessionRoot)
+            .ToHashSet(StringComparer.Ordinal);
+        var candidates = Directory.EnumerateDirectories(options.RuntimeDirectory, "conversation-*")
+            .Where(path => !activeDirectories.Contains(path))
+            .Select(path => new DirectoryInfo(path))
+            .ToArray();
+        var retained = new List<(DirectoryInfo Directory, DateTimeOffset LastUsedUtc)>();
+        var idleCutoff = clock.UtcNow - LocalSessionIdleTimeout;
+        foreach (var directory in candidates)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var marker = await ReadSessionMarkerAsync(Path.Combine(directory.FullName, "local"));
+            var checkpoint = marker?.LastTurnId is { } lastTurnId
+                ? await conversations.GetTurnAsync(new TurnId(lastTurnId), cancellationToken)
+                : null;
+            if (marker is null || marker.LastUsedUtc < idleCutoff || checkpoint is null)
+            {
+                DeleteTurnDirectory(directory.FullName);
+                continue;
+            }
+
+            retained.Add((directory, marker.LastUsedUtc));
+        }
+
+        var retainedLimit = Math.Max(0, MaximumRetainedLocalSessions - activeDirectories.Count);
+        foreach (var expired in retained
+            .OrderByDescending(item => item.LastUsedUtc)
+            .Skip(retainedLimit))
+        {
+            DeleteTurnDirectory(expired.Directory.FullName);
+        }
+    }
+
+    internal static void ReconcileDeferredCleanups(
+        ConcurrentDictionary<ConversationId, CopilotActiveTurn> deferredCleanups,
+        Func<ConversationId, bool> isActive,
+        Action<ConversationId> deleteDirectory,
+        CancellationToken cancellationToken)
+    {
+        foreach (var deferred in deferredCleanups)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (deferred.Value.CanDeleteRuntimeDirectory && !isActive(deferred.Key))
+            {
+                deleteDirectory(deferred.Key);
+                deferredCleanups.TryRemove(deferred);
+            }
+        }
+    }
+
+    private static async Task<SessionMarker?> ReadSessionMarkerAsync(string sessionDirectory)
+    {
+        var path = Path.Combine(sessionDirectory, SessionMarkerFileName);
+        if (!File.Exists(path))
+        {
+            return null;
+        }
+
+        try
+        {
+            return JsonSerializer.Deserialize<SessionMarker>(await File.ReadAllTextAsync(path));
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private async Task WriteSessionMarkerAsync(
+        string sessionDirectory,
+        string sessionId,
+        string state,
+        AgentTurnRequest request,
+        string? finalMessage = null,
+        CancellationToken cancellationToken = default)
+    {
+        var history = request.Context.Items.AsEnumerable();
+        if (finalMessage is not null)
+        {
+            history = history.Append(new ContextItem("completed", finalMessage, "LocalOnly", "assistant"));
+        }
+
+        var marker = new SessionMarker(
+            sessionId, state, clock.UtcNow, GetCompatibilityHash(request), GetHistoryHash(history), request.TurnId.Value);
+        var path = Path.Combine(sessionDirectory, SessionMarkerFileName);
+        var temporaryPath = $"{path}.tmp";
+        await using (var stream = new FileStream(temporaryPath, FileMode.Create, FileAccess.Write, FileShare.None))
+        {
+            if (!OperatingSystem.IsWindows())
+            {
+                File.SetUnixFileMode(temporaryPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+            }
+
+            await JsonSerializer.SerializeAsync(stream, marker, cancellationToken: cancellationToken);
+            stream.Flush(flushToDisk: true);
+        }
+        if (!OperatingSystem.IsWindows())
+        {
+            File.SetUnixFileMode(temporaryPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        }
+
+        DurableFileSystem.MoveFileDurably(temporaryPath, path, overwrite: true);
+        DurableFileSystem.FlushDirectory(sessionDirectory);
+    }
+
+    private string GetCompatibilityHash(AgentTurnRequest request) =>
+        Hash(JsonSerializer.Serialize(new
+        {
+            Version = 2,
+            PromptTokens = LocalContextLimits.MaximumEstimatedInputTokens,
+            OutputTokens = LocalContextLimits.MaximumOutputTokens,
+            Sdk = typeof(CopilotClient).Assembly.GetName().Version?.ToString(),
+            request.Instructions,
+            request.Context.PolicyVersion,
+            Provider = options.LocalProvider
+        }));
+
+    private static string GetHistoryHash(IEnumerable<ContextItem> items) =>
+        Hash(JsonSerializer.Serialize(items.Select(item => new { item.Role, item.Text, item.PrivacyClass })));
+
+    private static string Hash(string value) =>
+        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value)));
+
+    private sealed record SessionMarker(
+        string SessionId,
+        string State,
+        DateTimeOffset LastUsedUtc,
+        string? CompatibilityHash,
+        string? HistoryHash,
+        Guid? LastTurnId);
 
     private static void DeleteTurnDirectory(string turnDirectory)
     {
@@ -758,6 +1250,11 @@ public sealed class CopilotAgentEngine : IAgentEngine
             request.Deadline > TimeSpan.FromMilliseconds(uint.MaxValue - 1))
         {
             throw new ArgumentOutOfRangeException(nameof(request), "The turn deadline must be a positive finite duration.");
+        }
+
+        if (request.ConversationId.Value == Guid.Empty)
+        {
+            throw new ArgumentException("The application conversation identifier must be nonempty.", nameof(request));
         }
 
         if (request.MaximumToolCalls < 0)

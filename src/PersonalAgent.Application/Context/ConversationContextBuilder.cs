@@ -6,7 +6,7 @@ namespace PersonalAgent.Application.Context;
 public sealed class ConversationContextBuilder : IContextBuilder
 {
     /// <summary>Gets the policy version assigned to M1 local context packets.</summary>
-    public const string PolicyVersion = "m1-local-context-v1";
+    public const string PolicyVersion = "m1-local-context-v2";
 
     private const string LocalOnlyPrivacyClass = "LocalOnly";
     private const string EstimationMethod =
@@ -35,7 +35,6 @@ public sealed class ConversationContextBuilder : IContextBuilder
         var taskItem = new ContextItem("request:current", request.TaskText, LocalOnlyPrivacyClass, "user");
         var selectedNewestFirst = new List<ContextItem>();
         var mandatoryEstimate = Estimate(
-            packetId,
             request.HostInstructions,
             taskItem,
             selectedNewestFirst,
@@ -81,7 +80,6 @@ public sealed class ConversationContextBuilder : IContextBuilder
             var candidateNewestFirst = selectedNewestFirst.Append(item).ToArray();
             var candidateHistoryCharacters = candidateNewestFirst.Sum(candidate => candidate.Text.Length);
             var candidateEstimate = Estimate(
-                packetId,
                 request.HostInstructions,
                 taskItem,
                 candidateNewestFirst,
@@ -105,7 +103,6 @@ public sealed class ConversationContextBuilder : IContextBuilder
             .ToArray();
         var historyCharacters = selectedNewestFirst.Sum(item => item.Text.Length);
         var estimate = Estimate(
-            packetId,
             request.HostInstructions,
             taskItem,
             selectedNewestFirst,
@@ -182,7 +179,6 @@ public sealed class ConversationContextBuilder : IContextBuilder
         && message.Content.Length <= LocalContextLimits.MaximumHistoryMessageCharacters;
 
     private static ContextEstimate Estimate(
-        string packetId,
         string instructions,
         ContextItem taskItem,
         IReadOnlyList<ContextItem> historyNewestFirst,
@@ -196,9 +192,8 @@ public sealed class ConversationContextBuilder : IContextBuilder
             .Reverse()
             .Append(taskItem)
             .ToArray();
-        var policyVersion = PolicyVersion;
-        var serializedPacket = JsonSerializer.Serialize(new { packetId, policyVersion, items });
-        var serializationOverhead = serializedPacket.Length - taskItem.Text.Length - historyCharacters;
+        var formattedPrompt = LocalChatPrompt.Format(items);
+        var serializationOverhead = formattedPrompt.Length - taskItem.Text.Length - historyCharacters;
         if (serializationOverhead < 0)
         {
             throw new InvalidOperationException("Serialized context accounting produced a negative framing size.");

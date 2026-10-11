@@ -92,6 +92,15 @@ already-selected context, exact tool catalog, deadline, and maximum tool-call
 count. The adapter does not route, approve context, or authorize a tool;
 callbacks always pass through the host's `IToolDispatcher`.
 
+The adapter uses `LocalChatPrompt` for selected history/current-task framing
+and the supported `OnUserPromptTransformed` hook to keep the model-facing prompt
+identical to the application-owned text. Runtime-added date/XML framing caused
+reproducible refusals in native Llama chat; opaque provenance packets also
+obscured the current task. No runtime/private transcript files are seeded and
+no real prompts are logged. See the
+[prompt reliability investigation](../../docs/tasks/local-chat-prompt-reliability.md)
+and [live comparison commands](../../docs/testing.md#local-chat-model-comparison).
+
 Configure `CopilotAgentEngineOptions` from trusted host configuration. Set
 `RuntimeDirectory` beneath a private application data directory; local and
 cloud provider settings each require an explicit OpenAI-compatible `Model` and
@@ -102,9 +111,25 @@ passed only to the SDK and never enter the child-process environment, events,
 or logs. A configured key reference without a registered resolver fails the
 turn explicitly.
 
-Every turn starts a fresh SDK client and session in
-`<RuntimeDirectory>/turn-<TurnId>/`, with empty SDK mode, logged-in-user
-discovery disabled, session storage disabled, and a sanitized environment.
+Every turn starts a fresh SDK client/runtime. Cloud and tool-bearing turns
+create fresh sessions in `<RuntimeDirectory>/turn-<TurnId>/`. Tool-free Local
+turns retain private working state in
+`<RuntimeDirectory>/conversation-<ConversationId>/local/` and resume only when
+the Completed SQLite checkpoint, selected history and compatibility hash match.
+Otherwise bounded application context reconstructs a fresh session without
+replaying earlier inference. Create and resume both use explicit streaming,
+empty SDK mode, logged-in-user discovery disabled, cross-session store/search
+disabled, and a sanitized environment. `EnableSessionStore = false` does not
+disable native disk persistence. Tool-free Local sessions use the pinned
+experimental named-model API to propagate 8,192 input / 2,048 output tokens and
+enable SDK-owned automatic compaction at 80%/95%. The ordinary capability
+override is ignored at this pin; attribution metadata can report 128,000 while
+actual compaction correctly uses the registered budget.
+No manual compactor or request gateway is introduced. Already-started background
+compaction settles before turn-owned runtime disposal, under the same deadline.
+`RuntimeContextCompacted` persists only outcome/token metrics.
+The [lifecycle ADR](../../docs/adr/0004-local-copilot-working-state.md)
+records the owner's accepted dependency limitation and policy distinction.
 Only request-registered custom tools are exposed. The adapter streams typed
 events and appends each to `IConversationStore`, which assigns an atomic,
 monotonic per-turn sequence for later event replay. Terminal status changes and
@@ -129,8 +154,11 @@ shutdown, and the durable event remains available for replay. A slow reader
 cannot block terminal delivery indefinitely. Cancellation or deadline expiry
 while acquiring the durable turn claim also persists a terminal outcome using
 the pre-claim version, so a competing engine's claim cannot be overwritten.
-The per-turn runtime/workspace directory is removed after bounded runtime
-shutdown; a removal failure is surfaced as cleanup uncertainty. Terminal
+Disposable turn directories are removed after bounded runtime shutdown.
+Successful tool-free Local state is retained, bounded to 32 conversation roots
+and 30 idle days; startup/hourly maintenance removes idle/orphan copies without
+inference. Incomplete shutdown retains ownership and prevents unsafe deletion
+or same-conversation reuse. A removal failure is surfaced as cleanup uncertainty. Terminal
 outcome persistence has its own bounded timeout so turn cancellation does not
 prevent recording the terminal result.
 Event persistence observes the turn cancellation/deadline token. Runtime

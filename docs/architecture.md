@@ -75,10 +75,35 @@ Its
 `HasMoreHistory` separately reports when the sentinel proves older rows exist.
 Its
 estimate includes host instructions, task text, serialized
-tool definitions, conversation history and packet framing. Without a provider
+tool definitions, conversation history and model-facing prompt framing. Without a provider
 tokenizer it reports a four-UTF-16-characters-per-token estimate plus a 20%
 reserve, not an exact count. These M1 policies do not implement cloud consent,
 memory retrieval or tool execution.
+
+`LocalChatPrompt` sends the current request as plain text, preceded only when
+needed by JSON-quoted, role-labelled earlier conversation text. Provenance and
+privacy labels remain in the application packet. Host instructions distinguish
+answering a user request from granting it authority over policy or capabilities.
+The Copilot adapter uses the pinned SDK's user-prompt-transformed hook to
+preserve that bounded prompt without unsolicited date/XML wrappers. SDK
+clients/runtimes remain disposable per turn. Tool-free Local sessions may resume
+private conversation-bound disk history when a Completed SQLite checkpoint and
+the exact selected role/text/privacy history and compatibility settings match.
+Otherwise they reconstruct bounded labelled history; this SDK pin has no
+established public assistant-role seeding API. Resumed turns submit only the
+current request and retain native user/assistant roles. Cloud and tool-bearing
+sessions always start fresh. Tool-free Local sessions use SDK-owned automatic
+compaction at the registered model's 8,192-input-token budget, with 2,048 output
+tokens reserved and 80%/95% background/blocking thresholds. The host character
+estimate bounds selected inputs and reconstruction, not SDK-generated summaries.
+The owner accepts reliance on SDK compaction and the disclosed upstream
+oversized-summary/truncation limitation; Jarvis does not implement a workaround.
+Compaction outcome events contain counts, never summaries or paths. See the
+[lifecycle ADR](adr/0004-local-copilot-working-state.md) and
+[M1-04 acceptance record](tasks/M1-04-reusable-copilot-conversations.md).
+This preserves selected conversation context without replaying
+previous inference. It does not promise identical bytes to the Ollama GUI,
+which can use different prompts, generation settings and context windows.
 
 `LocalTurnCoordinator` is the Application-owned lifecycle boundary for local
 turns. It transactionally accepts the request, user message, durable
