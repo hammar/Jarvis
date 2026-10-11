@@ -1,5 +1,6 @@
 using Microsoft.Playwright;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Xunit;
 
 namespace PersonalAgent.E2ETests;
@@ -99,6 +100,21 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
             var reached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             string? acceptedRecovery = null;
+            if (editWhileSending)
+            {
+                var conversation = await page.EvaluateAsync<string>("conversationId");
+                await page.RouteAsync($"**/api/conversations/{conversation}", async route =>
+                {
+                    var response = await route.FetchAsync();
+                    var history = JsonNode.Parse(await response.TextAsync())!;
+                    history["messages"]!.AsArray().Add(new JsonObject
+                    {
+                        ["role"] = "user",
+                        ["content"] = "A newer message from another tab"
+                    });
+                    await route.FulfillAsync(new RouteFulfillOptions { Response = response, Body = history.ToJsonString() });
+                });
+            }
             await page.RouteAsync("**/api/conversations/*/turns", async route =>
             {
                 var response = await route.FetchAsync();
@@ -148,6 +164,8 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
             var completedReply = await page.Locator("#messages .assistant-message .message-content").Last.InnerTextAsync();
             Assert.Equal($"Jarvis: {completedReply}", await page.Locator("#response-announcement").InnerTextAsync());
             Assert.Single(await page.EvaluateAsync<string[]>("window.responseAnnouncements"));
+            if (editWhileSending)
+                Assert.Equal("A newer message from another tab", await page.Locator("#messages .message-content").Last.InnerTextAsync());
             Assert.Contains("Georgia", await page.Locator("#messages .assistant-message .message-content").Last
                 .EvaluateAsync<string>("element => getComputedStyle(element).fontFamily"));
             await page.EvaluateAsync("saved => sessionStorage.setItem('jarvis.pending-turn.v1', saved)", acceptedRecovery);
@@ -1646,7 +1664,7 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
             Assert.Contains("Georgia", await partialReply.Locator(".message-content")
                 .EvaluateAsync<string>("element => getComputedStyle(element).fontFamily"));
             await page.EvaluateAsync("window.__holdRefresh = true");
-            await page.GetByText("Controlled streaming response", new PageGetByTextOptions { Exact = false })
+            await page.Locator("#messages").GetByText("Controlled streaming response", new LocatorGetByTextOptions { Exact = false })
                 .WaitForAsync(new LocatorWaitForOptions { Timeout = 30_000 });
             await page.Locator("#cancel-turn").WaitForAsync(
                 new LocatorWaitForOptions { State = WaitForSelectorState.Hidden, Timeout = 15_000 });
@@ -1770,7 +1788,7 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
                 .WaitForAsync(new LocatorWaitForOptions { Timeout = 15_000 });
 
             await page.Locator("#conversation-list button").Nth(1).ClickAsync();
-            await page.GetByText("Controlled streaming response", new PageGetByTextOptions { Exact = false })
+            await page.Locator("#messages").GetByText("Controlled streaming response", new LocatorGetByTextOptions { Exact = false })
                 .WaitForAsync(new LocatorWaitForOptions { Timeout = 15_000 });
             Assert.True(await page.Locator("#activity").IsHiddenAsync());
             Assert.True(await page.Locator("#settings").IsHiddenAsync());
@@ -1876,7 +1894,7 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
             await savedConversation.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible });
             Assert.True(await page.Locator("#auth").IsHiddenAsync());
             await page.EvaluateAsync("id => openConversation(id)", persistedConversationId);
-            await page.GetByText("Controlled streaming response", new PageGetByTextOptions { Exact = false })
+            await page.Locator("#messages").GetByText("Controlled streaming response", new LocatorGetByTextOptions { Exact = false })
                 .WaitForAsync(new LocatorWaitForOptions { Timeout = 15_000 });
             Assert.Equal(1, await page.Locator("#messages li")
                 .Filter(new LocatorFilterOptions { HasText = "Controlled streaming response" }).CountAsync());

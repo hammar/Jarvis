@@ -205,7 +205,6 @@ async function openConversation(id) {
     document.getElementById("settings").hidden = true;
     document.getElementById("activity").hidden = true;
     document.getElementById("conversation").hidden = false;
-    return data;
 }
 
 document.getElementById("rename-conversation").addEventListener("click", () => {
@@ -529,6 +528,7 @@ function connectEvents(turnId, lastSequence) {
     const source = new EventSource(`/api/turns/${encodeURIComponent(turnId)}/events`, { withCredentials: true });
     eventSource = source;
     let streamedReply = null;
+    let completedReply = "";
     let terminalReceived = false;
     document.getElementById("response-announcement").textContent = "";
     let recoveryError = "";
@@ -540,6 +540,7 @@ function connectEvents(turnId, lastSequence) {
         const payload = JSON.parse(event.data);
         if (event.type === "TextDelta" && typeof (payload.text || payload.Text) === "string") {
             const text = payload.text || payload.Text;
+            completedReply += text;
             const list = document.getElementById("messages");
             if (!streamedReply) {
                 streamedReply = createMessageItem("assistant", "");
@@ -547,11 +548,15 @@ function connectEvents(turnId, lastSequence) {
             }
             streamedReply.querySelector(".message-content").textContent += text;
         } else if (event.type === "AssistantMessage" && typeof (payload.text || payload.Text) === "string") {
+            completedReply = payload.text || payload.Text;
             const list = document.getElementById("messages");
             list.append(createMessageItem("assistant", payload.text || payload.Text));
         }
         if (["TurnCompleted", "TurnFailed", "TurnCancelled", "TurnInterrupted"].includes(event.type)) {
             terminalReceived = true;
+            if (event.type === "TurnCompleted" && completedReply) {
+                document.getElementById("response-announcement").textContent = `Jarvis: ${completedReply}`;
+            }
             document.getElementById("stream-status").textContent =
                 event.type === "TurnCompleted" ? "Response complete." : "Response ended.";
             if (event.type === "TurnFailed") {
@@ -563,12 +568,7 @@ function connectEvents(turnId, lastSequence) {
             document.getElementById("cancel-turn").hidden = true;
             try {
                 await loadConversations();
-                const history = await openConversation(activeTurnConversationId);
-                const reply = history?.messages.at(-1);
-                if (event.type === "TurnCompleted" && eventSource === source && activeTurnId === turnId &&
-                    reply?.role === "assistant") {
-                    document.getElementById("response-announcement").textContent = `Jarvis: ${reply.content}`;
-                }
+                await openConversation(activeTurnConversationId);
             } catch (error) {
                 showError(error.message);
             } finally {

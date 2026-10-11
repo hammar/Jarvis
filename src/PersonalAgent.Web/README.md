@@ -143,9 +143,12 @@ focus remains visible, reduced-motion preferences are honored, and the layout
 reflows for narrow viewports. Do not infer WCAG conformance beyond the
 automated checks recorded in `docs/testing.md`.
 Streaming deltas do not update live regions. On successful completion, the
-final assistant answer from refreshed durable history is announced once in
+completed turn's streamed assistant text is announced once in
 a dedicated polite, atomic status region. Failed/cancelled/interrupted turns
 retain lifecycle/error notices without announcing a partial answer as final.
+Announcements use that turn's stream, not the latest conversation message,
+which could belong to a concurrent request in another tab. Durable history
+still replaces the visible streaming view after completion.
 Browser coverage measures light/dark authentication, chat, settings and activity
 at narrow/desktop widths and 200% CSS zoom, with reduced-motion emulation;
 it does not certify real screen-reader speech or native browser zoom controls.
