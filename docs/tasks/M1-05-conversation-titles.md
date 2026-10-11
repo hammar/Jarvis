@@ -93,6 +93,7 @@ and browser recovery scenarios.
 | R14 (Previously missed, medium) | Anonymous PATCH authentication was not directly protected by an API regression. | Covered and independently reviewed: passing anonymous rename regression returns 401 and preserves the original persisted title. |
 | R15 (Previously missed, medium) | Stale rename failures could overwrite feedback after navigation. | Fixed and independently reviewed: error feedback is scoped to the originating conversation and selection generation. Passing browser regression releases an obsolete failed PATCH after navigation and preserves the current feedback. |
 | R16 (medium) | The initial R15 guard suppressed a current sidebar-refresh failure after successful rename advanced the generation. | Fixed and independently re-reviewed: track the current feedback generation after the successful header mutation. Passing browser regression verifies saved header and visible list-refresh failure, while obsolete failure coverage remains. |
+| R17 (medium) | Away/back navigation during a pending rename could retain an old active-header title. | Fixed and independently reviewed: successful rename updates the selected conversation without invalidating newer navigation; reads overlapping that rename reconcile the returned title with its committed result. Passing controlled browser coverage exercises the old same-conversation read completing both before and after PATCH. |
 
 The independent reviewer found no new significant issues in the complete
 current diff. Review was against the current uncommitted worktree on macOS.
@@ -151,6 +152,15 @@ E2E (24 plus expected failure probe), coverage (135/141 changed executable
 lines, 95.7%), docs and whitespace checks. Coverage reused the latest passing
 107-test unit report; no unit executable code changed. Linux and remaining
 platform/runtime gates will run in CI on the pushed revision.
+
+R17 passed native macOS build (zero warnings/errors), full browser E2E
+(24 plus expected failure probe), docs and whitespace checks. Narrow independent
+review against the diff on `4ae203a` executed eight JavaScriptCore probes using
+the actual script with mocked DOM/API boundaries: both away/back response
+orderings and preservation of R3/R9/R11/R12/R15/R16. No significant issues
+remained. These probes supplement, rather than replace, the real browser gate.
+CI must validate the pushed revision; no live credentials or device writes
+were used.
 
 ## Completion criteria
 

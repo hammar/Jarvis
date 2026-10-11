@@ -15,6 +15,8 @@ let authenticationInFlight = false;
 let pendingTurnSubmission = null;
 let conversationSelectionGeneration = 0;
 let conversationListGeneration = 0;
+let conversationRenameGeneration = 0;
+let lastRenamedConversation = null;
 let eventSource = null;
 let bootstrapRequired = false;
 
@@ -164,6 +166,7 @@ function formatConversationTime(value) {
 async function openConversation(id) {
     const targetId = id.value || id;
     const selectionGeneration = ++conversationSelectionGeneration;
+    const renameGeneration = conversationRenameGeneration;
     if ((activeTurnId || turnSubmissionInFlight) && targetId !== activeTurnConversationId) {
         showError("Finish or cancel the active turn before switching conversations.");
         return;
@@ -175,7 +178,10 @@ async function openConversation(id) {
         return;
     }
     conversationId = data.conversation.id.value || data.conversation.id;
-    conversationTitle = data.conversation.title || "";
+    conversationTitle = renameGeneration !== conversationRenameGeneration &&
+        lastRenamedConversation?.id === targetId
+        ? lastRenamedConversation.title
+        : data.conversation.title || "";
     document.getElementById("conversation-title").textContent = conversationTitle || "New conversation";
     document.getElementById("conversation-created").textContent =
         `Created ${formatConversationTime(data.conversation.createdAtUtc)}`;
@@ -216,8 +222,12 @@ document.getElementById("rename-form").addEventListener("submit", async event =>
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ title })
         });
-        if (id === conversationId && renameSelectionGeneration === conversationSelectionGeneration) {
-            renameFeedbackGeneration = ++conversationSelectionGeneration;
+        lastRenamedConversation = { id, title: renamed.title };
+        ++conversationRenameGeneration;
+        if (id === conversationId) {
+            if (renameSelectionGeneration === conversationSelectionGeneration) {
+                renameFeedbackGeneration = ++conversationSelectionGeneration;
+            }
             conversationTitle = renamed.title;
             document.getElementById("conversation-title").textContent = conversationTitle;
             document.getElementById("rename-form").hidden = true;
