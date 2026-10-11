@@ -152,7 +152,9 @@ They override the trusted host defaults from
 Conversation/audit retention settings are read together in one SQLite
 snapshot, matching their atomic updates.
 Recent conversations display their stored creation instant in the browser's
-local time zone, including after the automatic or manual title is set. Empty
+local time zone, including after the automatic or manual title is set. Local
+clock times repeated during daylight-saving fallback are distinguished by the
+numeric UTC offset shown beside the time-zone name. Empty
 titles display as “New conversation.” Existing nonempty titles survive schema
 upgrade unchanged; legacy blank titles are eligible for automatic naming on
 their next accepted user message.

@@ -153,7 +153,11 @@ function formatConversationTime(value) {
         second: "2-digit"
     });
     const milliseconds = String(instant.getMilliseconds()).padStart(3, "0");
-    return `${local}.${milliseconds} (${zone})`;
+    const offsetMinutes = -instant.getTimezoneOffset();
+    const offsetSign = offsetMinutes >= 0 ? "+" : "-";
+    const offsetHours = String(Math.floor(Math.abs(offsetMinutes) / 60)).padStart(2, "0");
+    const offsetRemainder = String(Math.abs(offsetMinutes) % 60).padStart(2, "0");
+    return `${local}.${milliseconds} (${zone}, UTC${offsetSign}${offsetHours}:${offsetRemainder})`;
 }
 
 async function openConversation(id) {
@@ -207,11 +211,12 @@ document.getElementById("rename-form").addEventListener("submit", async event =>
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ title })
         });
-        if (id !== conversationId) return;
-        ++conversationSelectionGeneration;
-        conversationTitle = renamed.title;
-        document.getElementById("conversation-title").textContent = conversationTitle;
-        document.getElementById("rename-form").hidden = true;
+        if (id === conversationId) {
+            ++conversationSelectionGeneration;
+            conversationTitle = renamed.title;
+            document.getElementById("conversation-title").textContent = conversationTitle;
+            document.getElementById("rename-form").hidden = true;
+        }
         await loadConversations();
     } catch (error) {
         showError(error.message);

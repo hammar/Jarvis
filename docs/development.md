@@ -129,6 +129,7 @@ one sign-in; account credentials and durable history are unchanged.
 
 Conversation titles are durable display metadata: empty conversations show
 “New conversation” and their creation instant in the browser's local time zone.
+The displayed numeric UTC offset distinguishes repeated daylight-saving times.
 The first accepted user message supplies a normalized excerpt of at most 80
 Unicode scalar values; no model call is involved. Owners can rename through the
 authenticated chat UI, and the manual choice is retained across restarts and

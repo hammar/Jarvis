@@ -56,7 +56,8 @@ and browser recovery scenarios.
   where provenance cannot be inferred; blank legacy titles remain eligible for
   automatic naming. Existing timestamps are not rewritten.
 - Conversation list timestamps use the browser's local time zone, with the
-  resolved time-zone name shown for clarity.
+  resolved time-zone name and numeric UTC offset shown for clarity, including
+  when a daylight-saving fallback repeats a local clock time.
 
 ## Tests and documentation
 
@@ -83,6 +84,9 @@ and browser recovery scenarios.
 | R5 | Conversation timestamps were not associated with conversation buttons for assistive technology. | Fixed and independently reviewed: each timestamp has a conversation-scoped ID referenced by its button's `aria-describedby`; the browser scenario checks unique, nonempty description targets. |
 | R6 | A stored title equal to "New conversation" was mistaken for an empty-title placeholder in the rename form. | Fixed and independently reviewed: the browser tracks the stored title independently from its display label. The passing browser scenario covers blank, manual and automatic literal-placeholder titles and reopening after cancelling an unsaved edit. |
 | R7 | Follow-up browser regression could reload while the prior submission was still pending, then reject its next submission and falsely treat rejection as idle completion. | Fixed and independently reviewed: wait for durable request cleanup before reload and explicitly assert HTTP 202 for the literal-title submission before waiting for completion. |
+| R8 (Previously missed, medium) | Local timestamps repeated during a daylight-saving fold without identifying the UTC offset. | Fixed and independently reviewed: append the instant-specific numeric UTC offset; browser regression compares both New York fallback instants. |
+| R9 (Previously missed, medium) | Navigating while rename was pending skipped the successful sidebar refresh. | Fixed and independently reviewed: only the active-header mutation is selection-gated; the sidebar always refreshes. Browser regression holds PATCH response, navigates, then checks sidebar update and unchanged selected header. |
+| R10 (Previously missed, low) | The submission contract incorrectly promised a first-message check instead of the documented blank/non-manual migration condition. | Fixed and independently reviewed: documentation describes non-duplicate submission, blank/non-manual title and legacy conversations with existing messages. |
 
 The independent reviewer found no new significant issues in the complete
 current diff. Review was against the current uncommitted worktree on macOS.
@@ -119,6 +123,13 @@ provider-failure recovery smoke with a timeout; the following full run passed.
 No sleeps, test retries or gate exclusions were added. R4-R6 were independently
 reviewed against the follow-up diff on `fc8817c`; R7's synchronization
 correction received a separate narrow review with no new findings.
+
+The scheduled review check retained all three summary-only "Previously missed"
+findings from the review at `c714da2`. R8-R10 fixes passed native macOS build
+(zero warnings/errors), full browser E2E (24 tests and the expected negative
+probe), docs and diff whitespace checks. Independent follow-up review against
+the worktree diff on `c714da2` confirmed all three fixes, reran build/browser/docs,
+and found no new meaningful bugs.
 
 ## Completion criteria
 

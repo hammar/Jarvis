@@ -210,8 +210,9 @@ public sealed record ContextBuildRequest(
 /// <param name="RequiredOwnerId">Optional authenticated owner. When supplied, the conversation must already exist and
 /// belong to this owner; the check runs in the same write transaction as duplicate detection and insertion, so the
 /// submission never recreates a deleted conversation. When null, trusted host callers keep the implicit-root behavior.</param>
-/// <param name="AutomaticTitle">Optional application-derived title to apply only when this new user message is the first,
-/// the stored title is empty, and the owner has not manually renamed the conversation.</param>
+/// <param name="AutomaticTitle">Optional application-derived title to apply on a new, non-duplicate submission when
+/// the stored title is empty and non-manual. This includes the next accepted message of a legacy blank conversation,
+/// even if it already contains messages.</param>
 public sealed record ConversationTurnSubmission(
     TurnId TurnId,
     ConversationId ConversationId,

@@ -763,11 +763,17 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
         {
             using var playwright = await Playwright.CreateAsync();
             await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
-            var page = await browser.NewPageAsync();
+            var page = await browser.NewPageAsync(new BrowserNewPageOptions { TimezoneId = "America/New_York" });
             await page.GotoAsync(isolated.WebClient.BaseAddress!.ToString());
             await page.GetByLabel("Passphrase").FillAsync(SimulatorHostFixture.OwnerPassphrase);
             await page.Locator("#auth-submit").ClickAsync();
             await page.Locator("#new-conversation").WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible });
+
+            var beforeFold = await page.EvaluateAsync<string>("formatConversationTime('2026-11-01T05:30:00Z')");
+            var afterFold = await page.EvaluateAsync<string>("formatConversationTime('2026-11-01T06:30:00Z')");
+            Assert.Contains("UTC-04:00", beforeFold, StringComparison.Ordinal);
+            Assert.Contains("UTC-05:00", afterFold, StringComparison.Ordinal);
+            Assert.NotEqual(beforeFold, afterFold);
 
             await page.Locator("#new-conversation").ClickAsync();
             await page.WaitForFunctionAsync("() => conversationId !== '' && !conversationCreationInFlight");
@@ -902,6 +908,42 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
             await page.Locator("#cancel-title").ClickAsync();
             await page.Locator("#rename-conversation").ClickAsync();
             Assert.Equal("New conversation", await page.GetByLabel("Conversation title").InputValueAsync());
+            var renamedConversationId = await page.EvaluateAsync<string>("conversationId");
+            const string renamedWhileNavigating = "Renamed after navigation";
+            var renameReady = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseRename = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            await page.RouteAsync($"**/api/conversations/{renamedConversationId}", async route =>
+            {
+                if (route.Request.Method != "PATCH")
+                {
+                    await route.ContinueAsync();
+                    return;
+                }
+
+                var response = await route.FetchAsync();
+                renameReady.TrySetResult();
+                await releaseRename.Task.WaitAsync(TimeSpan.FromSeconds(15));
+                await route.FulfillAsync(new RouteFulfillOptions { Response = response });
+            });
+            await page.GetByLabel("Conversation title").FillAsync(renamedWhileNavigating);
+            await page.Locator("#save-title").ClickAsync();
+            await renameReady.Task.WaitAsync(TimeSpan.FromSeconds(15));
+            try
+            {
+                await page.Locator("#conversation-list").GetByRole(AriaRole.Button,
+                    new LocatorGetByRoleOptions { Name = manualTitle }).ClickAsync();
+                await page.WaitForFunctionAsync("id => conversationId === id", manualConversationId);
+            }
+            finally
+            {
+                releaseRename.TrySetResult();
+            }
+
+            await page.Locator("#conversation-list").GetByRole(AriaRole.Button,
+                new LocatorGetByRoleOptions { Name = renamedWhileNavigating }).WaitForAsync();
+            Assert.Equal(manualTitle, await page.Locator("#conversation-title").InnerTextAsync());
+            Assert.Equal(manualConversationId, await page.EvaluateAsync<string>("conversationId"));
+            await page.UnrouteAsync($"**/api/conversations/{renamedConversationId}");
         }
         finally
         {
