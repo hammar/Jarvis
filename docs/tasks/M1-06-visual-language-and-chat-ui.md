@@ -89,6 +89,29 @@ contract change is expected from M1-06 itself.
   `AcceptedSendClearsSubmittedTextWithoutDiscardingANewerDraft` covers
   successful acceptance and an in-flight draft edit; the keyboard rejection
   scenario also asserts retained text.
+
+### Composer acceptance follow-up
+
+Commit `e88189a` clears unchanged submitted text on accepted responses and
+leaves newer drafts alone, including after terminal completion. Accepted
+reload recovery no longer restores sent text; ambiguous recovery retains its
+original identity and retry text.
+
+Validation executed on native macOS with isolated controlled endpoints:
+`tools/validate.sh build` passed; `tools/validate.sh browser-e2e` passed all
+28 scenarios and verified the intentional failing probe;
+`tools/validate.sh docs` passed. Evidence is in
+`artifacts/m106-main-integration/composer-*.log`. Linux CI was not run locally.
+
+Independent review of exact commit `e88189a` raised CF-01 (medium): failure
+to persist accepted recovery state can leave the older ambiguous record,
+which restores text after reload. Disposition: **not applicable as a new
+defect**, confirmed by narrow independent follow-up review. This predates
+the fix and explicitly surfaces a storage error. Removing that record
+would discard idempotency identity and permit duplicate submission;
+successful acceptance persistence is required for empty accepted reload
+recovery. The Web README now states this existing failure-mode limitation.
+This incremental review does not replace the full M1-06 PR review.
 - Add Playwright assertions for desktop/tablet/mobile layout; representative
   authentication/chat/settings/activity states; long messages and titles;
   visible keyboard focus and keyboard operation; and supported zoom/reflow.
