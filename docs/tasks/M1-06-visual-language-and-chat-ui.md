@@ -129,3 +129,31 @@ Its scope was merge-specific correctness, not a full M1-06 design review.
 | Ref | Finding | Disposition and evidence |
 |---|---|---|
 | MI-01 | Medium: M1-05's timestamp sibling could be clipped on mobile by M1-06's full-height conversation button within a vertically clipped horizontal list. | Fixed: remove the mobile button's `height: 100%`. Extend `SoftEditorialChatReflowsWithoutOverflowAndKeepsLongMessagesReadable` to assert timestamp bounds lie within the list, not merely DOM visibility, at 1440/768/390/320px. |
+
+### Executed integration evidence
+
+Merge reconciliation is committed in `b25b55e`; MI-01 is fixed in `39ddc0f`.
+All commands below use the pinned SDK on native macOS with controlled,
+isolated data. Backend gates started on `b25b55e`; the subsequent MI-01 fix
+changes only CSS, browser-test assertions, and this record. Full browser and
+documentation gates, followed by a final build/format check, include `39ddc0f`.
+
+| Command | Result |
+|---|---|
+| `tools/validate.sh build` | Release build and formatting pass, zero warnings/errors; repeated after MI-01. |
+| `tools/validate.sh architecture` | 6/6 pass, discovery verified. |
+| `tools/validate.sh unit` | 126/126 pass, discovery verified. |
+| `tools/validate.sh integration` | 219/219 pass, discovery verified; includes schema-v4-to-v5 upgrade and real SQLite title precedence/race coverage. |
+| `tools/validate.sh sdk-contracts` | Runtime harness and 55/55 contract tests pass, discovery verified. |
+| `tools/validate.sh coverage` | Merged runtime thresholds and gate self-tests pass; changed coverable C# lines are N/A relative to merged main. Browser JavaScript/CSS execution is not counted as .NET coverage. |
+| `tools/validate.sh aspire-e2e` | 7/7 pass, discovery verified. |
+| `tools/validate.sh browser-e2e` | 26/26 pass, discovery verified; deliberate failure probe fails as required. Includes retained naming/rename race scenarios, persisted-title responsive/clipping assertions, and Enter/Shift+Enter behavior. |
+| `tools/validate.sh docs` | Internal Markdown links resolve. |
+
+Local gate logs are under `artifacts/m106-main-integration/`. A final fetch
+confirmed `91aaa9a` remains current main and is an ancestor of the branch.
+No private development database was opened or migrated by these checks.
+Linux CI, real household/cloud operations, assistive-technology certification,
+and full M1-06 aesthetic acceptance are not established by this merge check.
+The review scope and its one finding remain recorded above; this is not a
+claim of a full M1-06 PR review or authorization to merge that PR.
