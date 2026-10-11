@@ -1127,7 +1127,7 @@ public sealed class SqliteAndWebSmokeTests
 
         using var conversation = await client.PostAsJsonAsync(
             "/api/conversations",
-            new { title = "Owner chat" });
+            new { title = "" });
         Assert.True(
             conversation.StatusCode == HttpStatusCode.Created,
             await conversation.Content.ReadAsStringAsync());
@@ -1147,10 +1147,16 @@ public sealed class SqliteAndWebSmokeTests
             $"/api/conversations/{conversationId}/turns",
             new { requestId = new string('r', 129), text = "within the supported text bound" });
         Assert.Equal(HttpStatusCode.BadRequest, overlongRequestId.StatusCode);
+        var conversationStore = factory.Services.GetRequiredService<IConversationStore>();
+        var replayConversationId = new ConversationId(Guid.Parse(conversationId!));
+        Assert.Equal(string.Empty, (await conversationStore.GetConversationAsync(
+            replayConversationId, "owner", CancellationToken.None))!.Title);
         using var overlongText = await client.PostAsJsonAsync(
             $"/api/conversations/{conversationId}/turns",
             new { requestId = "overlong-text", text = new string('x', 8_001) });
         Assert.Equal(HttpStatusCode.BadRequest, overlongText.StatusCode);
+        Assert.Equal(string.Empty, (await conversationStore.GetConversationAsync(
+            replayConversationId, "owner", CancellationToken.None))!.Title);
         using var submitted = await client.PostAsJsonAsync(
             $"/api/conversations/{conversationId}/turns",
             new { requestId, text = "A local request without a configured provider." });
@@ -1172,6 +1178,9 @@ public sealed class SqliteAndWebSmokeTests
         var eventStream = await eventResponse.Content.ReadAsStringAsync();
         Assert.StartsWith("id: 1\n", eventStream, StringComparison.Ordinal);
         Assert.Contains("event: TurnFailed", eventStream, StringComparison.Ordinal);
+        Assert.Equal("A local request without a configured provider.",
+            (await conversationStore.GetConversationAsync(
+                replayConversationId, "owner", CancellationToken.None))!.Title);
         using var resumedRequest = new HttpRequestMessage(HttpMethod.Get, $"/api/turns/{turnId}/events");
         resumedRequest.Headers.Add("Last-Event-ID", "0");
         using var resumed = await client.SendAsync(resumedRequest);
@@ -1187,9 +1196,7 @@ public sealed class SqliteAndWebSmokeTests
         using var invalidCursor = await client.SendAsync(invalidCursorRequest);
         Assert.Equal(HttpStatusCode.BadRequest, invalidCursor.StatusCode);
 
-        var conversationStore = factory.Services.GetRequiredService<IConversationStore>();
         var replayTurnId = TurnId.New();
-        var replayConversationId = new ConversationId(Guid.Parse(conversationId!));
         var eventTime = factory.Services.GetRequiredService<IClock>().UtcNow;
         await conversationStore.CreateTurnAsync(
             replayTurnId,

@@ -88,6 +88,11 @@ and browser recovery scenarios.
 | R9 (Previously missed, medium) | Navigating while rename was pending skipped the successful sidebar refresh. | Fixed and independently reviewed: only the active-header mutation is selection-gated; the sidebar always refreshes. Browser regression holds PATCH response, navigates, then checks sidebar update and unchanged selected header. |
 | R10 (Previously missed, low) | The submission contract incorrectly promised a first-message check instead of the documented blank/non-manual migration condition. | Fixed and independently reviewed: documentation describes non-duplicate submission, blank/non-manual title and legacy conversations with existing messages. |
 | R11 (Previously missed, medium) | A pending rename response could invalidate newer navigation before its conversation GET completed. | Fixed and independently reviewed: rename invalidates older reads at initiation, captures that generation, and mutates the header only if it remains current. The passing controlled browser regression completes PATCH before releasing the newer navigation GET. |
+| R12 (medium) | A turn submitted during pending rename could suppress the manual-title header update. | Fixed and independently reviewed: serialize rename and turn submission with a rename-in-flight guard and disabled Send control while preserving navigation. Passing browser regression attempts a synthetic submission during held PATCH and verifies no turn request/recovery state, then successful manual header update. |
+| R13 (Previously missed, medium) | Automatic naming lacked persisted-title assertions for unavailable-provider acceptance and rejected first submissions. | Covered and independently reviewed: passing no-provider HTTP smoke starts blank, checks titles remain blank after each rejected oversized request, then checks the accepted automatic title survives inference failure. |
+| R14 (Previously missed, medium) | Anonymous PATCH authentication was not directly protected by an API regression. | Covered and independently reviewed: passing anonymous rename regression returns 401 and preserves the original persisted title. |
+| R15 (Previously missed, medium) | Stale rename failures could overwrite feedback after navigation. | Fixed and independently reviewed: error feedback is scoped to the originating conversation and selection generation. Passing browser regression releases an obsolete failed PATCH after navigation and preserves the current feedback. |
+| R16 (medium) | The initial R15 guard suppressed a current sidebar-refresh failure after successful rename advanced the generation. | Fixed and independently re-reviewed: track the current feedback generation after the successful header mutation. Passing browser regression verifies saved header and visible list-refresh failure, while obsolete failure coverage remains. |
 
 The independent reviewer found no new significant issues in the complete
 current diff. Review was against the current uncommitted worktree on macOS.
@@ -136,6 +141,16 @@ R11 received a narrow independent review on `230b7e4` verifying both newer
 navigation arbitration and preservation of R3/R9 behavior, with no new bugs.
 Native macOS build, full browser E2E (24 plus expected failure probe), docs
 and whitespace checks passed for this follow-up.
+
+R12-R15 received independent review against the worktree on `e31bc4d`.
+The reviewer ran the two changed integration tests and title browser scenario,
+and identified R16 through error-path probing. A narrow independent re-review
+of the R16 correction found no significant remaining issues. This follow-up
+passed native build (zero warnings/errors), integration (214), full browser
+E2E (24 plus expected failure probe), coverage (135/141 changed executable
+lines, 95.7%), docs and whitespace checks. Coverage reused the latest passing
+107-test unit report; no unit executable code changed. Linux and remaining
+platform/runtime gates will run in CI on the pushed revision.
 
 ## Completion criteria
 

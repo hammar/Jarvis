@@ -38,6 +38,25 @@ public sealed class WebProblemDetailsTests
 
     [Fact]
     [Trait("Category", "Integration")]
+    public async Task AnonymousConversationRenameIsRejectedWithoutChangingTheStoredTitle()
+    {
+        using var data = IsolatedDirectory.Create();
+        await using var factory = CreateFactory(data.Path);
+        using var client = factory.CreateClient();
+        var store = factory.Services.GetRequiredService<IConversationStore>();
+        var now = factory.Services.GetRequiredService<IClock>().UtcNow;
+        var conversation = await store.CreateConversationAsync(
+            new ConversationRecord(ConversationId.New(), "owner", "Original title", now, now), CancellationToken.None);
+        using var response = await client.PatchAsJsonAsync(
+            $"/api/conversations/{conversation.Id.Value:D}", new { title = "Anonymous change" });
+
+        await AssertProblemAsync(response, HttpStatusCode.Unauthorized, "Unauthorized");
+        Assert.Equal("Original title", (await store.GetConversationAsync(
+            conversation.Id, "owner", CancellationToken.None))!.Title);
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
     public async Task AuthenticatedCookieForbidReturnsCorrelatedForbiddenProblem()
     {
         using var data = IsolatedDirectory.Create();

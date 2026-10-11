@@ -10,6 +10,7 @@ let activeTurnId = "";
 let activeTurnConversationId = "";
 let turnSubmissionInFlight = false;
 let conversationCreationInFlight = false;
+let conversationRenameInFlight = false;
 let authenticationInFlight = false;
 let pendingTurnSubmission = null;
 let conversationSelectionGeneration = 0;
@@ -200,10 +201,13 @@ document.getElementById("cancel-title").addEventListener("click", () => {
 
 document.getElementById("rename-form").addEventListener("submit", async event => {
     event.preventDefault();
-    if (!conversationId || activeTurnId || turnSubmissionInFlight) return;
+    if (!conversationId || activeTurnId || turnSubmissionInFlight || conversationRenameInFlight) return;
     const id = conversationId;
     const renameSelectionGeneration = ++conversationSelectionGeneration;
+    let renameFeedbackGeneration = renameSelectionGeneration;
     const title = document.getElementById("conversation-title-input").value;
+    conversationRenameInFlight = true;
+    document.getElementById("send-turn").disabled = true;
     document.getElementById("save-title").disabled = true;
     clearError();
     try {
@@ -213,16 +217,21 @@ document.getElementById("rename-form").addEventListener("submit", async event =>
             body: JSON.stringify({ title })
         });
         if (id === conversationId && renameSelectionGeneration === conversationSelectionGeneration) {
-            ++conversationSelectionGeneration;
+            renameFeedbackGeneration = ++conversationSelectionGeneration;
             conversationTitle = renamed.title;
             document.getElementById("conversation-title").textContent = conversationTitle;
             document.getElementById("rename-form").hidden = true;
         }
         await loadConversations();
     } catch (error) {
-        showError(error.message);
+        if (id === conversationId && renameFeedbackGeneration === conversationSelectionGeneration) {
+            showError(error.message);
+        }
     } finally {
+        conversationRenameInFlight = false;
         document.getElementById("save-title").disabled = false;
+        document.getElementById("send-turn").disabled =
+            activeTurnId !== "" || turnSubmissionInFlight || conversationCreationInFlight;
     }
 });
 
@@ -331,7 +340,7 @@ function clearMissingRecovery(recoveredSubmission, recoveryGeneration) {
     activeTurnConversationId = "";
     conversationId = "";
     setTurnNavigationLocked(false);
-    document.getElementById("send-turn").disabled = false;
+    document.getElementById("send-turn").disabled = conversationRenameInFlight;
     document.getElementById("cancel-turn").hidden = true;
     document.getElementById("conversation").hidden = true;
     showError("The recovered conversation no longer exists. Start or select another conversation.");
@@ -409,13 +418,13 @@ document.getElementById("new-conversation").addEventListener("click", async () =
         conversationCreationInFlight = false;
         const locked = activeTurnId !== "" || turnSubmissionInFlight;
         setTurnNavigationLocked(locked);
-        document.getElementById("send-turn").disabled = locked;
+        document.getElementById("send-turn").disabled = locked || conversationRenameInFlight;
     }
 });
 
 document.getElementById("turn-form").addEventListener("submit", async event => {
     event.preventDefault();
-    if (!conversationId || activeTurnId || turnSubmissionInFlight || conversationCreationInFlight) return;
+    if (!conversationId || activeTurnId || turnSubmissionInFlight || conversationCreationInFlight || conversationRenameInFlight) return;
     clearError();
     const submittedConversationId = conversationId;
     const text = document.getElementById("prompt").value;

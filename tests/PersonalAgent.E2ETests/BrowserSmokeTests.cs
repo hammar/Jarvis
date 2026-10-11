@@ -987,6 +987,92 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
             Assert.Equal(renamedAfterFirstMessage, await page.Locator("#conversation-title").InnerTextAsync());
             await page.UnrouteAsync($"**/api/conversations/{manualConversationId}");
             await page.UnrouteAsync($"**/api/conversations/{automaticConversationId}");
+
+            renameReady = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            releaseRename = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            await page.RouteAsync($"**/api/conversations/{automaticConversationId}", async route =>
+            {
+                var response = await route.FetchAsync();
+                renameReady.TrySetResult();
+                await releaseRename.Task.WaitAsync(TimeSpan.FromSeconds(15));
+                await route.FulfillAsync(new RouteFulfillOptions { Response = response });
+            });
+            var concurrentTurnRequests = 0;
+            await page.RouteAsync("**/api/conversations/*/turns", async route =>
+            {
+                Interlocked.Increment(ref concurrentTurnRequests);
+                await route.ContinueAsync();
+            });
+            const string serializedManualTitle = "Manual title before another turn";
+            await page.Locator("#rename-conversation").ClickAsync();
+            await page.GetByLabel("Conversation title").FillAsync(serializedManualTitle);
+            await page.Locator("#save-title").ClickAsync();
+            await renameReady.Task.WaitAsync(TimeSpan.FromSeconds(15));
+            try
+            {
+                Assert.True(await page.Locator("#send-turn").IsDisabledAsync());
+                await page.EvaluateAsync("document.getElementById('turn-form').requestSubmit()");
+                Assert.Equal(0, Volatile.Read(ref concurrentTurnRequests));
+                Assert.True(await page.EvaluateAsync<bool>("pendingTurnSubmission === null"));
+            }
+            finally
+            {
+                releaseRename.TrySetResult();
+            }
+
+            await page.WaitForFunctionAsync("() => !conversationRenameInFlight");
+            Assert.Equal(serializedManualTitle, await page.Locator("#conversation-title").InnerTextAsync());
+            Assert.False(await page.Locator("#send-turn").IsDisabledAsync());
+            await page.UnrouteAsync("**/api/conversations/*/turns");
+            await page.UnrouteAsync($"**/api/conversations/{automaticConversationId}");
+
+            renameReady = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            releaseRename = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            await page.RouteAsync($"**/api/conversations/{automaticConversationId}", async route =>
+            {
+                renameReady.TrySetResult();
+                await releaseRename.Task.WaitAsync(TimeSpan.FromSeconds(15));
+                await route.FulfillAsync(new RouteFulfillOptions
+                {
+                    Status = 400,
+                    ContentType = "application/problem+json",
+                    Body = "{\"title\":\"Obsolete rename failure.\"}"
+                });
+            });
+            await page.Locator("#rename-conversation").ClickAsync();
+            await page.GetByLabel("Conversation title").FillAsync("Rejected name");
+            await page.Locator("#save-title").ClickAsync();
+            await renameReady.Task.WaitAsync(TimeSpan.FromSeconds(15));
+            try
+            {
+                await page.Locator("#conversation-list").GetByRole(AriaRole.Button,
+                    new LocatorGetByRoleOptions { Name = renamedBeforeNavigationCompletes }).ClickAsync();
+                await page.WaitForFunctionAsync("id => conversationId === id", manualConversationId);
+                await page.EvaluateAsync("showError('Current conversation feedback.')");
+            }
+            finally
+            {
+                releaseRename.TrySetResult();
+            }
+
+            await page.WaitForFunctionAsync("() => !conversationRenameInFlight");
+            Assert.Equal("Current conversation feedback.", await page.GetByRole(AriaRole.Alert).InnerTextAsync());
+            Assert.False(await page.Locator("#send-turn").IsDisabledAsync());
+            await page.UnrouteAsync($"**/api/conversations/{automaticConversationId}");
+
+            await page.RouteAsync("**/api/conversations", route => route.FulfillAsync(new RouteFulfillOptions
+            {
+                Status = 500,
+                ContentType = "application/problem+json",
+                Body = "{\"title\":\"Conversation list refresh failed.\"}"
+            }));
+            await page.Locator("#rename-conversation").ClickAsync();
+            await page.GetByLabel("Conversation title").FillAsync("Saved despite list refresh failure");
+            await page.Locator("#save-title").ClickAsync();
+            await page.WaitForFunctionAsync("() => !conversationRenameInFlight");
+            Assert.Equal("Saved despite list refresh failure", await page.Locator("#conversation-title").InnerTextAsync());
+            Assert.Equal("Conversation list refresh failed.", await page.GetByRole(AriaRole.Alert).InnerTextAsync());
+            await page.UnrouteAsync("**/api/conversations");
         }
         finally
         {
