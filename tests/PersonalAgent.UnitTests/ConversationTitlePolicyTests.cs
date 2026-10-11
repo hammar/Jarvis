@@ -9,6 +9,8 @@ public sealed class ConversationTitlePolicyTests
     [Theory]
     [InlineData("  Keep   these\nwords\tapart  ", "Keep these words apart")]
     [InlineData("Cafe\u0301 plans", "Café plans")]
+    [InlineData("\u001B\u0000\u007F", "Message without displayable text")]
+    [InlineData(" \t\n ", "Message without displayable text")]
     [Trait("Category", "Unit")]
     public void AutomaticTitleNormalizesUnicodeAndCollapsesWhitespace(string input, string expected)
     {

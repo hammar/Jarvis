@@ -46,7 +46,9 @@ and browser recovery scenarios.
   trimmed, nonempty, and reject control characters.
 - Automatic titles normalize Unicode to NFC, collapse all whitespace to one
   space, preserve visible punctuation, and cap at 80 Unicode scalar values
-  (using an ellipsis when shortened).
+  (using an ellipsis when shortened). Control-only messages use the deterministic
+  nonempty title "Message without displayable text" so later turns cannot name
+  the conversation instead.
 - The automatic title is metadata derived from the first accepted user message,
   not model output or prompt instructions. Manual renaming at any time,
   including before the first message, sets durable precedence.
@@ -77,6 +79,10 @@ and browser recovery scenarios.
 | R1 | Automatic-title control characters could make an otherwise valid turn fail SQLite title validation. | Fixed and independently re-reviewed: automatic-title policy replaces Unicode control runes before whitespace normalization. `AutomaticTitleReplacesControlCharactersBeforeWhitespaceNormalization` and `TurnWithControlCharactersIsAcceptedAndReturnsSanitizedAutomaticTitle` cover policy and accepted API submission. |
 | R2 | The active conversation header stayed at its previous title after turn acceptance until a terminal event. | Fixed and independently re-reviewed: the accepted response includes persisted conversation metadata and the browser applies it immediately when the submitted conversation remains selected. `ConversationTitlesAndCreationTimesRemainDistinctAndManualNamesPersist` holds simulator inference after its first frame and checks the active title while the turn is still active. |
 | R3 | A pending older conversation read could overwrite a successful manual rename. | Fixed and independently re-reviewed: successful rename invalidates pending selection reads, and conversation-list requests discard superseded responses. The browser scenario delays a pre-rename conversation read, completes the rename, then releases the stale response and verifies the title remains renamed. |
+| R4 | Control-only accepted first messages left the title blank and allowed later turns to supply it. | Fixed and independently reviewed: the policy supplies a deterministic nonempty fallback and the API regression checks a later turn cannot replace it. |
+| R5 | Conversation timestamps were not associated with conversation buttons for assistive technology. | Fixed and independently reviewed: each timestamp has a conversation-scoped ID referenced by its button's `aria-describedby`; the browser scenario checks unique, nonempty description targets. |
+| R6 | A stored title equal to "New conversation" was mistaken for an empty-title placeholder in the rename form. | Fixed and independently reviewed: the browser tracks the stored title independently from its display label. The passing browser scenario covers blank, manual and automatic literal-placeholder titles and reopening after cancelling an unsaved edit. |
+| R7 | Follow-up browser regression could reload while the prior submission was still pending, then reject its next submission and falsely treat rejection as idle completion. | Fixed and independently reviewed: wait for durable request cleanup before reload and explicitly assert HTTP 202 for the literal-title submission before waiting for completion. |
 
 The independent reviewer found no new significant issues in the complete
 current diff. Review was against the current uncommitted worktree on macOS.
@@ -96,7 +102,23 @@ current diff. Review was against the current uncommitted worktree on macOS.
 - `tools/validate.sh docs`: passed.
 - `git diff --check`: passed.
 
-Linux CI was not run in this local issue session; no pull request was created.
+PR #43 was opened at `fc8817c`. All GitHub CI checks passed after targeted
+reruns in run `38148917311`. The docs failure was a transient GitHub HTTP 503
+for an unchanged SDK reference; the same URL subsequently returned HTTP 200.
+The Ubuntu SDK failure came from `FakeOpenAiProvider` writing to a disconnected
+HTTP client during cleanup in the automatic-compaction deadline test. The
+fixture and test logic are unchanged by M1-05; all 55 SDK contract tests passed
+on rerun, along with Ubuntu Aspire and loopback containment checks. The
+underlying intermittent fixture write/disposal race remains a disclosed risk;
+rerun success does not establish a root-cause fix. No gate was weakened.
+
+Follow-up review fixes passed native macOS build, unit (107), integration
+(213), browser E2E (24), coverage (134/139 changed executable lines, 96.4%),
+and docs checks. An intermediate full browser run failed the unchanged
+provider-failure recovery smoke with a timeout; the following full run passed.
+No sleeps, test retries or gate exclusions were added. R4-R6 were independently
+reviewed against the follow-up diff on `fc8817c`; R7's synchronization
+correction received a separate narrow review with no new findings.
 
 ## Completion criteria
 

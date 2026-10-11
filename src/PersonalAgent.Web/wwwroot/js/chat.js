@@ -5,6 +5,7 @@ const profile = document.getElementById("profile");
 const pendingTurnStorageKey = "jarvis.pending-turn.v1";
 let csrfToken = "";
 let conversationId = "";
+let conversationTitle = "";
 let activeTurnId = "";
 let activeTurnConversationId = "";
 let turnSubmissionInFlight = false;
@@ -131,8 +132,10 @@ async function loadConversations() {
             }
         });
         const created = document.createElement("time");
+        created.id = `conversation-created-${item.id.value || item.id}`;
         created.dateTime = item.createdAtUtc;
         created.textContent = formatConversationTime(item.createdAtUtc);
+        button.setAttribute("aria-describedby", created.id);
         entry.append(button, created);
         list.append(entry);
     }
@@ -167,10 +170,11 @@ async function openConversation(id) {
         return;
     }
     conversationId = data.conversation.id.value || data.conversation.id;
-    document.getElementById("conversation-title").textContent = data.conversation.title || "New conversation";
+    conversationTitle = data.conversation.title || "";
+    document.getElementById("conversation-title").textContent = conversationTitle || "New conversation";
     document.getElementById("conversation-created").textContent =
         `Created ${formatConversationTime(data.conversation.createdAtUtc)}`;
-    document.getElementById("conversation-title-input").value = data.conversation.title || "";
+    document.getElementById("conversation-title-input").value = conversationTitle;
     document.getElementById("rename-form").hidden = true;
     renderMessages(data.messages);
     document.getElementById("settings").hidden = true;
@@ -181,10 +185,7 @@ async function openConversation(id) {
 document.getElementById("rename-conversation").addEventListener("click", () => {
     if (!conversationId || activeTurnId || turnSubmissionInFlight) return;
     clearError();
-    document.getElementById("conversation-title-input").value =
-        document.getElementById("conversation-title").textContent === "New conversation"
-            ? ""
-            : document.getElementById("conversation-title").textContent;
+    document.getElementById("conversation-title-input").value = conversationTitle;
     document.getElementById("rename-form").hidden = false;
     document.getElementById("conversation-title-input").focus();
 });
@@ -208,7 +209,8 @@ document.getElementById("rename-form").addEventListener("submit", async event =>
         });
         if (id !== conversationId) return;
         ++conversationSelectionGeneration;
-        document.getElementById("conversation-title").textContent = renamed.title;
+        conversationTitle = renamed.title;
+        document.getElementById("conversation-title").textContent = conversationTitle;
         document.getElementById("rename-form").hidden = true;
         await loadConversations();
     } catch (error) {
@@ -464,8 +466,8 @@ document.getElementById("turn-form").addEventListener("submit", async event => {
     if (conversationId === submittedConversationId &&
         conversationSelectionGeneration === submissionSelectionGeneration &&
         (result.conversation?.id?.value || result.conversation?.id) === submittedConversationId) {
-        document.getElementById("conversation-title").textContent =
-            result.conversation.title || "New conversation";
+        conversationTitle = result.conversation.title || "";
+        document.getElementById("conversation-title").textContent = conversationTitle || "New conversation";
         document.getElementById("conversation-created").textContent =
             `Created ${formatConversationTime(result.conversation.createdAtUtc)}`;
     }

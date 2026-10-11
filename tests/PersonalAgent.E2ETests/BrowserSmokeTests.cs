@@ -775,6 +775,12 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
             Assert.Contains("Created ", await page.Locator("#conversation-created").InnerTextAsync(), StringComparison.Ordinal);
 
             await page.Locator("#rename-conversation").ClickAsync();
+            Assert.Equal("", await page.GetByLabel("Conversation title").InputValueAsync());
+            await page.GetByLabel("Conversation title").FillAsync("New conversation");
+            await page.Locator("#save-title").ClickAsync();
+            await page.WaitForFunctionAsync("() => document.getElementById('rename-form').hidden && !document.getElementById('save-title').disabled");
+            await page.Locator("#rename-conversation").ClickAsync();
+            Assert.Equal("New conversation", await page.GetByLabel("Conversation title").InputValueAsync());
             const string manualTitle = "<img src=x> Manual before first message";
             await page.GetByLabel("Conversation title").FillAsync(manualTitle);
             await page.Locator("#save-title").ClickAsync();
@@ -788,6 +794,16 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
             foreach (var timestamp in await page.Locator("#conversation-list time").AllInnerTextsAsync())
             {
                 Assert.Contains("(", timestamp, StringComparison.Ordinal);
+            }
+            var descriptions = await page.Locator("#conversation-list button")
+                .EvaluateAllAsync<string[]>("buttons => buttons.map(button => button.getAttribute('aria-describedby'))");
+            Assert.Equal(2, descriptions.Distinct().Count());
+            foreach (var descriptionId in descriptions)
+            {
+                Assert.False(string.IsNullOrWhiteSpace(descriptionId));
+                var description = page.Locator($"time[id='{descriptionId}']");
+                Assert.Equal(1, await description.CountAsync());
+                Assert.Contains("(", await description.InnerTextAsync(), StringComparison.Ordinal);
             }
 
             const string firstMessage = "  A distinct   first request asks about café plans.  ";
@@ -813,6 +829,11 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
             await page.GetByRole(AriaRole.Button,
                 new PageGetByRoleOptions { Name = "A distinct first request asks about café plans." }).WaitForAsync();
             await page.WaitForFunctionAsync("() => activeTurnId === ''");
+            await page.Locator("#rename-conversation").ClickAsync();
+            Assert.Equal(
+                "A distinct first request asks about café plans.",
+                await page.GetByLabel("Conversation title").InputValueAsync());
+            await page.Locator("#cancel-title").ClickAsync();
             await page.Locator("#conversation-list").GetByRole(AriaRole.Button,
                 new LocatorGetByRoleOptions { Name = manualTitle }).WaitForAsync();
 
@@ -855,7 +876,7 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
             await page.WaitForFunctionAsync("id => conversationId === id", manualConversationId);
             await page.Locator("#prompt").FillAsync("This first message must not replace the manual title.");
             await page.Locator("#send-turn").ClickAsync();
-            await page.WaitForFunctionAsync("() => activeTurnId === ''");
+            await page.WaitForFunctionAsync("() => !turnSubmissionInFlight && activeTurnId === '' && pendingTurnSubmission === null");
             Assert.Equal(manualTitle, await page.Locator("#conversation-title").InnerTextAsync());
 
             await page.ReloadAsync();
@@ -866,6 +887,21 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
             Assert.Equal(2, await page.Locator("#conversation-list time").CountAsync());
             Assert.Equal(0, await page.Locator("#conversation-list img, #conversation-title img").CountAsync());
             Assert.NotEqual(manualConversationId, automaticConversationId);
+
+            await page.Locator("#new-conversation").ClickAsync();
+            await page.WaitForFunctionAsync("() => conversationId !== '' && !conversationCreationInFlight");
+            await page.Locator("#prompt").FillAsync("New conversation");
+            var acceptedLiteralTitle = await page.RunAndWaitForResponseAsync(
+                () => page.Locator("#send-turn").ClickAsync(),
+                response => response.Request.Method == "POST" && response.Url.EndsWith("/turns", StringComparison.Ordinal));
+            Assert.Equal(202, acceptedLiteralTitle.Status);
+            await page.WaitForFunctionAsync("() => !turnSubmissionInFlight && activeTurnId === '' && pendingTurnSubmission === null");
+            await page.Locator("#rename-conversation").ClickAsync();
+            Assert.Equal("New conversation", await page.GetByLabel("Conversation title").InputValueAsync());
+            await page.GetByLabel("Conversation title").FillAsync("Unsaved title");
+            await page.Locator("#cancel-title").ClickAsync();
+            await page.Locator("#rename-conversation").ClickAsync();
+            Assert.Equal("New conversation", await page.GetByLabel("Conversation title").InputValueAsync());
         }
         finally
         {

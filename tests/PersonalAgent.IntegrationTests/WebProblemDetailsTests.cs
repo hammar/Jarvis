@@ -160,9 +160,11 @@ public sealed class WebProblemDetailsTests
         Assert.DoesNotContain("application/problem+json", events, StringComparison.Ordinal);
     }
 
-    [Fact]
+    [Theory]
+    [InlineData("Original\u001B[31mtext", "Original [31mtext")]
+    [InlineData("\u001B\u0000\u007F", "Message without displayable text")]
     [Trait("Category", "Integration")]
-    public async Task TurnWithControlCharactersIsAcceptedAndReturnsSanitizedAutomaticTitle()
+    public async Task TurnWithControlCharactersIsAcceptedAndReturnsSanitizedAutomaticTitle(string text, string expectedTitle)
     {
         using var data = IsolatedDirectory.Create();
         await using var factory = CreateFactory(data.Path);
@@ -174,11 +176,18 @@ public sealed class WebProblemDetailsTests
         var id = conversation.RootElement.GetProperty("id").GetProperty("value").GetGuid();
         using var accepted = await client.PostAsJsonAsync(
             $"/api/conversations/{id:D}/turns",
-            new { requestId = "control-title-test", text = "Original\u001B[31mtext" });
+            new { requestId = "control-title-test", text });
 
         Assert.Equal(HttpStatusCode.Accepted, accepted.StatusCode);
         using var response = JsonDocument.Parse(await accepted.Content.ReadAsStringAsync());
-        Assert.Equal("Original [31mtext", response.RootElement.GetProperty("conversation").GetProperty("title").GetString());
+        Assert.Equal(expectedTitle, response.RootElement.GetProperty("conversation").GetProperty("title").GetString());
+
+        using var laterTurn = await client.PostAsJsonAsync(
+            $"/api/conversations/{id:D}/turns",
+            new { requestId = "later-title-test", text = "A later request must not change the first title." });
+        Assert.Equal(HttpStatusCode.Accepted, laterTurn.StatusCode);
+        using var laterResponse = JsonDocument.Parse(await laterTurn.Content.ReadAsStringAsync());
+        Assert.Equal(expectedTitle, laterResponse.RootElement.GetProperty("conversation").GetProperty("title").GetString());
     }
 
     [Theory]
