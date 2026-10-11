@@ -5,13 +5,18 @@ const profile = document.getElementById("profile");
 const pendingTurnStorageKey = "jarvis.pending-turn.v1";
 let csrfToken = "";
 let conversationId = "";
+let conversationTitle = "";
 let activeTurnId = "";
 let activeTurnConversationId = "";
 let turnSubmissionInFlight = false;
 let conversationCreationInFlight = false;
+let conversationRenameInFlight = false;
 let authenticationInFlight = false;
 let pendingTurnSubmission = null;
 let conversationSelectionGeneration = 0;
+let conversationListGeneration = 0;
+let conversationRenameGeneration = 0;
+let lastRenamedConversation = null;
 let eventSource = null;
 let bootstrapRequired = false;
 
@@ -41,6 +46,7 @@ function setTurnNavigationLocked(locked) {
     document.getElementById("settings-button").disabled = locked;
     document.getElementById("activity-button").disabled = locked;
     document.getElementById("logout").disabled = locked;
+    document.getElementById("rename-conversation").disabled = locked;
     for (const button of document.querySelectorAll("#conversation-list button")) {
         button.disabled = locked;
     }
@@ -108,7 +114,9 @@ function renderMessages(messages) {
 }
 
 async function loadConversations() {
+    const listGeneration = ++conversationListGeneration;
     const conversations = await api("/api/conversations");
+    if (listGeneration !== conversationListGeneration) return;
     const list = document.getElementById("conversation-list");
     list.replaceChildren();
     for (const item of conversations) {
@@ -126,14 +134,39 @@ async function loadConversations() {
                 if (selectionGeneration === conversationSelectionGeneration) showError(error.message);
             }
         });
-        entry.append(button);
+        const created = document.createElement("time");
+        created.id = `conversation-created-${item.id.value || item.id}`;
+        created.dateTime = item.createdAtUtc;
+        created.textContent = formatConversationTime(item.createdAtUtc);
+        button.setAttribute("aria-describedby", created.id);
+        entry.append(button, created);
         list.append(entry);
     }
+}
+
+function formatConversationTime(value) {
+    const instant = new Date(value);
+    const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const local = instant.toLocaleString(undefined, {
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+        second: "2-digit"
+    });
+    const milliseconds = String(instant.getMilliseconds()).padStart(3, "0");
+    const offsetMinutes = -instant.getTimezoneOffset();
+    const offsetSign = offsetMinutes >= 0 ? "+" : "-";
+    const offsetHours = String(Math.floor(Math.abs(offsetMinutes) / 60)).padStart(2, "0");
+    const offsetRemainder = String(Math.abs(offsetMinutes) % 60).padStart(2, "0");
+    return `${local}.${milliseconds} (${zone}, UTC${offsetSign}${offsetHours}:${offsetRemainder})`;
 }
 
 async function openConversation(id) {
     const targetId = id.value || id;
     const selectionGeneration = ++conversationSelectionGeneration;
+    const renameGeneration = conversationRenameGeneration;
     if ((activeTurnId || turnSubmissionInFlight) && targetId !== activeTurnConversationId) {
         showError("Finish or cancel the active turn before switching conversations.");
         return;
@@ -145,12 +178,72 @@ async function openConversation(id) {
         return;
     }
     conversationId = data.conversation.id.value || data.conversation.id;
-    document.getElementById("conversation-title").textContent = data.conversation.title || "Conversation";
+    conversationTitle = renameGeneration !== conversationRenameGeneration &&
+        lastRenamedConversation?.id === targetId
+        ? lastRenamedConversation.title
+        : data.conversation.title || "";
+    document.getElementById("conversation-title").textContent = conversationTitle || "New conversation";
+    document.getElementById("conversation-created").textContent =
+        `Created ${formatConversationTime(data.conversation.createdAtUtc)}`;
+    document.getElementById("conversation-title-input").value = conversationTitle;
+    document.getElementById("rename-form").hidden = true;
     renderMessages(data.messages);
     document.getElementById("settings").hidden = true;
     document.getElementById("activity").hidden = true;
     document.getElementById("conversation").hidden = false;
 }
+
+document.getElementById("rename-conversation").addEventListener("click", () => {
+    if (!conversationId || activeTurnId || turnSubmissionInFlight) return;
+    clearError();
+    document.getElementById("conversation-title-input").value = conversationTitle;
+    document.getElementById("rename-form").hidden = false;
+    document.getElementById("conversation-title-input").focus();
+});
+
+document.getElementById("cancel-title").addEventListener("click", () => {
+    document.getElementById("rename-form").hidden = true;
+});
+
+document.getElementById("rename-form").addEventListener("submit", async event => {
+    event.preventDefault();
+    if (!conversationId || activeTurnId || turnSubmissionInFlight || conversationRenameInFlight) return;
+    const id = conversationId;
+    const renameSelectionGeneration = ++conversationSelectionGeneration;
+    let renameFeedbackGeneration = renameSelectionGeneration;
+    const title = document.getElementById("conversation-title-input").value;
+    conversationRenameInFlight = true;
+    document.getElementById("send-turn").disabled = true;
+    document.getElementById("save-title").disabled = true;
+    clearError();
+    try {
+        const renamed = await api(`/api/conversations/${encodeURIComponent(id)}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ title })
+        });
+        lastRenamedConversation = { id, title: renamed.title };
+        ++conversationRenameGeneration;
+        if (id === conversationId) {
+            if (renameSelectionGeneration === conversationSelectionGeneration) {
+                renameFeedbackGeneration = ++conversationSelectionGeneration;
+            }
+            conversationTitle = renamed.title;
+            document.getElementById("conversation-title").textContent = conversationTitle;
+            document.getElementById("rename-form").hidden = true;
+        }
+        await loadConversations();
+    } catch (error) {
+        if (id === conversationId && renameFeedbackGeneration === conversationSelectionGeneration) {
+            showError(error.message);
+        }
+    } finally {
+        conversationRenameInFlight = false;
+        document.getElementById("save-title").disabled = false;
+        document.getElementById("send-turn").disabled =
+            activeTurnId !== "" || turnSubmissionInFlight || conversationCreationInFlight;
+    }
+});
 
 async function refreshStatus() {
     const status = await api("/api/status");
@@ -257,7 +350,7 @@ function clearMissingRecovery(recoveredSubmission, recoveryGeneration) {
     activeTurnConversationId = "";
     conversationId = "";
     setTurnNavigationLocked(false);
-    document.getElementById("send-turn").disabled = false;
+    document.getElementById("send-turn").disabled = conversationRenameInFlight;
     document.getElementById("cancel-turn").hidden = true;
     document.getElementById("conversation").hidden = true;
     showError("The recovered conversation no longer exists. Start or select another conversation.");
@@ -335,13 +428,13 @@ document.getElementById("new-conversation").addEventListener("click", async () =
         conversationCreationInFlight = false;
         const locked = activeTurnId !== "" || turnSubmissionInFlight;
         setTurnNavigationLocked(locked);
-        document.getElementById("send-turn").disabled = locked;
+        document.getElementById("send-turn").disabled = locked || conversationRenameInFlight;
     }
 });
 
 document.getElementById("turn-form").addEventListener("submit", async event => {
     event.preventDefault();
-    if (!conversationId || activeTurnId || turnSubmissionInFlight || conversationCreationInFlight) return;
+    if (!conversationId || activeTurnId || turnSubmissionInFlight || conversationCreationInFlight || conversationRenameInFlight) return;
     clearError();
     const submittedConversationId = conversationId;
     const text = document.getElementById("prompt").value;
@@ -363,7 +456,7 @@ document.getElementById("turn-form").addEventListener("submit", async event => {
         return;
     }
     const requestId = pendingTurnSubmission.requestId;
-    conversationSelectionGeneration++;
+    const submissionSelectionGeneration = ++conversationSelectionGeneration;
     turnSubmissionInFlight = true;
     activeTurnConversationId = submittedConversationId;
     setTurnNavigationLocked(true);
@@ -395,6 +488,14 @@ document.getElementById("turn-form").addEventListener("submit", async event => {
     }
     turnSubmissionInFlight = false;
     document.getElementById("cancel-turn").hidden = false;
+    if (conversationId === submittedConversationId &&
+        conversationSelectionGeneration === submissionSelectionGeneration &&
+        (result.conversation?.id?.value || result.conversation?.id) === submittedConversationId) {
+        conversationTitle = result.conversation.title || "";
+        document.getElementById("conversation-title").textContent = conversationTitle || "New conversation";
+        document.getElementById("conversation-created").textContent =
+            `Created ${formatConversationTime(result.conversation.createdAtUtc)}`;
+    }
     try {
         await loadConversations();
         renderMessages([...(await api(`/api/conversations/${encodeURIComponent(submittedConversationId)}`)).messages]);

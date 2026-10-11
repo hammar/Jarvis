@@ -176,7 +176,7 @@ public sealed class SqlitePersistenceTests
         Assert.Equal(saved, await reopened.GetRetentionAsync(defaults, CancellationToken.None));
         Assert.True(await reopened.IsConfiguredAsync(CancellationToken.None));
         await using var connection = await new SqliteDatabase(file.Path).OpenConnectionAsync();
-        Assert.Equal(4, await UserVersionAsync(connection));
+        Assert.Equal(5, await UserVersionAsync(connection));
     }
 
     [Fact]
@@ -209,6 +209,165 @@ public sealed class SqlitePersistenceTests
         Assert.Null(await store.GetTurnForOwnerAsync(turn.Id, "different-owner", CancellationToken.None));
         Assert.Equal([turn], await store.ReadRecentTurnsForOwnerAsync("owner", 10, CancellationToken.None));
         Assert.Empty(await store.ReadRecentTurnsForOwnerAsync("different-owner", 10, CancellationToken.None));
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task ConversationTitlesAreNamedAtomicallyAndManualNamesSurviveRetriesAndReopen()
+    {
+        using var file = IsolatedDatabaseFile.Create();
+        var database = new SqliteDatabase(file.Path);
+        await database.InitializeAsync();
+        var clock = new MutableClock(Now);
+        var store = new SqliteConversationStore(database, clock);
+        var conversation = await store.CreateConversationAsync(
+            new ConversationRecord(ConversationId.New(), "owner", string.Empty, Now, Now),
+            CancellationToken.None);
+        const string firstText = "  First   accepted message  ";
+        var firstFingerprint = Fingerprint(firstText);
+        var first = await store.SubmitTurnAsync(
+            new ConversationTurnSubmission(
+                TurnId.New(), conversation.Id, "first", firstFingerprint, Guid.NewGuid(), firstText, Now, "owner",
+                ConversationTitlePolicy.CreateAutomaticTitle(firstText)),
+            CancellationToken.None);
+        var automaticallyNamed = await store.GetConversationAsync(conversation.Id, "owner", CancellationToken.None);
+        Assert.Equal("First accepted message", automaticallyNamed!.Title);
+        Assert.False(automaticallyNamed.TitleIsManual);
+
+        var duplicate = await store.SubmitTurnAsync(
+            new ConversationTurnSubmission(
+                TurnId.New(), conversation.Id, "first", firstFingerprint, Guid.NewGuid(), firstText, Now.AddSeconds(1),
+                "owner", "A different retry title"),
+            CancellationToken.None);
+        Assert.True(duplicate.IsDuplicate);
+        var afterDuplicate = await store.GetConversationAsync(conversation.Id, "owner", CancellationToken.None);
+        Assert.Equal(automaticallyNamed.Title, afterDuplicate!.Title);
+        Assert.Equal(automaticallyNamed.TitleIsManual, afterDuplicate.TitleIsManual);
+
+        var manuallyNamed = await store.RenameConversationAsync(
+            conversation.Id, "owner", "Owner choice", Now.AddSeconds(2), CancellationToken.None);
+        Assert.Equal("Owner choice", manuallyNamed!.Title);
+        Assert.True(manuallyNamed.TitleIsManual);
+        Assert.Null(await store.RenameConversationAsync(
+            conversation.Id, "different-owner", "Private", Now.AddSeconds(3), CancellationToken.None));
+
+        const string nextText = "A later message cannot rename me";
+        await store.SubmitTurnAsync(
+            new ConversationTurnSubmission(
+                TurnId.New(), conversation.Id, "second", Fingerprint(nextText), Guid.NewGuid(), nextText, Now.AddSeconds(4),
+                "owner", ConversationTitlePolicy.CreateAutomaticTitle(nextText)),
+            CancellationToken.None);
+        var reopened = new SqliteConversationStore(new SqliteDatabase(file.Path), clock);
+        var persisted = await reopened.GetConversationAsync(conversation.Id, "owner", CancellationToken.None);
+        Assert.Equal("Owner choice", persisted!.Title);
+        Assert.True(persisted.TitleIsManual);
+        Assert.Equal(Now, persisted.CreatedAtUtc);
+
+        static string Fingerprint(string text) =>
+            Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(text)));
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task AutomaticTitleWithEightySupplementaryUnicodeScalarsIsAccepted()
+    {
+        using var file = IsolatedDatabaseFile.Create();
+        var database = new SqliteDatabase(file.Path);
+        await database.InitializeAsync();
+        var store = new SqliteConversationStore(database, new MutableClock(Now));
+        var conversation = await store.CreateConversationAsync(
+            new ConversationRecord(ConversationId.New(), "owner", string.Empty, Now, Now),
+            CancellationToken.None);
+        var text = string.Concat(Enumerable.Repeat("😀", ConversationTitlePolicy.MaximumAutomaticTitleScalars));
+        await store.SubmitTurnAsync(
+            new ConversationTurnSubmission(
+                TurnId.New(), conversation.Id, "unicode-title", Fingerprint(text), Guid.NewGuid(), text, Now, "owner",
+                ConversationTitlePolicy.CreateAutomaticTitle(text)),
+            CancellationToken.None);
+
+        Assert.Equal(text, (await store.GetConversationAsync(conversation.Id, "owner", CancellationToken.None))!.Title);
+
+        static string Fingerprint(string value) =>
+            Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(value)));
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task ConcurrentFirstSubmissionAndManualRenamePreserveTheOwnerChoice()
+    {
+        using var file = IsolatedDatabaseFile.Create();
+        var database = new SqliteDatabase(file.Path);
+        await database.InitializeAsync();
+        var clock = new MutableClock(Now);
+        var creator = new SqliteConversationStore(database, clock);
+        var conversation = await creator.CreateConversationAsync(
+            new ConversationRecord(ConversationId.New(), "owner", string.Empty, Now, Now),
+            CancellationToken.None);
+        const string message = "Automatic title candidate";
+        var submission = new ConversationTurnSubmission(
+            TurnId.New(),
+            conversation.Id,
+            "concurrent-first",
+            Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(message))),
+            Guid.NewGuid(),
+            message,
+            Now,
+            "owner",
+            ConversationTitlePolicy.CreateAutomaticTitle(message));
+        var writer = new SqliteConversationStore(new SqliteDatabase(file.Path), clock);
+        var rename = writer.RenameConversationAsync(conversation.Id, "owner", "Manual wins", Now, CancellationToken.None).AsTask();
+        var submit = creator.SubmitTurnAsync(submission, CancellationToken.None).AsTask();
+
+        await Task.WhenAll(rename, submit);
+
+        var persisted = await creator.GetConversationAsync(conversation.Id, "owner", CancellationToken.None);
+        Assert.Equal("Manual wins", persisted!.Title);
+        Assert.True(persisted.TitleIsManual);
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task VersionFourUpgradePreservesExistingAndBlankConversationTitles()
+    {
+        using var file = IsolatedDatabaseFile.Create();
+        var existingId = ConversationId.New();
+        var blankId = ConversationId.New();
+        await using (var connection = new SqliteConnection($"Data Source={file.Path}"))
+        {
+            await connection.OpenAsync();
+            await using var seed = connection.CreateCommand();
+            seed.CommandText = """
+                CREATE TABLE conversations (
+                    id TEXT NOT NULL PRIMARY KEY,
+                    owner_id TEXT NOT NULL,
+                    title TEXT NOT NULL DEFAULT '',
+                    created_at_utc TEXT NOT NULL,
+                    updated_at_utc TEXT NOT NULL,
+                    version INTEGER NOT NULL DEFAULT 1
+                );
+                INSERT INTO conversations (id, owner_id, title, created_at_utc, updated_at_utc)
+                VALUES
+                    ($existing, 'owner', 'Existing title', $created, $created),
+                    ($blank, 'owner', '', $created, $created);
+                PRAGMA user_version = 4;
+                """;
+            seed.Parameters.AddWithValue("$existing", existingId.Value.ToString("D"));
+            seed.Parameters.AddWithValue("$blank", blankId.Value.ToString("D"));
+            seed.Parameters.AddWithValue("$created", SqliteValue.Utc(Now));
+            await seed.ExecuteNonQueryAsync();
+        }
+
+        var database = new SqliteDatabase(file.Path);
+        await database.InitializeAsync();
+        var store = new SqliteConversationStore(database, new MutableClock(Now));
+        var existing = await store.GetConversationAsync(existingId, "owner", CancellationToken.None);
+        var blank = await store.GetConversationAsync(blankId, "owner", CancellationToken.None);
+        Assert.Equal("Existing title", existing!.Title);
+        Assert.Equal(string.Empty, blank!.Title);
+        Assert.False(existing.TitleIsManual);
+        Assert.Equal(Now, existing.CreatedAtUtc);
+        await using var migrated = await database.OpenConnectionAsync();
+        Assert.Equal(5, await UserVersionAsync(migrated));
     }
 
     [Fact]
@@ -271,7 +430,7 @@ public sealed class SqlitePersistenceTests
         await using var foreignKeys = connection.CreateCommand();
         foreignKeys.CommandText = "PRAGMA foreign_keys;";
         Assert.Equal(1L, (long)(await foreignKeys.ExecuteScalarAsync())!);
-        Assert.Equal(4, await UserVersionAsync(connection));
+        Assert.Equal(5, await UserVersionAsync(connection));
     }
 
     [Fact]
@@ -292,7 +451,7 @@ public sealed class SqlitePersistenceTests
         Assert.Equal(messageId, messages[0].MessageId);
         Assert.Equal("before upgrade", messages[0].Content);
         await using var migrated = await database.OpenConnectionAsync();
-        Assert.Equal(4, await UserVersionAsync(migrated));
+        Assert.Equal(5, await UserVersionAsync(migrated));
         await using var table = migrated.CreateCommand();
         table.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'cloud_consents';";
         Assert.Equal(1L, (long)(await table.ExecuteScalarAsync())!);
@@ -2296,7 +2455,7 @@ public sealed class SqlitePersistenceTests
                 return true;
             });
         await using var connection = await first.OpenConnectionAsync();
-        Assert.Equal(4, await UserVersionAsync(connection));
+        Assert.Equal(5, await UserVersionAsync(connection));
     }
 
     private static async Task<T[]> RunConcurrentlyAsync<T>(params Func<Task<T>>[] operations)

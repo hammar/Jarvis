@@ -32,6 +32,14 @@
         </aside>
         <section id="conversation" hidden aria-label="Conversation">
             <h2 id="conversation-title">Conversation</h2>
+            <p id="conversation-created"></p>
+            <button id="rename-conversation" type="button">Rename</button>
+            <form id="rename-form" hidden>
+                <label for="conversation-title-input">Conversation title</label>
+                <input id="conversation-title-input" name="title" maxlength="200" required />
+                <button id="save-title" type="submit">Save title</button>
+                <button id="cancel-title" type="button">Cancel</button>
+            </form>
             <ol id="messages" aria-live="polite"></ol>
             <form id="turn-form">
                 <label for="prompt">Message</label>

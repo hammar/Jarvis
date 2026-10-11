@@ -755,6 +755,395 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
 
     [Fact]
     [Trait("Category", "BrowserE2E")]
+    public async Task ConversationTitlesAndCreationTimesRemainDistinctAndManualNamesPersist()
+    {
+        var isolated = new SimulatorHostFixture();
+        await isolated.InitializeAsync();
+        try
+        {
+            using var playwright = await Playwright.CreateAsync();
+            await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+            var page = await browser.NewPageAsync(new BrowserNewPageOptions { TimezoneId = "America/New_York" });
+            await page.GotoAsync(isolated.WebClient.BaseAddress!.ToString());
+            await page.GetByLabel("Passphrase").FillAsync(SimulatorHostFixture.OwnerPassphrase);
+            await page.Locator("#auth-submit").ClickAsync();
+            await page.Locator("#new-conversation").WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible });
+
+            var beforeFold = await page.EvaluateAsync<string>("formatConversationTime('2026-11-01T05:30:00Z')");
+            var afterFold = await page.EvaluateAsync<string>("formatConversationTime('2026-11-01T06:30:00Z')");
+            Assert.Contains("UTC-04:00", beforeFold, StringComparison.Ordinal);
+            Assert.Contains("UTC-05:00", afterFold, StringComparison.Ordinal);
+            Assert.NotEqual(beforeFold, afterFold);
+
+            await page.Locator("#new-conversation").ClickAsync();
+            await page.WaitForFunctionAsync("() => conversationId !== '' && !conversationCreationInFlight");
+            Assert.Equal("New conversation", await page.Locator("#conversation-title").InnerTextAsync());
+            Assert.Contains("Created ", await page.Locator("#conversation-created").InnerTextAsync(), StringComparison.Ordinal);
+
+            await page.Locator("#rename-conversation").ClickAsync();
+            Assert.Equal("", await page.GetByLabel("Conversation title").InputValueAsync());
+            await page.GetByLabel("Conversation title").FillAsync("New conversation");
+            await page.Locator("#save-title").ClickAsync();
+            await page.WaitForFunctionAsync("() => document.getElementById('rename-form').hidden && !document.getElementById('save-title').disabled");
+            await page.Locator("#rename-conversation").ClickAsync();
+            Assert.Equal("New conversation", await page.GetByLabel("Conversation title").InputValueAsync());
+            const string manualTitle = "<img src=x> Manual before first message";
+            await page.GetByLabel("Conversation title").FillAsync(manualTitle);
+            await page.Locator("#save-title").ClickAsync();
+            await page.GetByRole(AriaRole.Button, new PageGetByRoleOptions { Name = manualTitle }).WaitForAsync();
+
+            var manualConversationId = await page.EvaluateAsync<string>("conversationId");
+            await page.Locator("#new-conversation").ClickAsync();
+            await page.WaitForFunctionAsync("id => conversationId !== id && !conversationCreationInFlight", manualConversationId);
+            var automaticConversationId = await page.EvaluateAsync<string>("conversationId");
+            Assert.Equal(2, await page.Locator("#conversation-list time").CountAsync());
+            foreach (var timestamp in await page.Locator("#conversation-list time").AllInnerTextsAsync())
+            {
+                Assert.Contains("(", timestamp, StringComparison.Ordinal);
+            }
+            var descriptions = await page.Locator("#conversation-list button")
+                .EvaluateAllAsync<string[]>("buttons => buttons.map(button => button.getAttribute('aria-describedby'))");
+            Assert.Equal(2, descriptions.Distinct().Count());
+            foreach (var descriptionId in descriptions)
+            {
+                Assert.False(string.IsNullOrWhiteSpace(descriptionId));
+                var description = page.Locator($"time[id='{descriptionId}']");
+                Assert.Equal(1, await description.CountAsync());
+                Assert.Contains("(", await description.InnerTextAsync(), StringComparison.Ordinal);
+            }
+
+            const string firstMessage = "  A distinct   first request asks about café plans.  ";
+            using (var delayFrameControl = await isolated.ModelClient.PostAsync(
+                "/fixture/control/delay-after-first-frame",
+                content: null))
+            {
+                delayFrameControl.EnsureSuccessStatusCode();
+            }
+
+            await page.Locator("#prompt").FillAsync(firstMessage);
+            await page.Locator("#send-turn").ClickAsync();
+            await page.WaitForFunctionAsync("() => activeTurnId !== ''");
+            Assert.Equal(
+                "A distinct first request asks about café plans.",
+                await page.Locator("#conversation-title").InnerTextAsync());
+            using (var firstFrame = await isolated.ModelClient.GetAsync("/fixture/control/wait-for-first-frame"))
+            {
+                firstFrame.EnsureSuccessStatusCode();
+            }
+
+            Assert.NotEqual("", await page.EvaluateAsync<string>("activeTurnId"));
+            await page.GetByRole(AriaRole.Button,
+                new PageGetByRoleOptions { Name = "A distinct first request asks about café plans." }).WaitForAsync();
+            await page.WaitForFunctionAsync("() => activeTurnId === ''");
+            await page.Locator("#rename-conversation").ClickAsync();
+            Assert.Equal(
+                "A distinct first request asks about café plans.",
+                await page.GetByLabel("Conversation title").InputValueAsync());
+            await page.Locator("#cancel-title").ClickAsync();
+            await page.Locator("#conversation-list").GetByRole(AriaRole.Button,
+                new LocatorGetByRoleOptions { Name = manualTitle }).WaitForAsync();
+
+            await page.EvaluateAsync(
+                """
+                async id => {
+                    let releaseRead;
+                    let signalReadStarted;
+                    window.__titleReadStarted = new Promise(resolve => { signalReadStarted = resolve; });
+                    window.__releaseTitleRead = () => releaseRead();
+                    const originalFetch = window.fetch.bind(window);
+                    window.fetch = async (input, init = {}) => {
+                        const url = typeof input === "string" ? input : input.url;
+                        const method = (init.method || (input instanceof Request ? input.method : "GET")).toUpperCase();
+                        const response = await originalFetch(input, init);
+                        if (method === "GET" && url === `/api/conversations/${encodeURIComponent(id)}`) {
+                            signalReadStarted();
+                            await new Promise(resolve => { releaseRead = resolve; });
+                        }
+                        return response;
+                    };
+                    window.__staleTitleOpen = openConversation(id);
+                    await window.__titleReadStarted;
+                }
+                """,
+                automaticConversationId);
+            const string renamedAfterFirstMessage = "Renamed while an older read is pending";
+            await page.Locator("#rename-conversation").ClickAsync();
+            await page.GetByLabel("Conversation title").FillAsync(renamedAfterFirstMessage);
+            await page.Locator("#save-title").ClickAsync();
+            await page.Locator("#conversation-list").GetByRole(AriaRole.Button,
+                new LocatorGetByRoleOptions { Name = renamedAfterFirstMessage }).WaitForAsync();
+            Assert.Equal(renamedAfterFirstMessage, await page.Locator("#conversation-title").InnerTextAsync());
+            await page.EvaluateAsync("window.__releaseTitleRead()");
+            await page.EvaluateAsync("window.__staleTitleOpen");
+            Assert.Equal(renamedAfterFirstMessage, await page.Locator("#conversation-title").InnerTextAsync());
+
+            await page.Locator("#conversation-list").GetByRole(AriaRole.Button,
+                new LocatorGetByRoleOptions { Name = manualTitle }).ClickAsync();
+            await page.WaitForFunctionAsync("id => conversationId === id", manualConversationId);
+            await page.Locator("#prompt").FillAsync("This first message must not replace the manual title.");
+            await page.Locator("#send-turn").ClickAsync();
+            await page.WaitForFunctionAsync("() => !turnSubmissionInFlight && activeTurnId === '' && pendingTurnSubmission === null");
+            Assert.Equal(manualTitle, await page.Locator("#conversation-title").InnerTextAsync());
+
+            await page.ReloadAsync();
+            await page.Locator("#conversation-list").GetByRole(AriaRole.Button,
+                new LocatorGetByRoleOptions { Name = manualTitle }).WaitForAsync();
+            await page.Locator("#conversation-list").GetByRole(AriaRole.Button,
+                new LocatorGetByRoleOptions { Name = renamedAfterFirstMessage }).WaitForAsync();
+            Assert.Equal(2, await page.Locator("#conversation-list time").CountAsync());
+            Assert.Equal(0, await page.Locator("#conversation-list img, #conversation-title img").CountAsync());
+            Assert.NotEqual(manualConversationId, automaticConversationId);
+
+            await page.Locator("#new-conversation").ClickAsync();
+            await page.WaitForFunctionAsync("() => conversationId !== '' && !conversationCreationInFlight");
+            await page.Locator("#prompt").FillAsync("New conversation");
+            var acceptedLiteralTitle = await page.RunAndWaitForResponseAsync(
+                () => page.Locator("#send-turn").ClickAsync(),
+                response => response.Request.Method == "POST" && response.Url.EndsWith("/turns", StringComparison.Ordinal));
+            Assert.Equal(202, acceptedLiteralTitle.Status);
+            await page.WaitForFunctionAsync("() => !turnSubmissionInFlight && activeTurnId === '' && pendingTurnSubmission === null");
+            await page.Locator("#rename-conversation").ClickAsync();
+            Assert.Equal("New conversation", await page.GetByLabel("Conversation title").InputValueAsync());
+            await page.GetByLabel("Conversation title").FillAsync("Unsaved title");
+            await page.Locator("#cancel-title").ClickAsync();
+            await page.Locator("#rename-conversation").ClickAsync();
+            Assert.Equal("New conversation", await page.GetByLabel("Conversation title").InputValueAsync());
+            var renamedConversationId = await page.EvaluateAsync<string>("conversationId");
+            const string renamedWhileNavigating = "Renamed after navigation";
+            var renameReady = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseRename = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            await page.RouteAsync($"**/api/conversations/{renamedConversationId}", async route =>
+            {
+                if (route.Request.Method != "PATCH")
+                {
+                    await route.ContinueAsync();
+                    return;
+                }
+
+                var response = await route.FetchAsync();
+                renameReady.TrySetResult();
+                await releaseRename.Task.WaitAsync(TimeSpan.FromSeconds(15));
+                await route.FulfillAsync(new RouteFulfillOptions { Response = response });
+            });
+            await page.GetByLabel("Conversation title").FillAsync(renamedWhileNavigating);
+            await page.Locator("#save-title").ClickAsync();
+            await renameReady.Task.WaitAsync(TimeSpan.FromSeconds(15));
+            try
+            {
+                await page.Locator("#conversation-list").GetByRole(AriaRole.Button,
+                    new LocatorGetByRoleOptions { Name = manualTitle }).ClickAsync();
+                await page.WaitForFunctionAsync("id => conversationId === id", manualConversationId);
+            }
+            finally
+            {
+                releaseRename.TrySetResult();
+            }
+
+            await page.Locator("#conversation-list").GetByRole(AriaRole.Button,
+                new LocatorGetByRoleOptions { Name = renamedWhileNavigating }).WaitForAsync();
+            Assert.Equal(manualTitle, await page.Locator("#conversation-title").InnerTextAsync());
+            Assert.Equal(manualConversationId, await page.EvaluateAsync<string>("conversationId"));
+            await page.UnrouteAsync($"**/api/conversations/{renamedConversationId}");
+
+            var navigationReady = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseNavigation = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            renameReady = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            releaseRename = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            await page.RouteAsync($"**/api/conversations/{manualConversationId}", async route =>
+            {
+                var response = await route.FetchAsync();
+                renameReady.TrySetResult();
+                await releaseRename.Task.WaitAsync(TimeSpan.FromSeconds(15));
+                await route.FulfillAsync(new RouteFulfillOptions { Response = response });
+            });
+            await page.RouteAsync($"**/api/conversations/{automaticConversationId}", async route =>
+            {
+                var response = await route.FetchAsync();
+                navigationReady.TrySetResult();
+                await releaseNavigation.Task.WaitAsync(TimeSpan.FromSeconds(15));
+                await route.FulfillAsync(new RouteFulfillOptions { Response = response });
+            });
+            const string renamedBeforeNavigationCompletes = "Rename must not cancel navigation";
+            await page.Locator("#rename-conversation").ClickAsync();
+            await page.GetByLabel("Conversation title").FillAsync(renamedBeforeNavigationCompletes);
+            await page.Locator("#save-title").ClickAsync();
+            await renameReady.Task.WaitAsync(TimeSpan.FromSeconds(15));
+            try
+            {
+                await page.Locator("#conversation-list").GetByRole(AriaRole.Button,
+                    new LocatorGetByRoleOptions { Name = renamedAfterFirstMessage }).ClickAsync();
+                await navigationReady.Task.WaitAsync(TimeSpan.FromSeconds(15));
+                releaseRename.TrySetResult();
+                await page.Locator("#conversation-list").GetByRole(AriaRole.Button,
+                    new LocatorGetByRoleOptions { Name = renamedBeforeNavigationCompletes }).WaitForAsync();
+            }
+            finally
+            {
+                releaseRename.TrySetResult();
+                releaseNavigation.TrySetResult();
+            }
+
+            await page.WaitForFunctionAsync("id => conversationId === id", automaticConversationId);
+            Assert.Equal(renamedAfterFirstMessage, await page.Locator("#conversation-title").InnerTextAsync());
+            await page.UnrouteAsync($"**/api/conversations/{manualConversationId}");
+            await page.UnrouteAsync($"**/api/conversations/{automaticConversationId}");
+
+            renameReady = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            releaseRename = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            await page.RouteAsync($"**/api/conversations/{automaticConversationId}", async route =>
+            {
+                var response = await route.FetchAsync();
+                renameReady.TrySetResult();
+                await releaseRename.Task.WaitAsync(TimeSpan.FromSeconds(15));
+                await route.FulfillAsync(new RouteFulfillOptions { Response = response });
+            });
+            var concurrentTurnRequests = 0;
+            await page.RouteAsync("**/api/conversations/*/turns", async route =>
+            {
+                Interlocked.Increment(ref concurrentTurnRequests);
+                await route.ContinueAsync();
+            });
+            const string serializedManualTitle = "Manual title before another turn";
+            await page.Locator("#rename-conversation").ClickAsync();
+            await page.GetByLabel("Conversation title").FillAsync(serializedManualTitle);
+            await page.Locator("#save-title").ClickAsync();
+            await renameReady.Task.WaitAsync(TimeSpan.FromSeconds(15));
+            try
+            {
+                Assert.True(await page.Locator("#send-turn").IsDisabledAsync());
+                await page.EvaluateAsync("document.getElementById('turn-form').requestSubmit()");
+                Assert.Equal(0, Volatile.Read(ref concurrentTurnRequests));
+                Assert.True(await page.EvaluateAsync<bool>("pendingTurnSubmission === null"));
+            }
+            finally
+            {
+                releaseRename.TrySetResult();
+            }
+
+            await page.WaitForFunctionAsync("() => !conversationRenameInFlight");
+            Assert.Equal(serializedManualTitle, await page.Locator("#conversation-title").InnerTextAsync());
+            Assert.False(await page.Locator("#send-turn").IsDisabledAsync());
+            await page.UnrouteAsync("**/api/conversations/*/turns");
+            await page.UnrouteAsync($"**/api/conversations/{automaticConversationId}");
+
+            foreach (var releaseReadFirst in new[] { true, false })
+            {
+                renameReady = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                releaseRename = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                navigationReady = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                releaseNavigation = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                var oldTitle = await page.Locator("#conversation-title").InnerTextAsync();
+                var awayBackTitle = $"Renamed across away/back navigation {releaseReadFirst}";
+                await page.RouteAsync($"**/api/conversations/{automaticConversationId}", async route =>
+                {
+                    if (route.Request.Method == "PATCH")
+                    {
+                        renameReady.TrySetResult();
+                        await releaseRename.Task.WaitAsync(TimeSpan.FromSeconds(15));
+                        await route.FulfillAsync(new RouteFulfillOptions { Response = await route.FetchAsync() });
+                    }
+                    else
+                    {
+                        var response = await route.FetchAsync();
+                        navigationReady.TrySetResult();
+                        await releaseNavigation.Task.WaitAsync(TimeSpan.FromSeconds(15));
+                        await route.FulfillAsync(new RouteFulfillOptions { Response = response });
+                    }
+                });
+                await page.Locator("#rename-conversation").ClickAsync();
+                await page.GetByLabel("Conversation title").FillAsync(awayBackTitle);
+                await page.Locator("#save-title").ClickAsync();
+                await renameReady.Task.WaitAsync(TimeSpan.FromSeconds(15));
+                try
+                {
+                    await page.Locator("#conversation-list").GetByRole(AriaRole.Button,
+                        new LocatorGetByRoleOptions { Name = renamedBeforeNavigationCompletes }).ClickAsync();
+                    await page.WaitForFunctionAsync("id => conversationId === id", manualConversationId);
+                    await page.Locator("#conversation-list").GetByRole(AriaRole.Button,
+                        new LocatorGetByRoleOptions { Name = oldTitle }).ClickAsync();
+                    await navigationReady.Task.WaitAsync(TimeSpan.FromSeconds(15));
+                    if (releaseReadFirst)
+                    {
+                        releaseNavigation.TrySetResult();
+                        await page.WaitForFunctionAsync("id => conversationId === id", automaticConversationId);
+                        Assert.Equal(oldTitle, await page.Locator("#conversation-title").InnerTextAsync());
+                    }
+
+                    releaseRename.TrySetResult();
+                    await page.WaitForFunctionAsync("() => !conversationRenameInFlight");
+                }
+                finally
+                {
+                    releaseRename.TrySetResult();
+                    releaseNavigation.TrySetResult();
+                }
+
+                await page.WaitForFunctionAsync("id => conversationId === id", automaticConversationId);
+                Assert.Equal(awayBackTitle, await page.Locator("#conversation-title").InnerTextAsync());
+                await page.Locator("#conversation-list").GetByRole(AriaRole.Button,
+                    new LocatorGetByRoleOptions { Name = awayBackTitle }).WaitForAsync();
+                await page.Locator("#rename-conversation").ClickAsync();
+                Assert.Equal(awayBackTitle, await page.GetByLabel("Conversation title").InputValueAsync());
+                await page.Locator("#cancel-title").ClickAsync();
+                await page.UnrouteAsync($"**/api/conversations/{automaticConversationId}");
+            }
+
+            renameReady = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            releaseRename = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            await page.RouteAsync($"**/api/conversations/{automaticConversationId}", async route =>
+            {
+                renameReady.TrySetResult();
+                await releaseRename.Task.WaitAsync(TimeSpan.FromSeconds(15));
+                await route.FulfillAsync(new RouteFulfillOptions
+                {
+                    Status = 400,
+                    ContentType = "application/problem+json",
+                    Body = "{\"title\":\"Obsolete rename failure.\"}"
+                });
+            });
+            await page.Locator("#rename-conversation").ClickAsync();
+            await page.GetByLabel("Conversation title").FillAsync("Rejected name");
+            await page.Locator("#save-title").ClickAsync();
+            await renameReady.Task.WaitAsync(TimeSpan.FromSeconds(15));
+            try
+            {
+                await page.Locator("#conversation-list").GetByRole(AriaRole.Button,
+                    new LocatorGetByRoleOptions { Name = renamedBeforeNavigationCompletes }).ClickAsync();
+                await page.WaitForFunctionAsync("id => conversationId === id", manualConversationId);
+                await page.EvaluateAsync("showError('Current conversation feedback.')");
+            }
+            finally
+            {
+                releaseRename.TrySetResult();
+            }
+
+            await page.WaitForFunctionAsync("() => !conversationRenameInFlight");
+            Assert.Equal("Current conversation feedback.", await page.GetByRole(AriaRole.Alert).InnerTextAsync());
+            Assert.False(await page.Locator("#send-turn").IsDisabledAsync());
+            await page.UnrouteAsync($"**/api/conversations/{automaticConversationId}");
+
+            await page.RouteAsync("**/api/conversations", route => route.FulfillAsync(new RouteFulfillOptions
+            {
+                Status = 500,
+                ContentType = "application/problem+json",
+                Body = "{\"title\":\"Conversation list refresh failed.\"}"
+            }));
+            await page.Locator("#rename-conversation").ClickAsync();
+            await page.GetByLabel("Conversation title").FillAsync("Saved despite list refresh failure");
+            await page.Locator("#save-title").ClickAsync();
+            await page.WaitForFunctionAsync("() => !conversationRenameInFlight");
+            Assert.Equal("Saved despite list refresh failure", await page.Locator("#conversation-title").InnerTextAsync());
+            Assert.Equal("Conversation list refresh failed.", await page.GetByRole(AriaRole.Alert).InnerTextAsync());
+            await page.UnrouteAsync("**/api/conversations");
+        }
+        finally
+        {
+            await isolated.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "BrowserE2E")]
     public async Task PlaywrightSignsInAndStreamsASimulatorChat()
     {
         using var playwright = await Playwright.CreateAsync();

@@ -38,6 +38,25 @@ public sealed class WebProblemDetailsTests
 
     [Fact]
     [Trait("Category", "Integration")]
+    public async Task AnonymousConversationRenameIsRejectedWithoutChangingTheStoredTitle()
+    {
+        using var data = IsolatedDirectory.Create();
+        await using var factory = CreateFactory(data.Path);
+        using var client = factory.CreateClient();
+        var store = factory.Services.GetRequiredService<IConversationStore>();
+        var now = factory.Services.GetRequiredService<IClock>().UtcNow;
+        var conversation = await store.CreateConversationAsync(
+            new ConversationRecord(ConversationId.New(), "owner", "Original title", now, now), CancellationToken.None);
+        using var response = await client.PatchAsJsonAsync(
+            $"/api/conversations/{conversation.Id.Value:D}", new { title = "Anonymous change" });
+
+        await AssertProblemAsync(response, HttpStatusCode.Unauthorized, "Unauthorized");
+        Assert.Equal("Original title", (await store.GetConversationAsync(
+            conversation.Id, "owner", CancellationToken.None))!.Title);
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
     public async Task AuthenticatedCookieForbidReturnsCorrelatedForbiddenProblem()
     {
         using var data = IsolatedDirectory.Create();
@@ -161,6 +180,41 @@ public sealed class WebProblemDetailsTests
     }
 
     [Theory]
+    [InlineData("Original\u001B[31mtext", "Original [31mtext")]
+    [InlineData("\u001B\u0000\u007F", "Message without displayable text")]
+    [InlineData("\u200B\u2060", "Message without displayable text")]
+    [InlineData("\uFE0E\uFE0F", "Message without displayable text")]
+    [InlineData("\U000E0100", "Message without displayable text")]
+    [InlineData("❤\uFE0F plans", "❤\uFE0F plans")]
+    [InlineData("👩\u200D💻 plans", "👩\u200D💻 plans")]
+    [Trait("Category", "Integration")]
+    public async Task TurnWithControlCharactersIsAcceptedAndReturnsSanitizedAutomaticTitle(string text, string expectedTitle)
+    {
+        using var data = IsolatedDirectory.Create();
+        await using var factory = CreateFactory(data.Path);
+        using var client = factory.CreateClient();
+        await BootstrapAsync(factory, client);
+        using var created = await client.PostAsJsonAsync("/api/conversations", new { title = "" });
+        Assert.Equal(HttpStatusCode.Created, created.StatusCode);
+        using var conversation = JsonDocument.Parse(await created.Content.ReadAsStringAsync());
+        var id = conversation.RootElement.GetProperty("id").GetProperty("value").GetGuid();
+        using var accepted = await client.PostAsJsonAsync(
+            $"/api/conversations/{id:D}/turns",
+            new { requestId = "control-title-test", text });
+
+        Assert.Equal(HttpStatusCode.Accepted, accepted.StatusCode);
+        using var response = JsonDocument.Parse(await accepted.Content.ReadAsStringAsync());
+        Assert.Equal(expectedTitle, response.RootElement.GetProperty("conversation").GetProperty("title").GetString());
+
+        using var laterTurn = await client.PostAsJsonAsync(
+            $"/api/conversations/{id:D}/turns",
+            new { requestId = "later-title-test", text = "A later request must not change the first title." });
+        Assert.Equal(HttpStatusCode.Accepted, laterTurn.StatusCode);
+        using var laterResponse = JsonDocument.Parse(await laterTurn.Content.ReadAsStringAsync());
+        Assert.Equal(expectedTitle, laterResponse.RootElement.GetProperty("conversation").GetProperty("title").GetString());
+    }
+
+    [Theory]
     [InlineData("Production", "Bad Request")]
     [InlineData("Development", "The request could not be read.")]
     [Trait("Category", "Integration")]
@@ -204,6 +258,77 @@ public sealed class WebProblemDetailsTests
                 attempt < 20 ? HttpStatusCode.Unauthorized : HttpStatusCode.TooManyRequests,
                 attempt < 20 ? "Sign-in failed." : "Too Many Requests");
         }
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task ConversationRenameRequiresCsrfOwnerAndAValidNonemptyTitle()
+    {
+        using var data = IsolatedDirectory.Create();
+        await using var factory = CreateFactory(data.Path);
+        using var client = factory.CreateClient();
+        await BootstrapAsync(factory, client);
+        var now = factory.Services.GetRequiredService<IClock>().UtcNow;
+        var store = factory.Services.GetRequiredService<IConversationStore>();
+        var owned = await store.CreateConversationAsync(
+            new ConversationRecord(ConversationId.New(), "owner", string.Empty, now, now), CancellationToken.None);
+        var otherOwned = await store.CreateConversationAsync(
+            new ConversationRecord(ConversationId.New(), "other", string.Empty, now, now), CancellationToken.None);
+
+        var csrfToken = Assert.Single(client.DefaultRequestHeaders.GetValues("X-CSRF-TOKEN"));
+        client.DefaultRequestHeaders.Remove("X-CSRF-TOKEN");
+        using (var noCsrf = await client.PatchAsJsonAsync(
+            $"/api/conversations/{owned.Id.Value:D}", new { title = "Renamed" }))
+        {
+            await AssertProblemAsync(noCsrf, HttpStatusCode.BadRequest, "Invalid request token.");
+        }
+        client.DefaultRequestHeaders.Add("X-CSRF-TOKEN", csrfToken);
+
+        foreach (var formatOnlyTitle in new[] { "\u200B\u2060", " \u200B \u2060 ", "\uFE0E\uFE0F", "\U000E0100" })
+        {
+            using var invalidCreation = await client.PostAsJsonAsync(
+                "/api/conversations", new { title = formatOnlyTitle });
+            await AssertProblemAsync(invalidCreation, HttpStatusCode.BadRequest, "Conversation title is invalid.");
+        }
+
+        foreach (var invalidTitle in new string?[] { null, "", "  ", new string('x', 201), "line\nbreak", "\u200B\u2060", " \u200B \u2060 ", "\uFE0E\uFE0F", "\U000E0100" })
+        {
+            using var invalid = await client.PatchAsJsonAsync(
+                $"/api/conversations/{owned.Id.Value:D}", new { title = invalidTitle });
+            Assert.True(
+                invalid.StatusCode == HttpStatusCode.BadRequest,
+                $"Unexpected status {invalid.StatusCode} for manual title '{invalidTitle}'.");
+            await AssertProblemAsync(invalid, HttpStatusCode.BadRequest, "Conversation title is invalid.");
+            var unchanged = await store.GetConversationAsync(owned.Id, "owner", CancellationToken.None);
+            Assert.NotNull(unchanged);
+            Assert.Equal(string.Empty, unchanged.Title);
+            Assert.False(unchanged.TitleIsManual);
+        }
+
+        foreach (var visibleTitle in new[] { "👩\u200D💻 plans", "Visible\u2060text", "❤\uFE0F plans", "Cafe\u0301" })
+        {
+            using var visible = await client.PatchAsJsonAsync(
+                $"/api/conversations/{owned.Id.Value:D}", new { title = visibleTitle });
+            visible.EnsureSuccessStatusCode();
+            var persisted = await store.GetConversationAsync(owned.Id, "owner", CancellationToken.None);
+            Assert.NotNull(persisted);
+            Assert.Equal(visibleTitle, persisted.Title);
+            Assert.True(persisted.TitleIsManual);
+        }
+
+        using var renamed = await client.PatchAsJsonAsync(
+            $"/api/conversations/{owned.Id.Value:D}", new { title = "  <img> owner title  " });
+        renamed.EnsureSuccessStatusCode();
+        using var body = JsonDocument.Parse(await renamed.Content.ReadAsStringAsync());
+        Assert.Equal("<img> owner title", body.RootElement.GetProperty("title").GetString());
+        Assert.True(body.RootElement.GetProperty("titleIsManual").GetBoolean());
+
+        using var foreign = await client.PatchAsJsonAsync(
+            $"/api/conversations/{otherOwned.Id.Value:D}", new { title = "Not yours" });
+        await AssertProblemAsync(foreign, HttpStatusCode.NotFound, "Not Found");
+        using var missing = await client.PatchAsJsonAsync(
+            $"/api/conversations/{ConversationId.New().Value:D}", new { title = "Missing" });
+        await AssertProblemAsync(missing, HttpStatusCode.NotFound, "Not Found");
     }
 
     private static WebApplicationFactory<Program> CreateFactory(string dataDirectory) =>
