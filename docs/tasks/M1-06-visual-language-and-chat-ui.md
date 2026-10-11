@@ -240,3 +240,12 @@ answer. RF-01 is fixed by accumulating text only from the active turn's stream
 and publishing it on completion, before history refresh. History still
 replaces visible streaming text as before. A controlled history response with
 a newer user message now proves announcement remains tied to the completed turn.
+
+RF-01 verification: independent read-only review of exact commit `e0aa824`
+reported no significant issues in the turn-scoped correction. Final local
+build, full browser 29/29 plus intentional failure probe, and docs checks
+passed after that correction. Visible-history test locators are scoped to
+`#messages` so the new assistive announcement does not create ambiguous text
+matches. All four GitHub threads were replied to and resolved after pushing
+the fixes. New-head CI remains a separate gate; it is not claimed passed by
+these local results.
