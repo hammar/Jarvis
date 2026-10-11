@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text;
 
 namespace PersonalAgent.Application;
@@ -11,7 +12,8 @@ public static class ConversationTitlePolicy
     /// <summary>Normalizes and shortens the first accepted user message for display as a title.</summary>
     /// <param name="message">Untrusted user message text.</param>
     /// <returns>A nonempty, whitespace-normalized title of at most 80 Unicode scalar values.
-    /// Uses "Message without displayable text" when no text remains after control/whitespace normalization.</returns>
+    /// Uses "Message without displayable text" when only whitespace or Unicode format characters remain.
+    /// Preserves format characters accompanying visible text, including emoji joiners.</returns>
     public static string CreateAutomaticTitle(string message)
     {
         ArgumentNullException.ThrowIfNull(message);
@@ -31,12 +33,13 @@ public static class ConversationTitlePolicy
             normalized = displayText.ToString();
         }
         var title = string.Join(' ', normalized.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
-        if (title.Length == 0)
+        var scalars = title.EnumerateRunes().ToArray();
+        if (!scalars.Any(rune => !Rune.IsWhiteSpace(rune) &&
+            Rune.GetUnicodeCategory(rune) != UnicodeCategory.Format))
         {
             return "Message without displayable text";
         }
 
-        var scalars = title.EnumerateRunes().ToArray();
         if (scalars.Length <= MaximumAutomaticTitleScalars)
         {
             return title;

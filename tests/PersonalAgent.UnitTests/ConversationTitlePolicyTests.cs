@@ -11,6 +11,10 @@ public sealed class ConversationTitlePolicyTests
     [InlineData("Cafe\u0301 plans", "Café plans")]
     [InlineData("\u001B\u0000\u007F", "Message without displayable text")]
     [InlineData(" \t\n ", "Message without displayable text")]
+    [InlineData("\u200B\u2060", "Message without displayable text")]
+    [InlineData(" \u200B \u2060 ", "Message without displayable text")]
+    [InlineData("👩\u200D💻 plans", "👩\u200D💻 plans")]
+    [InlineData("Visible\u2060text", "Visible\u2060text")]
     [Trait("Category", "Unit")]
     public void AutomaticTitleNormalizesUnicodeAndCollapsesWhitespace(string input, string expected)
     {

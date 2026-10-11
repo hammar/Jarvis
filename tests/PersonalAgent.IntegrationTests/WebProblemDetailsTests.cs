@@ -182,6 +182,8 @@ public sealed class WebProblemDetailsTests
     [Theory]
     [InlineData("Original\u001B[31mtext", "Original [31mtext")]
     [InlineData("\u001B\u0000\u007F", "Message without displayable text")]
+    [InlineData("\u200B\u2060", "Message without displayable text")]
+    [InlineData("👩\u200D💻 plans", "👩\u200D💻 plans")]
     [Trait("Category", "Integration")]
     public async Task TurnWithControlCharactersIsAcceptedAndReturnsSanitizedAutomaticTitle(string text, string expectedTitle)
     {

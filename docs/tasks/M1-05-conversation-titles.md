@@ -46,9 +46,10 @@ and browser recovery scenarios.
   trimmed, nonempty, and reject control characters.
 - Automatic titles normalize Unicode to NFC, collapse all whitespace to one
   space, preserve visible punctuation, and cap at 80 Unicode scalar values
-  (using an ellipsis when shortened). Control-only messages use the deterministic
+  (using an ellipsis when shortened). Control/format-only messages use the deterministic
   nonempty title "Message without displayable text" so later turns cannot name
-  the conversation instead.
+  the conversation instead. Format characters accompanying visible text,
+  including emoji joiners, are preserved.
 - The automatic title is metadata derived from the first accepted user message,
   not model output or prompt instructions. Manual renaming at any time,
   including before the first message, sets durable precedence.
@@ -94,6 +95,7 @@ and browser recovery scenarios.
 | R15 (Previously missed, medium) | Stale rename failures could overwrite feedback after navigation. | Fixed and independently reviewed: error feedback is scoped to the originating conversation and selection generation. Passing browser regression releases an obsolete failed PATCH after navigation and preserves the current feedback. |
 | R16 (medium) | The initial R15 guard suppressed a current sidebar-refresh failure after successful rename advanced the generation. | Fixed and independently re-reviewed: track the current feedback generation after the successful header mutation. Passing browser regression verifies saved header and visible list-refresh failure, while obsolete failure coverage remains. |
 | R17 (medium) | Away/back navigation during a pending rename could retain an old active-header title. | Fixed and independently reviewed: successful rename updates the selected conversation without invalidating newer navigation; reads overlapping that rename reconcile the returned title with its committed result. Passing controlled browser coverage exercises the old same-conversation read completing both before and after PATCH. |
+| R18 (Previously missed, medium) | Format-only Unicode first messages persisted a visually empty title. | Fixed and independently reviewed: normalized text containing only whitespace/format runes uses the existing deterministic fallback. Passing unit and real HTTP/SQLite regression cases cover U+200B/U+2060, whitespace mixing, preservation of visible emoji ZWJ text and later-turn title stability. |
 
 The independent reviewer found no new significant issues in the complete
 current diff. Review was against the current uncommitted worktree on macOS.
@@ -161,6 +163,13 @@ orderings and preservation of R3/R9/R11/R12/R15/R16. No significant issues
 remained. These probes supplement, rather than replace, the real browser gate.
 CI must validate the pushed revision; no live credentials or device writes
 were used.
+
+R18 passed native macOS build (zero warnings/errors), unit (111), integration
+(216), coverage (135/140 changed executable lines, 96.4%), docs and whitespace
+checks. Narrow independent inspection against the diff on `645baff` verified
+fallback behavior, visible format-character preservation, existing bounds and
+durable/later-turn API assertions with no concrete bugs. The reviewer did not
+rerun the suites. CI must validate the pushed revision.
 
 ## Completion criteria
 
