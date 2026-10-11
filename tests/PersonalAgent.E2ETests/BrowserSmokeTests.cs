@@ -9,6 +9,134 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
 {
     [Fact]
     [Trait("Category", "BrowserE2E")]
+    public async Task EnterSendsMessageAndShiftEnterAddsANewLine()
+    {
+        var isolated = new SimulatorHostFixture();
+        await isolated.InitializeAsync();
+        try
+        {
+            using var playwright = await Playwright.CreateAsync();
+            await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+            var page = await browser.NewPageAsync();
+            await page.GotoAsync(isolated.WebClient.BaseAddress!.ToString());
+            await page.GetByLabel("Passphrase").FillAsync(SimulatorHostFixture.OwnerPassphrase);
+            await page.Locator("#auth-submit").ClickAsync();
+            await page.WaitForFunctionAsync("() => !authenticationInFlight && !document.getElementById('chat').hidden");
+            await page.Locator("#new-conversation").ClickAsync();
+            await page.WaitForFunctionAsync("() => conversationId !== '' && !conversationCreationInFlight");
+
+            var submittedText = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var submitCount = 0;
+            await page.RouteAsync("**/api/conversations/*/turns", async route =>
+            {
+                Interlocked.Increment(ref submitCount);
+                using var payload = JsonDocument.Parse(route.Request.PostData!);
+                submittedText.TrySetResult(payload.RootElement.GetProperty("text").GetString()!);
+                await route.FulfillAsync(new RouteFulfillOptions
+                {
+                    Status = 400,
+                    ContentType = "application/problem+json",
+                    Body = "{\"title\":\"Controlled turn rejection.\"}"
+                });
+            });
+
+            var prompt = page.GetByLabel("Message");
+            await prompt.FillAsync("First line");
+            await prompt.PressAsync("Shift+Enter");
+            await prompt.PressSequentiallyAsync("second line");
+            Assert.Equal("First line\nsecond line", await prompt.InputValueAsync());
+            Assert.Equal(0, Volatile.Read(ref submitCount));
+
+            await prompt.PressAsync("Enter");
+            Assert.Equal("First line\nsecond line", await submittedText.Task.WaitAsync(TimeSpan.FromSeconds(15)));
+            await page.GetByRole(AriaRole.Alert).Filter(new LocatorFilterOptions { HasText = "Controlled turn rejection." })
+                .WaitForAsync();
+            Assert.Equal(1, Volatile.Read(ref submitCount));
+        }
+        finally
+        {
+            await isolated.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "BrowserE2E")]
+    public async Task SoftEditorialChatReflowsWithoutOverflowAndKeepsLongMessagesReadable()
+    {
+        var isolated = new SimulatorHostFixture();
+        await isolated.InitializeAsync();
+        try
+        {
+            using var playwright = await Playwright.CreateAsync();
+            await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+            var page = await browser.NewPageAsync();
+            await page.GotoAsync(isolated.WebClient.BaseAddress!.ToString());
+            await page.GetByLabel("Passphrase").FillAsync(SimulatorHostFixture.OwnerPassphrase);
+            await page.Locator("#auth-submit").ClickAsync();
+            await page.WaitForFunctionAsync("() => !authenticationInFlight && !document.getElementById('chat').hidden");
+            await page.Locator("#new-conversation").ClickAsync();
+            await page.WaitForFunctionAsync("() => conversationId !== '' && !conversationCreationInFlight");
+            await page.EvaluateAsync(
+                """
+                () => {
+                    document.getElementById("conversation-title").textContent = "A very long conversation title about a quiet morning, thoughtful routines, and the little things that make a day feel more manageable";
+                    renderMessages([
+                        { role: "user", content: `${"A long message with spaces and punctuation— ".repeat(30)}🌱` },
+                        { role: "assistant", content: `${"A careful answer that should wrap within the conversation panel. ".repeat(35)}終わり` }
+                    ]);
+                }
+                """);
+
+            foreach (var width in new[] { 1440, 768, 390, 320 })
+            {
+                await page.SetViewportSizeAsync(width, 900);
+                var layout = await page.EvaluateAsync<JsonElement>(
+                    """
+                    () => ({
+                        viewport: document.documentElement.clientWidth,
+                        document: document.documentElement.scrollWidth,
+                        message: document.querySelector("#messages li").getBoundingClientRect().width,
+                        composer: document.querySelector(".composer").getBoundingClientRect().width,
+                        sendHeight: document.getElementById("send-turn").getBoundingClientRect().height
+                    })
+                    """);
+                var viewport = layout.GetProperty("viewport").GetInt32();
+                var document = layout.GetProperty("document").GetInt32();
+                var message = layout.GetProperty("message").GetDouble();
+                var composer = layout.GetProperty("composer").GetDouble();
+                var sendHeight = layout.GetProperty("sendHeight").GetDouble();
+                Assert.True(document <= viewport,
+                    $"The {width}px layout overflows horizontally ({document}px > {viewport}px).");
+                Assert.True(message <= composer,
+                    $"Long message width {message}px exceeds composer width {composer}px at {width}px.");
+                Assert.True(sendHeight >= 44,
+                    $"Send target is only {sendHeight}px high at {width}px.");
+            }
+
+            await page.Locator("#new-conversation").FocusAsync();
+            await page.Keyboard.PressAsync("Tab");
+            await page.Keyboard.PressAsync("Tab");
+            var focus = await page.EvaluateAsync<JsonElement>(
+                """
+                () => {
+                    const active = document.activeElement;
+                    const style = getComputedStyle(active);
+                    return { id: active.id, outlineStyle: style.outlineStyle, outlineWidth: style.outlineWidth };
+                }
+                """);
+            Assert.Equal("settings-button", focus.GetProperty("id").GetString());
+            Assert.NotEqual("none", focus.GetProperty("outlineStyle").GetString());
+            Assert.True(double.Parse(focus.GetProperty("outlineWidth").GetString()!.TrimEnd('p', 'x'),
+                System.Globalization.CultureInfo.InvariantCulture) >= 3);
+        }
+        finally
+        {
+            await isolated.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "BrowserE2E")]
     public async Task LateStreamRecoveryLookupCannotClearANewerConversation()
     {
         var isolated = new SimulatorHostFixture();

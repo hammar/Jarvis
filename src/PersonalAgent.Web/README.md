@@ -128,10 +128,19 @@ SSE reads persisted events in pages of up to 100, drains terminal backlogs
 before closing, and does not hold a worker while waiting for
 inference.
 
-The root page has Chat, Settings, and Activity surfaces. Settings show only
-provider/model and connection configuration status, never secret values.
-Explicit light/dark canvases and scheme-specific error colors keep error
-text at least 4.5:1 contrast in both supported color schemes.
+The root page has Chat, Settings, and Activity surfaces. Its Soft editorial
+presentation uses locally available system sans-serif controls, system-serif
+headings/message prose, warm paper surfaces, charcoal text and a restrained
+terracotta accent. Its dark color-scheme variant uses warm charcoal surfaces
+and soft terracotta. It does not request third-party fonts or assets. Keyboard
+focus remains visible, reduced-motion preferences are honored, and the layout
+reflows for narrow viewports. Do not infer WCAG conformance beyond the
+automated checks recorded in `docs/testing.md`.
+
+The chat composer sends when Enter is pressed and inserts a newline with
+Shift+Enter. Modified Enter chords and IME composition are not intercepted.
+Settings show only provider/model and connection configuration status, never
+secret values.
 The profile status distinguishes signed-in chat from sign-in guidance,
 including authenticated reload and expired-session transitions.
 Only the latest selected surface is revealed after asynchronous navigation;

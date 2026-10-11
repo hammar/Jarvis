@@ -97,14 +97,22 @@ function renderMessages(messages) {
     const list = document.getElementById("messages");
     list.replaceChildren();
     for (const message of messages) {
-        const item = document.createElement("li");
-        const label = document.createElement("strong");
-        label.textContent = message.role === "assistant" ? "Jarvis: " : "You: ";
-        const content = document.createElement("span");
-        content.textContent = message.content;
-        item.append(label, content);
-        list.append(item);
+        list.append(createMessageItem(message.role, message.content));
     }
+}
+
+function createMessageItem(role, text) {
+    const isAssistant = role === "assistant";
+    const item = document.createElement("li");
+    item.className = isAssistant ? "assistant-message" : "user-message";
+    const label = document.createElement("strong");
+    label.className = "message-label";
+    label.textContent = isAssistant ? "Jarvis" : "You";
+    const content = document.createElement("span");
+    content.className = "message-content";
+    content.textContent = text;
+    item.append(label, content);
+    return item;
 }
 
 async function loadConversations() {
@@ -115,7 +123,9 @@ async function loadConversations() {
         const entry = document.createElement("li");
         const button = document.createElement("button");
         button.type = "button";
+        button.dataset.conversationId = item.id.value || item.id;
         button.textContent = item.title || "New conversation";
+        if (button.dataset.conversationId === conversationId) button.setAttribute("aria-current", "page");
         button.disabled = activeTurnId !== "" || turnSubmissionInFlight || conversationCreationInFlight;
         button.addEventListener("click", async () => {
             const opening = openConversation(item.id.value || item.id);
@@ -145,6 +155,10 @@ async function openConversation(id) {
         return;
     }
     conversationId = data.conversation.id.value || data.conversation.id;
+    for (const button of document.querySelectorAll("#conversation-list button")) {
+        if (button.dataset.conversationId === conversationId) button.setAttribute("aria-current", "page");
+        else button.removeAttribute("aria-current");
+    }
     document.getElementById("conversation-title").textContent = data.conversation.title || "Conversation";
     renderMessages(data.messages);
     document.getElementById("settings").hidden = true;
@@ -366,6 +380,7 @@ document.getElementById("turn-form").addEventListener("submit", async event => {
     conversationSelectionGeneration++;
     turnSubmissionInFlight = true;
     activeTurnConversationId = submittedConversationId;
+    document.getElementById("stream-status").textContent = "Sending your message.";
     setTurnNavigationLocked(true);
     document.getElementById("send-turn").disabled = true;
     let result;
@@ -378,6 +393,7 @@ document.getElementById("turn-form").addEventListener("submit", async event => {
     } catch (error) {
         turnSubmissionInFlight = false;
         activeTurnConversationId = "";
+        document.getElementById("stream-status").textContent = "Message could not be sent.";
         setTurnNavigationLocked(false);
         document.getElementById("send-turn").disabled = false;
         if (error.status >= 400 && error.status < 500 && ![408, 429].includes(error.status)) {
@@ -387,6 +403,7 @@ document.getElementById("turn-form").addEventListener("submit", async event => {
         return;
     }
     activeTurnId = result.turnId.value || result.turnId;
+    document.getElementById("stream-status").textContent = "Jarvis is responding.";
     pendingTurnSubmission.turnId = activeTurnId;
     try {
         sessionStorage.setItem(pendingTurnStorageKey, JSON.stringify(pendingTurnSubmission));
@@ -420,18 +437,17 @@ function connectEvents(turnId, lastSequence) {
             const text = payload.text || payload.Text;
             const list = document.getElementById("messages");
             if (!streamedReply) {
-                streamedReply = document.createElement("li");
-                streamedReply.textContent = "Jarvis: ";
+                streamedReply = createMessageItem("assistant", "");
                 list.append(streamedReply);
             }
-            streamedReply.textContent += text;
+            streamedReply.querySelector(".message-content").textContent += text;
         } else if (event.type === "AssistantMessage" && typeof (payload.text || payload.Text) === "string") {
             const list = document.getElementById("messages");
-            const item = document.createElement("li");
-            item.textContent = `Jarvis: ${payload.text || payload.Text}`;
-            list.append(item);
+            list.append(createMessageItem("assistant", payload.text || payload.Text));
         }
         if (["TurnCompleted", "TurnFailed", "TurnCancelled", "TurnInterrupted"].includes(event.type)) {
+            document.getElementById("stream-status").textContent =
+                event.type === "TurnCompleted" ? "Response complete." : "Response ended.";
             if (event.type === "TurnFailed") {
                 showError("The assistant could not complete this request. Your conversation is saved; you can try again.");
             } else if (event.type === "TurnInterrupted") {
@@ -497,6 +513,13 @@ document.getElementById("cancel-turn").addEventListener("click", async () => {
     } catch (error) {
         showError(error.message);
     }
+});
+
+document.getElementById("prompt").addEventListener("keydown", event => {
+    if (event.key !== "Enter" || event.shiftKey || event.altKey || event.ctrlKey || event.metaKey ||
+        event.isComposing || event.keyCode === 229) return;
+    event.preventDefault();
+    document.getElementById("turn-form").requestSubmit();
 });
 
 async function openSettings() {

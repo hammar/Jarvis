@@ -336,6 +336,7 @@ tasks, not runtime multi-agent features.
 | M1 | M1-01 / #7 | Local-only routing and bounded context; cloud denial; Application routing/context | T03, T04 |
 | M1 | M1-02 / #12 | Local turn use case, durable lifecycle, limits, cancellation, recovery and production composition | M1-01 |
 | M1 | M1-03 / #11 | Owner bootstrap/auth, chat APIs/UI/SSE, local settings/activity and runnable chat demo | M1-02 |
+| M1 | M1-06 / #42 | Owner-approved Soft editorial visual language, responsive/accessibility polish, and keyboard-friendly local chat UI | M1-03; coordinate conversation naming with M1-05 |
 | M2 | M2-01 / #5 | Tool dispatcher, exact approvals, authorization and durable action journal | M1 closed |
 | M2 | M2-02 / #8 | Typed Home Assistant REST adapter, one bounded transient safe-read retry, controlled fixtures and home tools | M2-01 |
 | M2 | M2-03 / #9 | Confirmed memory proposals, FTS retrieval, conflicts, deletion and memory tools | M2-01 |

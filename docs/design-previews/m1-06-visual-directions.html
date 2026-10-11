@@ -1,0 +1,456 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <title>Jarvis visual directions — M1-06</title>
+    <style>
+        :root {
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            color: #202721;
+            background: #e9e9e4;
+            font-synthesis: none;
+            text-rendering: optimizeLegibility;
+        }
+
+        * { box-sizing: border-box; }
+
+        body {
+            margin: 0;
+            padding: 2rem clamp(1rem, 3vw, 3rem) 3rem;
+        }
+
+        h1, h2, h3, p { margin-top: 0; }
+
+        .intro {
+            max-width: 76rem;
+            margin: 0 auto 1.5rem;
+        }
+
+        .intro p { color: #465047; }
+
+        .directions {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 1.25rem;
+            max-width: 100rem;
+            margin: 0 auto;
+        }
+
+        .direction {
+            --page: #f7f5ef;
+            --surface: #fffefa;
+            --surface-muted: #eeece4;
+            --ink: #302c27;
+            --muted: #625c54;
+            --line: #d8d2c7;
+            --accent: #8a4f38;
+            --accent-ink: #fffaf5;
+            --highlight: #eee1d7;
+            --success: #315b43;
+            overflow: hidden;
+            border: 1px solid var(--line);
+            border-radius: 1rem;
+            background: var(--page);
+            color: var(--ink);
+            box-shadow: 0 1rem 2.5rem #1d211d1a;
+        }
+
+        .direction.precise {
+            --page: #f3f5f1;
+            --surface: #ffffff;
+            --surface-muted: #e9ede8;
+            --ink: #202a29;
+            --muted: #4e5d5a;
+            --line: #cbd5cf;
+            --accent: #315e55;
+            --accent-ink: #ffffff;
+            --highlight: #e2ebe6;
+            --success: #315b43;
+        }
+
+        .direction-heading {
+            min-height: 7.5rem;
+            padding: 1.25rem 1.5rem 1rem;
+            border-bottom: 1px solid var(--line);
+        }
+
+        .direction-heading h2 { margin-bottom: .35rem; font-size: 1.15rem; }
+        .direction-heading p { margin-bottom: 0; color: var(--muted); font-size: .9rem; }
+
+        .app {
+            display: grid;
+            grid-template-columns: minmax(9rem, 31%) minmax(0, 1fr);
+            min-height: 32rem;
+            margin: 1rem;
+            overflow: hidden;
+            border: 1px solid var(--line);
+            border-radius: .75rem;
+            background: var(--surface);
+            font-size: .84rem;
+        }
+
+        .sidebar {
+            padding: .9rem;
+            border-right: 1px solid var(--line);
+            background: var(--page);
+        }
+
+        .brand-row, .conversation-top, .chat-heading, .composer-actions,
+        .settings-heading, .settings-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: .5rem;
+        }
+
+        .brand {
+            font-family: Georgia, "Times New Roman", serif;
+            font-size: 1.18rem;
+            font-weight: 700;
+            letter-spacing: -.03em;
+        }
+
+        .precise .brand {
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            font-size: 1rem;
+            letter-spacing: -.02em;
+        }
+
+        .icon-button, .nav-button, .conversation-link, .action {
+            min-height: 2.5rem;
+            border: 1px solid transparent;
+            border-radius: .5rem;
+            color: inherit;
+            font: inherit;
+        }
+
+        .icon-button {
+            width: 2.5rem;
+            background: transparent;
+            font-size: 1.2rem;
+        }
+
+        .nav-list, .conversation-list, .message-list {
+            margin: 0;
+            padding: 0;
+            list-style: none;
+        }
+
+        .nav-list { display: grid; gap: .2rem; margin: 1rem 0 1.2rem; }
+
+        .nav-button, .conversation-link {
+            display: block;
+            width: 100%;
+            padding: .55rem .65rem;
+            background: transparent;
+            text-align: left;
+        }
+
+        .nav-button.selected, .conversation-link.selected {
+            border-color: var(--line);
+            background: var(--surface-muted);
+        }
+
+        .section-label {
+            margin: 0 0 .5rem;
+            color: var(--muted);
+            font-size: .72rem;
+            font-weight: 700;
+            letter-spacing: .06em;
+            text-transform: uppercase;
+        }
+
+        .conversation-list { display: grid; gap: .35rem; }
+
+        .conversation-link {
+            min-height: 3.4rem;
+            overflow-wrap: anywhere;
+        }
+
+        .conversation-link small {
+            display: block;
+            margin-top: .15rem;
+            color: var(--muted);
+            font-size: .72rem;
+        }
+
+        .main-panel {
+            display: flex;
+            min-width: 0;
+            flex-direction: column;
+            padding: 1.1rem clamp(.85rem, 2vw, 1.5rem);
+        }
+
+        .conversation-top {
+            min-height: 2rem;
+            color: var(--muted);
+            font-size: .75rem;
+        }
+
+        .route-status {
+            padding: .3rem .55rem;
+            border: 1px solid var(--line);
+            border-radius: 999px;
+            color: var(--success);
+            white-space: nowrap;
+        }
+
+        .chat-heading {
+            margin: 1.2rem 0 1.4rem;
+            align-items: flex-start;
+        }
+
+        .chat-heading h3 {
+            margin: 0 0 .2rem;
+            font-family: Georgia, "Times New Roman", serif;
+            font-size: 1.35rem;
+            line-height: 1.25;
+        }
+
+        .precise .chat-heading h3 {
+            font-family: inherit;
+            font-size: 1.2rem;
+            letter-spacing: -.02em;
+        }
+
+        .chat-heading p { margin: 0; color: var(--muted); font-size: .75rem; }
+        .chat-heading .icon-button { border-color: var(--line); }
+
+        .message-list {
+            display: grid;
+            align-content: start;
+            gap: 1rem;
+            flex: 1;
+        }
+
+        .message { max-width: 39rem; }
+
+        .message-label {
+            display: block;
+            margin-bottom: .25rem;
+            color: var(--muted);
+            font-size: .75rem;
+            font-weight: 650;
+        }
+
+        .message p {
+            margin: 0;
+            line-height: 1.65;
+            overflow-wrap: anywhere;
+        }
+
+        .message.user {
+            margin-left: auto;
+            padding: .75rem .9rem;
+            border-radius: .8rem .8rem .2rem .8rem;
+            background: var(--highlight);
+        }
+
+        .message.assistant {
+            padding: .1rem .15rem;
+            font-family: Georgia, "Times New Roman", serif;
+            font-size: .95rem;
+        }
+
+        .precise .message.assistant { font-family: inherit; }
+
+        .composer {
+            margin-top: 1.2rem;
+            padding: .65rem;
+            border: 1px solid var(--line);
+            border-radius: .75rem;
+            background: var(--surface);
+            box-shadow: 0 .25rem .9rem #1d211d0b;
+        }
+
+        .composer textarea {
+            display: block;
+            width: 100%;
+            min-height: 3.2rem;
+            resize: vertical;
+            border: 0;
+            outline: 0;
+            background: transparent;
+            color: var(--ink);
+            font: inherit;
+        }
+
+        .composer textarea::placeholder { color: var(--muted); opacity: 1; }
+        .composer-hint { color: var(--muted); font-size: .72rem; }
+        .composer-actions { justify-content: flex-end; }
+
+        .action {
+            padding: .45rem .75rem;
+            border-color: var(--line);
+            background: var(--surface);
+        }
+
+        .action.primary {
+            border-color: var(--accent);
+            background: var(--accent);
+            color: var(--accent-ink);
+            font-weight: 650;
+        }
+
+        .settings-card {
+            margin: 0 1rem 1rem;
+            padding: 1rem 1.25rem;
+            border: 1px solid var(--line);
+            border-radius: .75rem;
+            background: var(--surface);
+            font-size: .82rem;
+        }
+
+        .settings-heading { margin-bottom: .65rem; }
+        .settings-heading strong { font-size: .95rem; }
+        .settings-heading span { color: var(--muted); font-size: .75rem; }
+        .settings-row { min-height: 2.35rem; border-top: 1px solid var(--line); }
+        .settings-row span:last-child { color: var(--muted); }
+
+        .choice {
+            display: flex;
+            align-items: flex-start;
+            gap: .6rem;
+            margin: 0;
+            padding: 0 1.5rem 1.25rem;
+            color: var(--muted);
+            font-size: .85rem;
+        }
+
+        .choice input { width: 1.1rem; height: 1.1rem; margin: .1rem 0 0; accent-color: var(--accent); }
+
+        .sr-only {
+            position: absolute;
+            width: 1px;
+            height: 1px;
+            padding: 0;
+            overflow: hidden;
+            clip: rect(0, 0, 0, 0);
+            white-space: nowrap;
+            border: 0;
+        }
+
+        button:focus-visible, input:focus-visible, textarea:focus-visible {
+            outline: 3px solid var(--accent);
+            outline-offset: 2px;
+        }
+
+        @media (max-width: 1000px) {
+            .directions { grid-template-columns: 1fr; max-width: 48rem; }
+            .app { min-height: 30rem; }
+        }
+
+        @media (max-width: 520px) {
+            body { padding: 1rem .65rem 2rem; }
+            .direction-heading { padding-inline: 1rem; }
+            .app { grid-template-columns: 7rem minmax(0, 1fr); margin: .55rem; }
+            .sidebar { padding: .55rem; }
+            .main-panel { padding: .75rem .65rem; }
+            .brand { font-size: .95rem; }
+            .nav-button, .conversation-link { padding-inline: .4rem; font-size: .73rem; }
+            .route-status { max-width: 8.5rem; overflow: hidden; text-overflow: ellipsis; }
+            .settings-card { margin: 0 .55rem .55rem; padding: .8rem; }
+            .choice { padding-inline: 1rem; }
+        }
+    </style>
+</head>
+<body>
+    <header class="intro">
+        <h1>Jarvis visual directions</h1>
+        <p>Two isolated style studies for the same local chat experience. Content and controls are illustrative, static, and contain no private data.</p>
+    </header>
+    <main class="directions" aria-label="Visual direction alternatives">
+        <section class="direction editorial" aria-labelledby="editorial-title">
+            <header class="direction-heading">
+                <h2 id="editorial-title">A — Soft editorial</h2>
+                <p>Warm paper, ink, terracotta, generous reading space, and subtle serif character.</p>
+            </header>
+            <div class="app">
+                <aside class="sidebar" aria-label="Soft editorial navigation preview">
+                    <div class="brand-row"><span class="brand">Jarvis</span><button class="icon-button" type="button" aria-label="New conversation">+</button></div>
+                    <nav class="nav-list" aria-label="Main navigation">
+                        <button class="nav-button selected" type="button">Chat</button>
+                        <button class="nav-button" type="button">Settings</button>
+                        <button class="nav-button" type="button">Activity</button>
+                    </nav>
+                    <p class="section-label">Recent conversations</p>
+                    <ul class="conversation-list">
+                        <li><button class="conversation-link selected" type="button">A quieter morning<small>Today · 9:41 AM</small></button></li>
+                        <li><button class="conversation-link" type="button">Window herbs<small>Yesterday · 6:18 PM</small></button></li>
+                        <li><button class="conversation-link" type="button">New conversation<small>Today · 9:32 AM</small></button></li>
+                    </ul>
+                </aside>
+                <section class="main-panel" aria-label="Conversation preview">
+                    <div class="conversation-top"><span>Local assistant</span><span class="route-status">Local · Ollama · ready</span></div>
+                    <header class="chat-heading">
+                        <div><h3>A quieter morning</h3><p>Updated today at 9:41 AM</p></div>
+                        <button class="icon-button" type="button" aria-label="Conversation options">···</button>
+                    </header>
+                    <ol class="message-list">
+                        <li class="message user"><span class="message-label">You</span><p>Help me make a gentle plan for the morning.</p></li>
+                        <li class="message assistant"><span class="message-label">Jarvis</span><p>Let's keep it simple: open the curtains, make tea, and choose one small thing to finish before lunch.</p></li>
+                    </ol>
+                    <form class="composer" aria-label="Message composer preview">
+                        <label class="sr-only" for="prompt-a">Message</label>
+                        <textarea id="prompt-a" placeholder="Message Jarvis…" readonly></textarea>
+                        <div class="composer-actions"><span class="composer-hint">Enter to send</span><button class="action" type="button">Cancel</button><button class="action primary" type="button">Send</button></div>
+                    </form>
+                </section>
+            </div>
+            <section class="settings-card" aria-label="Settings state preview">
+                <div class="settings-heading"><strong>Settings</strong><span>Local settings</span></div>
+                <div class="settings-row"><span>Conversation retention</span><span>90 days</span></div>
+                <div class="settings-row"><span>Audit retention</span><span>30 days</span></div>
+            </section>
+            <label class="choice"><input type="radio" name="visual-direction" value="soft-editorial"><span>Select Soft editorial</span></label>
+        </section>
+
+        <section class="direction precise" aria-labelledby="precise-title">
+            <header class="direction-heading">
+                <h2 id="precise-title">B — Quiet precision</h2>
+                <p>Soft mineral neutrals, deep evergreen, crisp sans typography, and a more compact frame.</p>
+            </header>
+            <div class="app">
+                <aside class="sidebar" aria-label="Quiet precision navigation preview">
+                    <div class="brand-row"><span class="brand">Jarvis</span><button class="icon-button" type="button" aria-label="New conversation">+</button></div>
+                    <nav class="nav-list" aria-label="Main navigation">
+                        <button class="nav-button selected" type="button">Chat</button>
+                        <button class="nav-button" type="button">Settings</button>
+                        <button class="nav-button" type="button">Activity</button>
+                    </nav>
+                    <p class="section-label">Recent conversations</p>
+                    <ul class="conversation-list">
+                        <li><button class="conversation-link selected" type="button">A quieter morning<small>Today · 9:41 AM</small></button></li>
+                        <li><button class="conversation-link" type="button">Window herbs<small>Yesterday · 6:18 PM</small></button></li>
+                        <li><button class="conversation-link" type="button">New conversation<small>Today · 9:32 AM</small></button></li>
+                    </ul>
+                </aside>
+                <section class="main-panel" aria-label="Conversation preview">
+                    <div class="conversation-top"><span>Local assistant</span><span class="route-status">Local · Ollama · ready</span></div>
+                    <header class="chat-heading">
+                        <div><h3>A quieter morning</h3><p>Updated today at 9:41 AM</p></div>
+                        <button class="icon-button" type="button" aria-label="Conversation options">···</button>
+                    </header>
+                    <ol class="message-list">
+                        <li class="message user"><span class="message-label">You</span><p>Help me make a gentle plan for the morning.</p></li>
+                        <li class="message assistant"><span class="message-label">Jarvis</span><p>Let's keep it simple: open the curtains, make tea, and choose one small thing to finish before lunch.</p></li>
+                    </ol>
+                    <form class="composer" aria-label="Message composer preview">
+                        <label class="sr-only" for="prompt-b">Message</label>
+                        <textarea id="prompt-b" placeholder="Message Jarvis…" readonly></textarea>
+                        <div class="composer-actions"><span class="composer-hint">Enter to send</span><button class="action" type="button">Cancel</button><button class="action primary" type="button">Send</button></div>
+                    </form>
+                </section>
+            </div>
+            <section class="settings-card" aria-label="Settings state preview">
+                <div class="settings-heading"><strong>Settings</strong><span>Local settings</span></div>
+                <div class="settings-row"><span>Conversation retention</span><span>90 days</span></div>
+                <div class="settings-row"><span>Audit retention</span><span>30 days</span></div>
+            </section>
+            <label class="choice"><input type="radio" name="visual-direction" value="quiet-precision"><span>Select Quiet precision</span></label>
+        </section>
+    </main>
+</body>
+</html>
