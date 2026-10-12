@@ -134,10 +134,42 @@ SSE reads persisted events in pages of up to 100, drains terminal backlogs
 before closing, and does not hold a worker while waiting for
 inference.
 
-The root page has Chat, Settings, and Activity surfaces. Settings show only
-provider/model and connection configuration status, never secret values.
-Explicit light/dark canvases and scheme-specific error colors keep error
-text at least 4.5:1 contrast in both supported color schemes.
+The root page has Chat, Settings, and Activity surfaces. Its Soft editorial
+presentation uses locally available system sans-serif controls, system-serif
+headings/assistant message prose, warm paper surfaces, charcoal text and a restrained
+terracotta accent. Its dark color-scheme variant uses warm charcoal surfaces
+and soft terracotta. It does not request third-party fonts or assets. Keyboard
+focus remains visible, reduced-motion preferences are honored, and the layout
+reflows for narrow viewports. Do not infer WCAG conformance beyond the
+automated checks recorded in `docs/testing.md`.
+The signed-in frame is bounded by the dynamic viewport, with messages scrolling
+inside the conversation so long history does not push the composer off-screen.
+Long headings and mobile navigation have their own scroll bounds. The main
+panel remains scrollable when short viewports, zoom or an open rename form
+leave insufficient space for all controls; authentication keeps its normal
+page-flow layout.
+Streaming deltas do not update live regions. On successful completion, the
+completed turn's streamed assistant text is announced once in
+a dedicated polite, atomic status region. Failed/cancelled/interrupted turns
+retain lifecycle/error notices without announcing a partial answer as final.
+Announcements use that turn's stream, not the latest conversation message,
+which could belong to a concurrent request in another tab. Durable history
+still replaces the visible streaming view after completion.
+Browser coverage measures light/dark authentication, chat, settings and activity
+at narrow/desktop widths and 200% CSS zoom, with reduced-motion emulation;
+it does not certify real screen-reader speech or native browser zoom controls.
+
+The chat composer sends when Enter is pressed and inserts a newline with
+Shift+Enter. Modified Enter chords and IME composition are not intercepted.
+The submitted text clears after the server confirms acceptance, not on the
+initial keypress. Failed or uncertain sends retain their text for retry.
+A draft edited while acceptance is pending is preserved. Reload recovery of
+an already accepted turn does not put its sent text back in the composer
+when its acceptance record was saved successfully. If saving acceptance fails,
+the visible recovery error explains the limitation; the earlier request
+identity remains available for a safe unchanged retry after reload.
+Settings show only provider/model and connection configuration status, never
+secret values.
 The profile status distinguishes signed-in chat from sign-in guidance,
 including authenticated reload and expired-session transitions.
 Only the latest selected surface is revealed after asynchronous navigation;

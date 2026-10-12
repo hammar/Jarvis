@@ -1,0 +1,281 @@
+# M1-06: Visual language and existing chat UI polish
+
+## Objective
+
+Apply the owner-selected visual language to the existing local chat,
+authentication, conversation navigation, settings, and activity surfaces, and
+document its reusable rules. The two isolated alternatives remain available
+for future reference; Soft editorial is the primary production direction.
+
+## Specification and scenarios
+
+- Issue #42; project specification §§12 (Host API and UI), 14 (Acceptance and
+  evaluation), 16 (milestones), 19 (architecture/documentation), 20 (test and
+  coverage gates), and 21 (agentic development and review).
+- Existing M1-03/#11 browser and API behavior is preserved.
+- Conversation title, excerpt, rename, and creation-time presentation integrates
+  M1-05/#40's accepted behavior from merged PR #43, including its schema-v5
+  title provenance and race-safe browser updates.
+
+## Scope
+
+- Keep both alternatives in `docs/design-previews/m1-06-visual-directions.html`
+  as isolated reference material. The owner selected **A — Soft editorial** as
+  the primary direction; preserve the option to revisit the alternatives later.
+- Establish shared CSS tokens and focused reusable styling in the existing
+  Razor/minimal-JavaScript UI. The approved direction uses warm paper, charcoal
+  text, a restrained terracotta accent, generous reading space, and subtle
+  system-serif headings/message prose, with crisp sans-serif navigation and
+  controls. No external runtime fonts/assets.
+- The message composer sends on Enter and inserts a newline on Shift+Enter.
+  Prevent accidental send during IME composition and modified Enter chords.
+- Polish chat/auth/navigation/settings and activity without adding future
+  product pages or changing server behavior.
+- Preserve visible truthful route/provider/model, readiness, errors, streaming,
+  cancellation, reconnect, and disabled states. Incorporate #40 naming,
+  timestamp, excerpt, and manual-rename presentation when its accepted
+  implementation is available.
+- Support narrow mobile, tablet, and desktop widths; long titles/messages;
+  keyboard interaction and visible/unobscured focus; readable contrast; zoom
+  and reflow; reduced motion; and non-color-only status. Avoid disruptive
+  repeated assistive announcements during streaming.
+
+## Exclusions
+
+No new assistant capabilities, cloud/device operations, settings behavior,
+theme engine, SPA/frontend framework rewrite, title persistence or generation,
+engine/API/schema redesign, speculative component platform, unrelated
+refactors, or unapproved material interaction changes. Preview alternatives do
+not alter the live product experience.
+
+## Owned files and boundaries
+
+- `src/PersonalAgent.Web/Pages/Index.cshtml`,
+  `src/PersonalAgent.Web/wwwroot/css/site.css`,
+  `src/PersonalAgent.Web/wwwroot/js/chat.js`, and `src/PersonalAgent.Web/README.md`.
+- Focused scenarios in `tests/PersonalAgent.E2ETests/BrowserSmokeTests.cs`.
+- `docs/testing.md`, `docs/Personal-Agent-Project-Spec.md`, project
+  documentation/scenario mapping, and this task brief.
+- Any preview-only files are isolated documentation artifacts; do not expose
+  preview/test controls in production profiles.
+
+Web continues to call Application use cases. Do not introduce presentation
+changes that bypass authentication, CSRF, owner authorization, SSE ordering,
+idempotency, or cancellation semantics. No durable schema or application
+contract change is expected from M1-06 itself.
+
+## Dependencies and assumptions
+
+- M1-03/#11 is the baseline; existing Razor markup, CSS/JavaScript, and
+  Playwright/Aspire composition are the implementation surface.
+- M1-05/#40 was merged in PR #43 (`91aaa9a`). Retain its schema migration,
+  accepted-turn metadata, manual-title precedence, timestamp descriptions,
+  and stale-read/rename protections. Style its controls without replacing its
+  application or persistence logic.
+- The primary production visual direction is approved, but the owner may
+  change their preference later; retain both previews for reference.
+- Preserve the pre-existing light/dark system color-scheme behavior with
+  matching Soft editorial palettes; this is not a configurable theme engine.
+
+## Tests and documentation
+
+- Keep existing authenticated chat, navigation, settings/activity, streaming,
+  cancellation, reconnect, provider-failure, and recovery behavior covered.
+- Verify Enter-to-send and Shift+Enter newline handling through Playwright,
+  including exactly one request per Enter and no submission for the newline.
+- Clear submitted composer text only after confirmed acceptance; keep failed
+  or uncertain requests retryable, preserve edits made while awaiting
+  acceptance, and do not restore accepted text into the composer on reload.
+  `AcceptedSendClearsSubmittedTextWithoutDiscardingANewerDraft` covers
+  successful acceptance and an in-flight draft edit; the keyboard rejection
+  scenario also asserts retained text.
+
+### Composer acceptance follow-up
+
+Commit `e88189a` clears unchanged submitted text on accepted responses and
+leaves newer drafts alone, including after terminal completion. Accepted
+reload recovery no longer restores sent text; ambiguous recovery retains its
+original identity and retry text.
+
+Validation executed on native macOS with isolated controlled endpoints:
+`tools/validate.sh build` passed; `tools/validate.sh browser-e2e` passed all
+28 scenarios and verified the intentional failing probe;
+`tools/validate.sh docs` passed. Evidence is in
+`artifacts/m106-main-integration/composer-*.log`. Linux CI was not run locally.
+
+Independent review of exact commit `e88189a` raised CF-01 (medium): failure
+to persist accepted recovery state can leave the older ambiguous record,
+which restores text after reload. Disposition: **not applicable as a new
+defect**, confirmed by narrow independent follow-up review. This predates
+the fix and explicitly surfaces a storage error. Removing that record
+would discard idempotency identity and permit duplicate submission;
+successful acceptance persistence is required for empty accepted reload
+recovery. The Web README now states this existing failure-mode limitation.
+This incremental review does not replace the full M1-06 PR review.
+- Add Playwright assertions for desktop/tablet/mobile layout; representative
+  authentication/chat/settings/activity states; long messages and titles;
+  visible keyboard focus and keyboard operation; and supported zoom/reflow.
+- Use measurable layout and contrast assertions where practical; avoid brittle
+  whole-page snapshots. Do not claim complete WCAG conformance from automation
+  alone. Use controlled fixtures and production Simulator/E2E composition.
+- Document approved typography/fallbacks, color/semantic states, spacing,
+  reading width, control treatment, responsive layout, accessibility choices,
+  and known gaps. Update the scenario mapping and affected Web/testing guidance.
+
+## Completion criteria
+
+- Two representative alternatives have the same controlled content and
+  functionality; the owner explicitly selects the direction before broad UI
+  changes.
+- Implemented surfaces consistently follow the approved brief and retain the
+  existing M1-03 behavior, plus #40 naming presentation when available.
+- The applicable required build, architecture, integration/browser E2E,
+  coverage, and documentation checks pass. Report only checks actually run.
+- Independent agentic review findings have explicit dispositions; handoff
+  states exact revision/check evidence, platform/runtime limitations,
+  unexercised behavior, and residual risks.
+
+## Main integration and review
+
+The owner's requested main integration uses a merge rather than a rebase:
+`f73bad3` checkpoints the previously uncommitted M1-06 work, and `b25b55e`
+merges main's `91aaa9a` (PR #43) without rewriting either history.
+Four textual conflicts in the specification, testing map, Razor page, and
+JavaScript were reconciled by preserving both task entries and combining
+M1-05's metadata/rename behavior with the approved presentation.
+
+The schema-v5 migration and backend naming implementation are imported
+unchanged. Header/list titles retain manual precedence, accepted-turn metadata
+updates, timestamp descriptions, and stale-list/read protections. Rename and
+timestamp styles use the existing design tokens. The conversation container
+uses flex layout so showing the optional rename form does not displace the
+message/composer grid tracks.
+
+Independent read-only agentic review examined `b25b55e` against both parents
+and the M1-05 cumulative ledger. It did not execute tests or browser rendering.
+Its scope was merge-specific correctness, not a full M1-06 design review.
+
+| Ref | Finding | Disposition and evidence |
+|---|---|---|
+| MI-01 | Medium: M1-05's timestamp sibling could be clipped on mobile by M1-06's full-height conversation button within a vertically clipped horizontal list. | Fixed: remove the mobile button's `height: 100%`. Extend `SoftEditorialChatReflowsWithoutOverflowAndKeepsLongMessagesReadable` to assert timestamp bounds lie within the list, not merely DOM visibility, at 1440/768/390/320px. |
+
+### Executed integration evidence
+
+Merge reconciliation is committed in `b25b55e`; MI-01 is fixed in `39ddc0f`.
+All commands below use the pinned SDK on native macOS with controlled,
+isolated data. Backend gates started on `b25b55e`; the subsequent MI-01 fix
+changes only CSS, browser-test assertions, and this record. Full browser and
+documentation gates, followed by a final build/format check, include `39ddc0f`.
+
+| Command | Result |
+|---|---|
+| `tools/validate.sh build` | Release build and formatting pass, zero warnings/errors; repeated after MI-01. |
+| `tools/validate.sh architecture` | 6/6 pass, discovery verified. |
+| `tools/validate.sh unit` | 126/126 pass, discovery verified. |
+| `tools/validate.sh integration` | 219/219 pass, discovery verified; includes schema-v4-to-v5 upgrade and real SQLite title precedence/race coverage. |
+| `tools/validate.sh sdk-contracts` | Runtime harness and 55/55 contract tests pass, discovery verified. |
+| `tools/validate.sh coverage` | Merged runtime thresholds and gate self-tests pass; changed coverable C# lines are N/A relative to merged main. Browser JavaScript/CSS execution is not counted as .NET coverage. |
+| `tools/validate.sh aspire-e2e` | 7/7 pass, discovery verified. |
+| `tools/validate.sh browser-e2e` | 26/26 pass, discovery verified; deliberate failure probe fails as required. Includes retained naming/rename race scenarios, persisted-title responsive/clipping assertions, and Enter/Shift+Enter behavior. |
+| `tools/validate.sh docs` | Internal Markdown links resolve. |
+
+Local gate logs are under `artifacts/m106-main-integration/`. A final fetch
+confirmed `91aaa9a` remains current main and is an ancestor of the branch.
+No private development database was opened or migrated by these checks.
+Linux CI, real household/cloud operations, assistive-technology certification,
+and full M1-06 aesthetic acceptance are not established by this merge check.
+The review scope and its one finding remain recorded above; this is not a
+claim of a full M1-06 PR review or authorization to merge that PR.
+
+## Full independent PR review
+
+The owner's visual approval is complete. At the owner's request, an independent
+read-only agent reviewed the complete nine-file PR diff at exact commit
+`cbe2848b12419334d456c2e93742c766ce813aea` against main
+`91aaa9a9f3106e61de6067a3cc66e187ff7ce038`. No new findings were identified.
+The review examined specification/task/accepted-ADR conformance, architecture,
+auth/privacy boundaries, browser concurrency and stale-response protection,
+idempotent recovery, composer keyboard/acceptance behavior, responsive and
+accessibility risks, preview isolation, dependencies, tests, and documentation.
+
+The reviewer verified a clean worktree, exact revision/base/ancestry, complete
+change scope and commit history, and passing `git diff --check`. Recorded local
+gate evidence was inspected rather than rerun by the reviewer. No independent
+Linux execution, live cloud/device operation, or assistive-technology
+certification is claimed. Automated evidence and static review are not
+guarantees of complete accessibility or absence of defects.
+
+The complete cumulative ledger remains MI-01 (**fixed**, verifying revision
+`39ddc0f23bbb640d233c4515cbf4f56717d3041b`, with responsive timestamp bounds
+assertions) and CF-01 (**not applicable as a new defect**, pre-existing,
+explicitly surfaced storage-failure limitation preserving safe retry identity).
+The full reviewer independently confirmed both dispositions; there are no
+new FR findings or unresolved review findings. This review supersedes the
+earlier scope limitation for PR readiness, not the owner's final merge decision.
+
+## GitHub review follow-up
+
+GitHub's reviews of `cbe2848` and `e9f63ca` subsequently raised the following
+findings. These supplement, not erase, MI-01 and CF-01 above. The second
+review's summary-only "Previously missed" keyboard concern duplicates GR-03
+and is explicitly included in its disposition.
+
+| Ref | Severity and concern | Disposition and verifying behavior |
+|---|---|---|
+| GR-01 | Medium: completed assistant answers were not announced. | Fixed: a dedicated polite atomic region receives the completed turn's streamed assistant text once; deltas and failed/cancelled/interrupted turns do not publish partial answers as final. Browser assertions cover silence during streaming, completed content and one update. |
+| GR-02 | Low: assistant prose did not use the documented serif font. | Fixed: shared assistant content selector uses the serif token for streamed and persisted messages; browser computed-style assertions cover both. User prose and labels retain sans-serif typography. |
+| GR-03 | Low: modified Enter and IME guards lacked browser assertions, including the summary-only "Previously missed" duplicate. | Fixed: Alt/Control/Meta Enter and synthetic composing/keyCode-229 events retain draft text, submit no request, and composing events remain unintercepted; existing plain/Shift Enter assertions remain. Synthetic composition does not establish native IME certification. |
+| GR-04 | Low: responsive coverage omitted other surfaces, themes, motion and zoom. | Fixed: auth/chat/settings/activity assertions cover 1440/768/390/320px and 1280px at 200% CSS layout zoom, both light/dark schemes, reduced-motion emulation and visible horizontally unclipped controls. CSS layout zoom does not establish native browser zoom controls or assistive-technology certification. |
+
+Native macOS follow-up checks: `tools/validate.sh build` passed; four focused
+browser cases passed; full `tools/validate.sh browser-e2e` passed 29/29 with
+the deliberate failing probe verified; `tools/validate.sh docs` and
+`git diff --check` passed. Logs are in
+`artifacts/m106-main-integration/review-followup-*.log`. The first announcement
+test exposed that final text is persisted in history rather than delivered as
+an AssistantMessage event. An initial history-based fix passed those gates but
+independent review of `d42621e` raised RF-01 (medium): selecting the latest
+conversation message can announce another tab's response or miss the completed
+answer. RF-01 is fixed by accumulating text only from the active turn's stream
+and publishing it on completion, before history refresh. History still
+replaces visible streaming text as before. A controlled history response with
+a newer user message now proves announcement remains tied to the completed turn.
+
+RF-01 verification: independent read-only review of exact commit `e0aa824`
+reported no significant issues in the turn-scoped correction. Final local
+build, full browser 29/29 plus intentional failure probe, and docs checks
+passed after that correction. Visible-history test locators are scoped to
+`#messages` so the new assistive announcement does not create ambiguous text
+matches. All four GitHub threads were replied to and resolved after pushing
+the fixes. New-head CI remains a separate gate; it is not claimed passed by
+these local results.
+
+### GR-05: Previously missed long-history scrolling
+
+The later GitHub review summary at `54b30cc` raised GR-05 (medium), despite
+having no open inline threads: an indefinite workspace minimum height lets
+long history expand the page and push the composer below the viewport.
+The new vertical regression reproduced the failure at 1440px before the fix.
+
+The signed-in frame now uses a definite dynamic-viewport height that accounts
+for the actual topbar and responsive page padding. Grid/flex children can
+shrink, messages retain their content size and scroll internally, and long
+headings/mobile navigation are bounded scrollable areas. The main panel
+retains overflow scrolling for short/zoomed layouts or an open rename form;
+authentication remains normal page flow. Tests assert nonzero message height,
+scrollable overflow and a changed scroll position, plus the entire composer
+inside the viewport at 1440/768/390/320px widths and 900/700px heights.
+GR-05 supplements the cumulative MI-01, CF-01, GR-01 through GR-04 and RF-01
+ledger; none of those earlier findings are removed.
+
+GR-05 validation on native macOS: the new regression failed before the fix;
+`tools/validate.sh build`, full `tools/validate.sh browser-e2e` (29/29 plus
+the intentional failing probe), `tools/validate.sh docs`, and
+`git diff --check` passed after the fix. Logs are under
+`artifacts/m106-main-integration/scroll-*.log`. This covers production
+composition with controlled endpoints, not native mobile browsers or an
+on-screen keyboard. New-head CI is not established by these local results.
+Independent read-only review of exact commit `7e4abc3` returned no significant
+issues. Its scope was this viewport-layout fix and tightly coupled regressions,
+not a new full PR review or independent rerun of the gates. GR-05 is **fixed**
+by that revision and the reproduced-before/passing-after browser assertions.

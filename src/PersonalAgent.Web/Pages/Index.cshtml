@@ -4,68 +4,96 @@
     ViewData["Title"] = "Jarvis local chat";
 }
 
-<main>
-    <h1>Jarvis</h1>
-    <p id="profile" role="status">Running the @Model.Profile profile.</p>
-    <section id="auth" aria-labelledby="auth-title" hidden>
-        <h2 id="auth-title">Owner sign-in</h2>
+<main class="app-frame">
+    <header class="topbar">
+        <h1 class="brand"><a href="/" aria-label="Jarvis home">Jarvis</a><span aria-hidden="true">LOCAL ASSISTANT</span></h1>
+        <p id="profile" role="status">Running the @Model.Profile profile.</p>
+    </header>
+    <section id="auth" class="auth-card" aria-labelledby="auth-title" hidden>
+        <div class="eyebrow">A quieter kind of assistant</div>
+        <h1 id="auth-title">Owner sign-in</h1>
+        <p class="auth-intro">Your conversations stay on this device.</p>
         <form id="auth-form">
             <label id="bootstrap-token-label" for="bootstrap-token" hidden>One-time setup token</label>
             <input id="bootstrap-token" name="bootstrapToken" type="password" autocomplete="one-time-code" maxlength="256" hidden />
             <label for="passphrase">Passphrase</label>
             <input id="passphrase" name="passphrase" type="password" autocomplete="current-password" minlength="12" maxlength="1024" required />
             <label class="remember"><input id="remember-me" type="checkbox" /> Keep me signed in on this browser</label>
-            <button id="auth-submit" type="submit">Sign in</button>
+            <button id="auth-submit" class="button button-primary" type="submit">Sign in</button>
         </form>
     </section>
-    <section id="chat" hidden aria-label="Chat">
-        <nav aria-label="Chat actions">
-            <button id="new-conversation" type="button">New conversation</button>
-            <button id="settings-button" type="button">Settings</button>
-            <button id="activity-button" type="button">Activity</button>
-            <button id="logout" type="button">Sign out</button>
-        </nav>
-        <p id="route-status"></p>
-        <aside>
-            <h2>Recent conversations</h2>
-            <ul id="conversation-list"></ul>
+    <section id="chat" class="workspace" hidden aria-label="Jarvis workspace">
+        <aside class="sidebar" aria-label="Workspace navigation">
+            <button id="new-conversation" class="button button-new" type="button"><span aria-hidden="true">+</span> New conversation</button>
+            <h2 class="section-label">Recent conversations</h2>
+            <ul id="conversation-list" class="conversation-list"></ul>
+            <nav class="sidebar-actions" aria-label="Chat actions">
+                <button id="settings-button" class="nav-button" type="button"><span aria-hidden="true">⚙</span> Settings</button>
+                <button id="activity-button" class="nav-button" type="button"><span aria-hidden="true">◷</span> Activity</button>
+                <button id="logout" class="nav-button" type="button"><span aria-hidden="true">↪</span> Sign out</button>
+            </nav>
         </aside>
-        <section id="conversation" hidden aria-label="Conversation">
-            <h2 id="conversation-title">Conversation</h2>
-            <p id="conversation-created"></p>
-            <button id="rename-conversation" type="button">Rename</button>
-            <form id="rename-form" hidden>
-                <label for="conversation-title-input">Conversation title</label>
-                <input id="conversation-title-input" name="title" maxlength="200" required />
-                <button id="save-title" type="submit">Save title</button>
-                <button id="cancel-title" type="button">Cancel</button>
-            </form>
-            <ol id="messages" aria-live="polite"></ol>
-            <form id="turn-form">
-                <label for="prompt">Message</label>
-                <textarea id="prompt" name="text" maxlength="8000" required></textarea>
-                <button id="send-turn" type="submit">Send</button>
-                <button id="cancel-turn" type="button" hidden>Cancel turn</button>
-            </form>
-        </section>
-        <section id="settings" hidden aria-label="Settings">
-            <h2>Local settings</h2>
-            <p id="settings-status" role="status"></p>
-            <form id="retention-form">
-                <label for="conversation-days">Conversation retention (days)</label>
-                <input id="conversation-days" type="number" min="1" max="3650" required />
-                <label for="audit-days">Audit retention (days)</label>
-                <input id="audit-days" type="number" min="1" max="3650" required />
-                <button type="submit">Save settings</button>
-            </form>
-        </section>
-        <section id="activity" hidden aria-label="Activity">
-            <h2>Local activity</h2>
-            <p>Activity is limited to local conversation and turn history. Provider secrets and prompt telemetry are not displayed.</p>
-            <ul id="activity-list"></ul>
-        </section>
+        <div class="workspace-main">
+            <header class="workspace-header">
+                <div>
+                    <p class="eyebrow">Your private space</p>
+                    <h1>Good to see you.</h1>
+                </div>
+                <p id="route-status" class="route-status"></p>
+            </header>
+            <section id="conversation" class="conversation-view" hidden aria-label="Conversation">
+                <header class="conversation-heading">
+                    <div>
+                        <p class="eyebrow">Conversation</p>
+                        <h2 id="conversation-title">Conversation</h2>
+                        <p id="conversation-created" class="conversation-created"></p>
+                    </div>
+                    <button id="rename-conversation" class="button button-secondary" type="button">Rename</button>
+                </header>
+                <form id="rename-form" class="rename-form" hidden>
+                    <label for="conversation-title-input">Conversation title</label>
+                    <input id="conversation-title-input" name="title" maxlength="200" required />
+                    <div class="rename-actions">
+                        <button id="save-title" class="button button-primary" type="submit">Save title</button>
+                        <button id="cancel-title" class="button button-secondary" type="button">Cancel</button>
+                    </div>
+                </form>
+                <ol id="messages" class="messages" aria-label="Conversation history"></ol>
+                <p id="stream-status" class="sr-only" role="status" aria-live="polite"></p>
+                <p id="response-announcement" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></p>
+                <form id="turn-form" class="composer">
+                    <label class="sr-only" for="prompt">Message</label>
+                    <textarea id="prompt" name="text" maxlength="8000" aria-describedby="composer-help" placeholder="Message Jarvis…" required></textarea>
+                    <div class="composer-footer">
+                        <p id="composer-help">Enter to send <span aria-hidden="true">·</span> Shift+Enter for a new line</p>
+                        <div class="composer-actions">
+                            <button id="cancel-turn" class="button button-secondary" type="button" hidden>Cancel turn</button>
+                            <button id="send-turn" class="button button-primary" type="submit">Send <span aria-hidden="true">↗</span></button>
+                        </div>
+                    </div>
+                </form>
+            </section>
+            <section id="settings" class="surface-card settings-view" hidden aria-labelledby="settings-title">
+                <p class="eyebrow">Your preferences</p>
+                <h2 id="settings-title">Local settings</h2>
+                <p id="settings-status" class="inline-status" role="status"></p>
+                <form id="retention-form">
+                    <label for="conversation-days">Conversation retention <span>days</span></label>
+                    <input id="conversation-days" type="number" min="1" max="3650" required />
+                    <label for="audit-days">Audit retention <span>days</span></label>
+                    <input id="audit-days" type="number" min="1" max="3650" required />
+                    <button class="button button-primary" type="submit">Save settings</button>
+                </form>
+            </section>
+            <section id="activity" class="surface-card activity-view" hidden aria-labelledby="activity-title">
+                <p class="eyebrow">A clear local record</p>
+                <h2 id="activity-title">Local activity</h2>
+                <p>Activity is limited to local conversation and turn history. Provider secrets and prompt telemetry are not displayed.</p>
+                <ul id="activity-list" class="activity-list"></ul>
+            </section>
+        </div>
     </section>
-    <p id="error" role="alert" hidden></p>
+    <p id="error" class="error-banner" role="alert" hidden></p>
 </main>
 <link rel="stylesheet" href="~/css/site.css" asp-append-version="true" />
 <script src="~/js/chat.js" asp-append-version="true"></script>
