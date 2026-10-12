@@ -275,3 +275,7 @@ the intentional failing probe), `tools/validate.sh docs`, and
 `artifacts/m106-main-integration/scroll-*.log`. This covers production
 composition with controlled endpoints, not native mobile browsers or an
 on-screen keyboard. New-head CI is not established by these local results.
+Independent read-only review of exact commit `7e4abc3` returned no significant
+issues. Its scope was this viewport-layout fix and tightly coupled regressions,
+not a new full PR review or independent rerun of the gates. GR-05 is **fixed**
+by that revision and the reproduced-before/passing-after browser assertions.
