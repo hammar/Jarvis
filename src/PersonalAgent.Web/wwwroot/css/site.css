@@ -66,7 +66,14 @@ a:focus-visible {
     margin: 0 auto;
 }
 
+.app-frame:has(> .workspace:not([hidden])) {
+    display: flex;
+    flex-direction: column;
+    height: calc(100dvh - 3.25rem);
+}
+
 .topbar {
+    flex-shrink: 0;
     display: flex;
     min-height: 3.5rem;
     align-items: center;
@@ -113,7 +120,9 @@ a:focus-visible {
 
 .workspace {
     display: grid;
-    min-height: min(54rem, calc(100vh - 6rem));
+    flex: 1 1 auto;
+    min-height: 0;
+    max-height: 54rem;
     grid-template-columns: minmax(14rem, 18rem) minmax(0, 1fr);
     overflow: hidden;
     border: 1px solid var(--line);
@@ -125,6 +134,8 @@ a:focus-visible {
 .sidebar {
     display: flex;
     min-width: 0;
+    min-height: 0;
+    overflow: auto;
     flex-direction: column;
     padding: 1rem;
     border-right: 1px solid var(--line);
@@ -266,6 +277,7 @@ a:focus-visible {
     display: grid;
     min-width: 0;
     min-height: 0;
+    overflow: auto;
     grid-template-rows: auto minmax(0, 1fr);
     padding: 1.5rem clamp(1rem, 3vw, 3.25rem);
 }
@@ -318,10 +330,13 @@ a:focus-visible {
 
 .conversation-heading {
     display: flex;
+    flex-shrink: 0;
     align-items: flex-start;
     justify-content: space-between;
     gap: .75rem;
     min-width: 0;
+    max-height: 35%;
+    overflow: auto;
     padding: .45rem 0 1.1rem;
 }
 
@@ -335,6 +350,7 @@ a:focus-visible {
 
 .rename-form {
     display: grid;
+    flex-shrink: 0;
     gap: .6rem;
     margin-bottom: 1rem;
     padding: .8rem;
@@ -373,6 +389,7 @@ a:focus-visible {
 .messages {
     display: flex;
     min-width: 0;
+    min-height: 0;
     flex-direction: column;
     flex: 1 1 auto;
     align-items: stretch;
@@ -384,6 +401,7 @@ a:focus-visible {
 }
 
 .messages li {
+    flex-shrink: 0;
     width: fit-content;
     max-width: min(86%, 46rem);
     padding: .8rem 1rem;
@@ -633,18 +651,23 @@ a:focus-visible {
         padding: .65rem;
     }
 
+    .app-frame:has(> .workspace:not([hidden])) {
+        height: calc(100dvh - 1.3rem);
+    }
+
     .topbar {
         margin-bottom: .65rem;
     }
 
     .workspace {
-        min-height: calc(100dvh - 5rem);
+        max-height: none;
         grid-template-columns: minmax(0, 1fr);
-        grid-template-rows: auto minmax(28rem, 1fr);
+        grid-template-rows: auto minmax(0, 1fr);
     }
 
     .sidebar {
         display: grid;
+        max-height: min(16rem, 35dvh);
         grid-template-columns: minmax(0, 1fr) auto;
         align-items: center;
         gap: .55rem .8rem;
@@ -723,6 +746,10 @@ a:focus-visible {
         padding: .45rem;
     }
 
+    .app-frame:has(> .workspace:not([hidden])) {
+        height: calc(100dvh - .9rem);
+    }
+
     .topbar {
         min-height: 3rem;
     }
@@ -742,8 +769,6 @@ a:focus-visible {
     }
 
     .workspace {
-        min-height: calc(100dvh - 4rem);
-        grid-template-rows: auto minmax(26rem, 1fr);
         border-radius: .75rem;
     }
 

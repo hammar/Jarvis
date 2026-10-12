@@ -142,6 +142,12 @@ and soft terracotta. It does not request third-party fonts or assets. Keyboard
 focus remains visible, reduced-motion preferences are honored, and the layout
 reflows for narrow viewports. Do not infer WCAG conformance beyond the
 automated checks recorded in `docs/testing.md`.
+The signed-in frame is bounded by the dynamic viewport, with messages scrolling
+inside the conversation so long history does not push the composer off-screen.
+Long headings and mobile navigation have their own scroll bounds. The main
+panel remains scrollable when short viewports, zoom or an open rename form
+leave insufficient space for all controls; authentication keeps its normal
+page-flow layout.
 Streaming deltas do not update live regions. On successful completion, the
 completed turn's streamed assistant text is announced once in
 a dedicated polite, atomic status region. Failed/cancelled/interrupted turns

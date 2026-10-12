@@ -253,6 +253,28 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
             }
 
             await page.Locator("#cancel-title").ClickAsync();
+            foreach (var (width, height) in new[] { (1440, 900), (768, 900), (390, 900), (320, 900),
+                (1440, 700), (768, 700), (390, 700), (320, 700) })
+            {
+                await page.SetViewportSizeAsync(width, height);
+                var scrolling = await page.EvaluateAsync<JsonElement>(
+                    """
+                    () => {
+                        const messages = document.getElementById("messages");
+                        const composer = document.querySelector(".composer").getBoundingClientRect();
+                        messages.scrollTop = messages.scrollHeight;
+                        return { height: messages.clientHeight, scrollHeight: messages.scrollHeight,
+                            scrollTop: messages.scrollTop, composerTop: composer.top, composerBottom: composer.bottom,
+                            viewport: window.innerHeight };
+                    }
+                    """);
+                Assert.True(scrolling.GetProperty("height").GetInt32() > 0 &&
+                    scrolling.GetProperty("scrollHeight").GetInt32() > scrolling.GetProperty("height").GetInt32() &&
+                    scrolling.GetProperty("scrollTop").GetInt32() > 0 &&
+                    scrolling.GetProperty("composerTop").GetDouble() >= 0 &&
+                    scrolling.GetProperty("composerBottom").GetDouble() <= scrolling.GetProperty("viewport").GetInt32(),
+                    $"Long history must scroll internally with the composer inside the viewport at {width}px: {scrolling}");
+            }
             await page.Locator("#new-conversation").FocusAsync();
             await page.Keyboard.PressAsync("Tab");
             await page.Keyboard.PressAsync("Tab");
@@ -316,7 +338,8 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
                         await page.SetViewportSizeAsync(width, 900);
                         // CSS zoom exercises layout scaling; device scale alone would not test reflow.
                         await page.EvaluateAsync("zoom => document.documentElement.style.zoom = String(zoom)", zoom);
-                        Assert.True(await page.Locator(surface).IsVisibleAsync());
+                        Assert.True(await page.Locator(surface).IsVisibleAsync(),
+                            $"{surface} is hidden at {width}px, {zoom * 100}% CSS zoom, {scheme}.");
                         Assert.True(await page.EvaluateAsync<bool>(
                             """
                             () => document.documentElement.scrollWidth <= document.documentElement.clientWidth

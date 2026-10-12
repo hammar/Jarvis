@@ -249,3 +249,29 @@ passed after that correction. Visible-history test locators are scoped to
 matches. All four GitHub threads were replied to and resolved after pushing
 the fixes. New-head CI remains a separate gate; it is not claimed passed by
 these local results.
+
+### GR-05: Previously missed long-history scrolling
+
+The later GitHub review summary at `54b30cc` raised GR-05 (medium), despite
+having no open inline threads: an indefinite workspace minimum height lets
+long history expand the page and push the composer below the viewport.
+The new vertical regression reproduced the failure at 1440px before the fix.
+
+The signed-in frame now uses a definite dynamic-viewport height that accounts
+for the actual topbar and responsive page padding. Grid/flex children can
+shrink, messages retain their content size and scroll internally, and long
+headings/mobile navigation are bounded scrollable areas. The main panel
+retains overflow scrolling for short/zoomed layouts or an open rename form;
+authentication remains normal page flow. Tests assert nonzero message height,
+scrollable overflow and a changed scroll position, plus the entire composer
+inside the viewport at 1440/768/390/320px widths and 900/700px heights.
+GR-05 supplements the cumulative MI-01, CF-01, GR-01 through GR-04 and RF-01
+ledger; none of those earlier findings are removed.
+
+GR-05 validation on native macOS: the new regression failed before the fix;
+`tools/validate.sh build`, full `tools/validate.sh browser-e2e` (29/29 plus
+the intentional failing probe), `tools/validate.sh docs`, and
+`git diff --check` passed after the fix. Logs are under
+`artifacts/m106-main-integration/scroll-*.log`. This covers production
+composition with controlled endpoints, not native mobile browsers or an
+on-screen keyboard. New-head CI is not established by these local results.
