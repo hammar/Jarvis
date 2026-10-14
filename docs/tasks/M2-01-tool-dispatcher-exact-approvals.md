@@ -341,6 +341,18 @@ later physical send; this is not a physical exactly-once guarantee. No checks
 were independently rerun or live/cross-process behavior established. R6 remains
 deferred and unaccepted.
 
+The bounded independent review of exact commit
+`db55c7ceb231197abdbc6b7d47119368605976d8` against `e0962dc` supported
+R22 with no new significant findings. It checked terminal refresh under the
+canonical proposal gate, action-owned failure/uncertainty reconciliation,
+all outside-gate call sites, cancellation/read failures, unchanged owner and
+policy binding, and all seven unit/three SQLite cases against the complete
+R1-R22 ledger and relevant spec/ADRs. No gate reacquisition was found inside
+existing under-gate paths; replay neither sends nor observes or changes the
+durable record. This was source-only review: no checks independently rerun,
+current-head CI inspected, or live/cross-process behavior established.
+Earlier dispositions remain intact; R6 remains deferred and unaccepted.
+
 ## R7/R8 regression evidence
 
 - Before the production fix, the targeted R7/R8 unit regressions failed in all
