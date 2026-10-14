@@ -1156,6 +1156,11 @@ public sealed class SqlitePersistenceTests
         var approval = new ApprovalStorageRecord(
             ApprovalId.New(), action.Id, "owner-1", "Pending", Now, Now.AddMinutes(5), null, 1);
         await store.CreateAsync(approval, CancellationToken.None);
+        Assert.Equal(approval, await store.CreateAsync(approval, CancellationToken.None));
+        await Assert.ThrowsAsync<PersistenceConcurrencyException>(async () =>
+            await store.CreateAsync(approval with { OwnerId = "owner-2" }, CancellationToken.None));
+        await Assert.ThrowsAsync<PersistenceConcurrencyException>(async () =>
+            await store.CreateAsync(approval with { ActionId = ActionId.New() }, CancellationToken.None));
 
         var approved = await store.ResolveAsync(
             approval.Id, "owner-1", "Approved", 1, Now.AddMinutes(1), CancellationToken.None);
@@ -1174,6 +1179,35 @@ public sealed class SqlitePersistenceTests
         await Assert.ThrowsAsync<PersistenceConcurrencyException>(
             async () => await store.ResolveAsync(
                 expired.Id, "other-owner", "Approved", 1, Now, CancellationToken.None));
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task ActionJournalReadFailureAfterUpdateRollsBackTheUnobservedTransition()
+    {
+        using var file = IsolatedDatabaseFile.Create();
+        var database = new SqliteDatabase(file.Path);
+        await database.InitializeAsync();
+        var store = new SqliteActionJournalStore(database);
+        var action = NewAction(ActionId.New(), "Prepared", Now);
+        await store.CreateAsync(action, CancellationToken.None);
+
+        await using (var connection = await database.OpenConnectionAsync())
+        await using (var command = connection.CreateCommand())
+        {
+            command.CommandText = """
+                CREATE TRIGGER delete_updated_action
+                AFTER UPDATE ON actions
+                BEGIN
+                    DELETE FROM actions WHERE id = NEW.id;
+                END;
+                """;
+            await command.ExecuteNonQueryAsync();
+        }
+
+        await Assert.ThrowsAsync<InvalidDataException>(async () =>
+            await store.UpdateStatusAsync(action.Id, "Executing", action.Version, Now.AddMinutes(1), CancellationToken.None));
+        Assert.Equal("Prepared", (await store.GetAsync(action.Id, CancellationToken.None))!.Status);
     }
 
     [Fact]

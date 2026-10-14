@@ -26,6 +26,22 @@ is a known lower bound, not a total count: the builder reads only the latest
 13 rows to cap work. `HasMoreHistory` indicates whether the extra sentinel
 row proves that additional older history exists.
 
+`Tools/ToolRegistry` exposes only typed, host-authored registrations.
+`ToolAllowlistPolicy` requires an exact tool/action/operation/entity rule and
+derives a policy identity from the full rule set. `ToolDispatcher` stores a
+canonical action envelope before execution and uses the original current-turn
+request only as in-memory evidence for a handler's strict explicit-intent
+check; the journal stores a request hash, not the prompt text. Low-risk writes
+without that handler evidence require approval. `Approvals/ApprovalService`
+binds a five-minute, single-use approval to one owner and one journaled action.
+Execution rechecks policy and the canonical request. Only verified results
+are `Succeeded`; sent-but-unconfirmed actions remain `Unknown` and are never
+replayed. If restart finds an action still `Executing`, the dispatcher only
+performs bounded verification and records the observed result or uncertainty;
+it does not call the execution handler again. The current Web composition
+registers no tools or allowlist entries until their feature implementation
+arrives.
+
 `Context/LocalChatPrompt` supplies shared host chat instructions and formats
 the current task plainly after quoted, role-labelled history. Packet provenance
 and privacy metadata stay application-owned. The estimate counts the same
@@ -33,7 +49,8 @@ formatted text that the Copilot adapter sends.
 
 Entry points: `PersonalAgent.Application.Contracts`,
 `PersonalAgent.Application.TurnOutcomeContracts`,
-`PersonalAgent.Application.Routing`, `PersonalAgent.Application.Context`, and
-`PersonalAgent.Application.TurnCoordination`.
-Tests:
-`dotnet test tests/PersonalAgent.UnitTests`.
+`PersonalAgent.Application.Routing`, `PersonalAgent.Application.Context`,
+`PersonalAgent.Application.TurnCoordination`,
+`PersonalAgent.Application.Tools`, and `PersonalAgent.Application.Approvals`.
+Tests: `dotnet test tests/PersonalAgent.UnitTests` and
+`dotnet test tests/PersonalAgent.IntegrationTests --filter FullyQualifiedName~ToolDispatcherTests`.

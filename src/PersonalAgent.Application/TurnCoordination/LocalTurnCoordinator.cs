@@ -643,7 +643,8 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
                 HostShutdownToken: item.ShutdownCancellation.Token,
                 DeadlineCancellationToken: item.DeadlineCancellation.Token,
                 ResolveDeadlineCancellation: item.ResolveEngineDeadline,
-                ReadCancellationCause: () => item.CancellationCause);
+                ReadCancellationCause: () => item.CancellationCause,
+                OwnerId: item.Request.RequiredOwnerId);
             await foreach (var _ in engine.RunTurnAsync(engineRequest, cancellationToken))
             {
             }

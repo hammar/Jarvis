@@ -35,15 +35,28 @@ public sealed class SqliteApprovalStore : IApprovalStore
         command.CommandText = """
             INSERT INTO approval_requests
                 (id, action_id, owner_id, status, created_at_utc, expires_at_utc, resolved_at_utc, version)
-            VALUES ($id, $action_id, $owner, 'Pending', $created, $expires, NULL, 1);
+            VALUES ($id, $action_id, $owner, 'Pending', $created, $expires, NULL, 1)
+            ON CONFLICT(id) DO NOTHING;
             """;
         command.Parameters.AddWithValue("$id", SqliteValue.Guid(approval.Id.Value));
         command.Parameters.AddWithValue("$action_id", SqliteValue.Guid(approval.ActionId.Value));
         command.Parameters.AddWithValue("$owner", approval.OwnerId);
         command.Parameters.AddWithValue("$created", SqliteValue.Utc(approval.CreatedAtUtc));
         command.Parameters.AddWithValue("$expires", SqliteValue.Utc(approval.ExpiresAtUtc));
-        await command.ExecuteNonQueryAsync(cancellationToken);
-        return approval;
+        if (await command.ExecuteNonQueryAsync(cancellationToken) == 1)
+        {
+            return approval;
+        }
+
+        var existing = await GetAsync(approval.Id, cancellationToken);
+        if (existing is not null
+            && existing.ActionId == approval.ActionId
+            && string.Equals(existing.OwnerId, approval.OwnerId, StringComparison.Ordinal))
+        {
+            return existing;
+        }
+
+        throw new PersistenceConcurrencyException("The approval identifier is already bound to a different owner or action.");
     }
 
     /// <inheritdoc />
@@ -70,9 +83,9 @@ public sealed class SqliteApprovalStore : IApprovalStore
         CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(ownerId);
-        if (status is not ("Approved" or "Rejected"))
+        if (status is not ("Approved" or "Rejected" or "Expired"))
         {
-            throw new ArgumentException("An approval can only resolve to Approved or Rejected.", nameof(status));
+            throw new ArgumentException("An approval can only resolve to Approved, Rejected, or Expired.", nameof(status));
         }
 
         if (expectedVersion < 1)
@@ -86,7 +99,9 @@ public sealed class SqliteApprovalStore : IApprovalStore
             UPDATE approval_requests
             SET status = $status, resolved_at_utc = $resolved, version = version + 1
             WHERE id = $id AND owner_id = $owner AND status = 'Pending'
-              AND expires_at_utc > $resolved AND version = $version;
+              AND version = $version
+              AND (($status IN ('Approved', 'Rejected') AND expires_at_utc > $resolved)
+                   OR ($status = 'Expired' AND expires_at_utc <= $resolved));
             """;
         command.Parameters.AddWithValue("$status", status);
         command.Parameters.AddWithValue("$resolved", SqliteValue.Utc(resolvedAtUtc));

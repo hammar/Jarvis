@@ -84,6 +84,7 @@ public enum CancellationCause
 /// Without an arbiter, the engine owns its standalone deadline classification.</param>
 /// <param name="ReadCancellationCause">Optional trusted, thread-safe, non-mutating accessor for the host's selected
 /// cancellation cause, including None. Terminal selection consults it even when callback publication is delayed.</param>
+/// <param name="OwnerId">Authenticated owner identity supplied by the host, never from model output.</param>
 public sealed record AgentTurnRequest(
     TurnId TurnId,
     ConversationId ConversationId,
@@ -97,7 +98,8 @@ public sealed record AgentTurnRequest(
     CancellationToken HostShutdownToken = default,
     CancellationToken DeadlineCancellationToken = default,
     Func<CancellationCause>? ResolveDeadlineCancellation = null,
-    Func<CancellationCause>? ReadCancellationCause = null);
+    Func<CancellationCause>? ReadCancellationCause = null,
+    string? OwnerId = null);
 
 /// <summary>Reports a terminal engine outcome without treating interruption as success.</summary>
 /// <param name="Status">Terminal application turn status.</param>
@@ -606,16 +608,33 @@ public interface IModelRouter
 
 /// <summary>Contains one model-proposed tool call before host validation.</summary>
 /// <param name="TurnId">Turn that emitted the proposal.</param>
-/// <param name="CallId">Engine-local call identifier for event correlation.</param>
+/// <param name="CallId">Stable call identifier for this proposal, unique within its turn.</param>
 /// <param name="ToolName">Registered tool name requested by the model.</param>
 /// <param name="ArgumentsJson">Untrusted JSON arguments to validate against the tool schema.</param>
-public sealed record ToolDispatchRequest(TurnId TurnId, string CallId, string ToolName, string ArgumentsJson);
+/// <param name="OwnerId">Authenticated owner identity from the host, never model output.</param>
+/// <param name="CurrentUserRequest">Original current-turn request from host-selected context, not a model claim.</param>
+public sealed record ToolDispatchRequest(
+    TurnId TurnId,
+    string CallId,
+    string ToolName,
+    string ArgumentsJson,
+    string? OwnerId = null,
+    string? CurrentUserRequest = null);
 
 /// <summary>Reports the host's dispatch outcome, including uncertain physical results.</summary>
 /// <param name="Status">Stable outcome such as Succeeded, Rejected, Failed, or Unknown.</param>
 /// <param name="ResultJson">Optional typed tool result serialized for the engine.</param>
 /// <param name="ReasonCode">Stable reason code for denial or failure.</param>
-public sealed record ToolDispatchResult(string Status, string? ResultJson, string? ReasonCode);
+/// <param name="ActionId">Durable host action identity, when the proposal was registered.</param>
+/// <param name="ApprovalId">Exact approval request identity when owner review is required.</param>
+/// <param name="ApprovalExpiresAtUtc">UTC expiry instant for the approval request.</param>
+public sealed record ToolDispatchResult(
+    string Status,
+    string? ResultJson,
+    string? ReasonCode,
+    ActionId? ActionId = null,
+    ApprovalId? ApprovalId = null,
+    DateTimeOffset? ApprovalExpiresAtUtc = null);
 
 /// <summary>Validates, authorizes, journals, executes, and verifies registered tool calls.</summary>
 public interface IToolDispatcher
@@ -633,12 +652,14 @@ public interface IToolDispatcher
 /// <param name="OwnerId">Authenticated owner identity.</param>
 /// <param name="ExpiresAtUtc">UTC expiry instant after which approval is invalid.</param>
 /// <param name="ExpectedVersion">Concurrency version used when resolving the request.</param>
+/// <param name="Status">Pending, Approved, Rejected, or Expired.</param>
 public sealed record ApprovalRequest(
     ApprovalId Id,
     ActionId ActionId,
     string OwnerId,
     DateTimeOffset ExpiresAtUtc,
-    long ExpectedVersion);
+    long ExpectedVersion,
+    string Status = "Pending");
 
 /// <summary>Creates and resolves expiring, single-use approvals bound to exact actions.</summary>
 public interface IApprovalService
@@ -652,6 +673,12 @@ public interface IApprovalService
         ActionId actionId,
         string ownerId,
         CancellationToken cancellationToken);
+
+    /// <summary>Reads one persisted approval request without changing its state.</summary>
+    /// <param name="approvalId">Approval request to read.</param>
+    /// <param name="cancellationToken">Token that cancels the read.</param>
+    /// <returns>The request, or <see langword="null"/> when absent.</returns>
+    ValueTask<ApprovalRequest?> GetAsync(ApprovalId approvalId, CancellationToken cancellationToken);
 
     /// <summary>Resolves an approval using compare-and-swap version semantics.</summary>
     /// <param name="approvalId">Approval request to resolve.</param>
@@ -1087,7 +1114,7 @@ public interface IApprovalStore
     /// <summary>Resolves a still-pending, unexpired request once using owner and version checks.</summary>
     /// <param name="id">Approval identifier.</param>
     /// <param name="ownerId">Owner identity bound to the request.</param>
-    /// <param name="status">Approved or Rejected decision.</param>
+    /// <param name="status">Approved, Rejected, or an expiry transition.</param>
     /// <param name="expectedVersion">Version previously read by the caller.</param>
     /// <param name="resolvedAtUtc">UTC resolution time used for expiry validation.</param>
     /// <param name="cancellationToken">Token that cancels the write before commit.</param>

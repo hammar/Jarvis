@@ -3,6 +3,8 @@ using PersonalAgent.Application;
 using PersonalAgent.Application.Context;
 using PersonalAgent.Application.Routing;
 using PersonalAgent.Application.TurnCoordination;
+using PersonalAgent.Application.Approvals;
+using PersonalAgent.Application.Tools;
 using PersonalAgent.Domain;
 using PersonalAgent.Infrastructure.AgentEngine.Copilot;
 using PersonalAgent.Infrastructure.Persistence;
@@ -85,14 +87,26 @@ builder.Services.AddSingleton<OwnerAuthenticationService>(services => new OwnerA
 builder.Services.AddSingleton<IConversationStore, SqliteConversationStore>();
 builder.Services.AddSingleton<IAtomicTurnOutcomeStore>(services =>
     (IAtomicTurnOutcomeStore)services.GetRequiredService<IConversationStore>());
+var toolRegistry = new ToolRegistry(Array.Empty<IToolRegistration>());
+builder.Services.AddSingleton(toolRegistry);
+builder.Services.AddSingleton<IToolRegistry>(toolRegistry);
+builder.Services.AddSingleton<IToolAuthorizationPolicy>(
+    new ToolAllowlistPolicy("m2-01-empty", Array.Empty<ToolPermission>()));
 builder.Services.AddSingleton<IMemoryStore, SqliteMemoryStore>();
 builder.Services.AddSingleton<IJobStore, SqliteJobStore>();
 builder.Services.AddSingleton<IActionJournalStore, SqliteActionJournalStore>();
 builder.Services.AddSingleton<IApprovalStore, SqliteApprovalStore>();
+builder.Services.AddSingleton<IApprovalService, ApprovalService>();
 builder.Services.AddSingleton<IAuditStore, SqliteAuditStore>();
 builder.Services.AddSingleton<SqliteBackupRestoreService>();
 builder.Services.AddSingleton<ISecretResolver, EnvironmentSecretResolver>();
-builder.Services.AddSingleton<IToolDispatcher, RejectingToolDispatcher>();
+builder.Services.AddSingleton<IToolDispatcher>(services => new ToolDispatcher(
+    services.GetRequiredService<ToolRegistry>(),
+    services.GetRequiredService<IToolAuthorizationPolicy>(),
+    services.GetRequiredService<IActionJournalStore>(),
+    services.GetRequiredService<IApprovalService>(),
+    services.GetRequiredService<IClock>(),
+    TimeSpan.FromSeconds(5)));
 builder.Services.AddSingleton(new CopilotAgentEngineOptions(
     Path.Combine(dataDirectory, "copilot-runtime"),
     localProvider,

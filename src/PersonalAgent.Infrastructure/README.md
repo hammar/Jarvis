@@ -96,6 +96,15 @@ already-selected context, exact tool catalog, deadline, and maximum tool-call
 count. The adapter does not route, approve context, or authorize a tool;
 callbacks always pass through the host's `IToolDispatcher`.
 
+M2-01 carries the authenticated owner and current request from the accepted
+host context through each callback. `ToolDispatcher` validates registered
+inputs, applies the exact host allowlist, journals action intent, and routes
+approval/verification through Application services. The current composition
+has no registered production tools or allowlist entries; tool-bearing flows
+remain unavailable until their owning feature tasks provide real handlers.
+Controlled dispatcher tests do not establish Home Assistant or live-device
+behavior.
+
 The adapter uses `LocalChatPrompt` for selected history/current-task framing
 and the supported `OnUserPromptTransformed` hook to keep the model-facing prompt
 identical to the application-owned text. Runtime-added date/XML framing caused

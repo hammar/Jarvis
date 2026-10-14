@@ -835,8 +835,16 @@ public sealed class CopilotAgentEngineContractTests(ITestOutputHelper output)
             Path.Combine(data.Path, "runtime"),
             dispatcher);
         var turnId = await CreateTurnAsync(store);
+        var request = CreateRequest(
+            turnId,
+            ProviderKind.Local,
+            "tool contract",
+            [new AgentToolDefinition(ToolName, ToolSchema, true)]) with
+        {
+            OwnerId = "owner"
+        };
         var events = await CollectAsync(engine.RunTurnAsync(
-            CreateRequest(turnId, ProviderKind.Local, "tool contract", [new AgentToolDefinition(ToolName, ToolSchema, true)]),
+            request,
             CancellationToken.None));
         var persisted = await store.ReadTurnEventsAfterAsync(turnId, 0, 1000, CancellationToken.None);
         var disconnectedPrefix = persisted.Take(1).ToArray();
@@ -848,6 +856,8 @@ public sealed class CopilotAgentEngineContractTests(ITestOutputHelper output)
 
         Assert.True(dispatcher.Calls == 1,
             $"Expected one tool dispatch; got {dispatcher.Calls}. Exposed tools: {string.Join("|", provider.Requests.SelectMany(item => item.ToolNames))}. Events: {string.Join("|", events.Select(item => item.GetType().Name))}");
+        Assert.Equal("owner", dispatcher.LastOwnerId);
+        Assert.Equal("tool contract", dispatcher.LastUserRequest);
         Assert.Single(events.OfType<ToolProposed>());
         Assert.Single(events.OfType<ToolCompleted>());
         Assert.Single(events.OfType<TurnCompleted>());
@@ -2463,6 +2473,8 @@ public sealed class CopilotAgentEngineContractTests(ITestOutputHelper output)
 
         public int Calls => Volatile.Read(ref calls);
         public string? LastArguments { get; private set; }
+        public string? LastOwnerId { get; private set; }
+        public string? LastUserRequest { get; private set; }
 
         public ValueTask<ToolDispatchResult> DispatchAsync(
             ToolDispatchRequest request,
@@ -2471,6 +2483,8 @@ public sealed class CopilotAgentEngineContractTests(ITestOutputHelper output)
             cancellationToken.ThrowIfCancellationRequested();
             Interlocked.Increment(ref calls);
             LastArguments = request.ArgumentsJson;
+            LastOwnerId = request.OwnerId;
+            LastUserRequest = request.CurrentUserRequest;
             return ValueTask.FromResult(result);
         }
     }

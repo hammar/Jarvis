@@ -49,11 +49,46 @@ IDs. Events use UTC observation times and typed outcomes. `Interrupted` is not
 success: a child process stopping or a request timing out after a side effect
 must not be described as a confirmed failure or automatically retried.
 
-Model proposals are untrusted data. A future dispatcher validates typed
-arguments, applies host policy, journals before writes, requires exact consent
-where specified, and reports uncertain physical outcomes explicitly. Cloud
-context must be a minimal inspectable packet bound to the chosen provider and
-consent; neither the Local profile nor an SDK flag is an air-gap claim.
+Model proposals are untrusted data. The M2-01 `ToolDispatcher` resolves only
+trusted registrations, strictly deserializes their typed arguments, enforces
+an exact tool/action/operation/entity allowlist, journals canonical action
+context before execution, and reports uncertain outcomes without replay.
+Unregistered tools, unsupported risk, disallowed entities, and ambiguous
+aliases cannot reach an external handler. Low-risk writes are automatically
+eligible only when trusted tool logic verifies the exact action against the
+host-supplied current user request; otherwise the dispatcher raises the action
+to approval-required. The SDK callback passes the authenticated owner and
+current request from the accepted host turn; neither is model-generated.
+Cloud context must be a minimal inspectable packet bound to the chosen
+provider and consent; neither the Local profile nor an SDK flag is an air-gap
+claim.
+
+An action ID is stable for one turn/tool-call ID, not for similar arguments in
+later requests. The persisted canonical action envelope binds validated
+arguments, resolved entity, policy content version, owner, turn/call
+provenance, and a hash of the original current request (the raw request is not
+copied into the action journal). Reusing an ID for changed content is rejected.
+Approval records bind one action ID to one owner, expire after five minutes,
+and resolve once using optimistic concurrency. Execution rechecks the exact
+canonical envelope and current policy immediately before crossing the
+side-effect boundary. Production composition currently has an empty tool
+registry and empty allowlist: no feature tool is exposed until its owning
+feature task registers a real handler.
+
+The action state machine persists `Prepared` before any external execution;
+approval-required actions move to `AwaitingApproval`, then `Executing` only
+after an exact owner decision. A command timeout/cancellation or unexpected
+handler/verification exception after execution begins is journaled `Unknown`
+and surfaced rather than treated as success or safely failed. Tool handlers
+may reconcile through observation within the dispatcher's bounded verification
+window; observation never replays the command. If a process restarts with an
+action still `Executing`, the new dispatcher treats the operation as
+interrupted and performs only bounded verification before journaling the
+observed result or `Unknown`. Concurrent duplicate calls handled by the active
+dispatcher return the in-progress journal state rather than mistaking it for a
+restart. SQLite cannot transact with Home Assistant, so `Succeeded` means the
+intended state was verified, not exactly-once physical execution. Approval UI
+and real Home Assistant handlers remain M2-04 and M2-02 respectively.
 
 M1 registers `LocalOnlyModelRouter` and `ConversationContextBuilder` as
 Application services. The router returns typed Local, Clarify, or Unsupported
