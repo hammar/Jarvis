@@ -156,6 +156,20 @@ contract. The owner was unavailable when asked during the check-in. The R6
 thread remains unresolved; passing automation does not dispose of this finding
 or make the PR ready for owner acceptance.
 
+### Exact-commit independent review
+
+An independent code-review agent inspected
+`aefba04483d7d710411a8a93b4df1818367d0abe` against merge base
+`0f4f481b31760a8a941e486921f5194c4203f205`. It examined the specification,
+accepted ADRs, changed implementation/tests/docs, and complete R1-R6 ledger.
+It found no new significant issues, confirmed the R1-R5 fixes, and independently
+confirmed R6 remains an acceptance gap at `ToolDispatcher.Recorded`. This
+read-only source review did not rerun tests or exercise live devices/UI.
+The earlier explicit no-schema/no-storage-contract-change decision remains
+binding; a second attempt to obtain a concrete R6 decision also found the
+owner unavailable. An unattended instruction to continue autonomously is not
+treated as permission to override that specific scope constraint.
+
 ## Completion evidence
 
 The following checks ran on native macOS against the review-fix tree based on
@@ -198,7 +212,7 @@ not a completion claim while R6 remains open.
   a bounded observer that never issues the action again; this is part of the
   registration contract and is covered by controlled tests, not a live
   provider/device integration.
-- The exact follow-up commit has not received a new independent review.
-  R2-R5 are implementer fixes backed by the named regressions; the existing
-  independent review was against `3840d03`. R6 remains unresolved and blocks
-  claiming the complete acceptance/disposition basis.
+- The exact runtime follow-up commit `aefba04` received the independent review
+  recorded above. R6 remains unresolved and blocks claiming the complete
+  acceptance/disposition basis. The later documentation-only commit records
+  that review without changing the reviewed runtime, tests, or contracts.
