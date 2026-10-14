@@ -307,6 +307,16 @@ ledger and relevant spec/ADRs. It did not rerun checks or establish live-device,
 cross-process or current-head SDK/Aspire/browser evidence. R6 remains deferred
 and unaccepted.
 
+The bounded independent review of exact commit
+`3cc07445c3a41b77ab4c9e48aceee015c3244525` against `95b7575` supported
+R20 with no new significant findings. It examined pre-wait original-risk
+classification, every concurrent-marker access, cancellation/active-claim
+cleanup, under-gate observation/accounting, all five new regression cases and
+retained malformed-risk/multiple-orphan controls against the complete R1-R20
+ledger and relevant spec/ADRs. This was source-only review, not independent
+gate execution or live/cross-process validation. R6 remains deferred and
+unaccepted.
+
 ## R7/R8 regression evidence
 
 - Before the production fix, the targeted R7/R8 unit regressions failed in all
