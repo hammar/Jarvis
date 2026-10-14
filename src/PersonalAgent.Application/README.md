@@ -75,6 +75,10 @@ Final send admission after the durable claim shares a short synchronous lock
 with orphan registration. A winning registration rejects the unsent proposal
 without clearing the orphan; already-admitted operations may finish. The lock
 never encloses persistence, an external handler or an await.
+Terminal replay refreshes the journal under the proposal gate and reconciles
+only its own accounting, including stale uncertainty left by cancelled recovery
+after completion. Failed refreshes and cancellation preserve markers; another
+orphan's uncertainty cannot be cleared. Replay never executes or observes.
 Recovery rechecks authorization after any proposal-gate wait, before observing.
 Definitive `NotApplied` means known failure even after uncertain delivery and
 retains only the remaining bounded attempt; an unchanged snapshot with possible

@@ -196,6 +196,7 @@ R7/R8, both labelled "Previously missed"; both are retained below. Commit
 | M2-01-R19 (Previously missed) | Medium | A stale Executing snapshot could observe after another dispatch completed, then fail its terminal CAS rather than return the winner. | Fixed in the follow-up after `a1fd7de`: reread under the proposal gate and return non-Executing state with budget reconciliation before observing. Unit/SQLite races cover Succeeded/Failed/Unknown, revoked/Unsupported policy and cancelled observation; pre-send Rejected/Expired controls preserve the winner without inventing uncertainty. |
 | M2-01-R20 (Previously missed) | High | Cancelling fresh-dispatcher orphan recovery while it waited for the proposal gate lost original write uncertainty; the successful holder then allowed a fresh equivalent send. | Fixed in the follow-up after `95b7575`: strict original-risk classification and concurrent action-ID registration precede the cancellable wait. Existing reads never add markers, malformed metadata marks then throws, and cancellation releases the active claim without removing the marker. Unit/SQLite controls prove a holder's success cannot clear the orphan, lower current risk cannot erase it, and later known recovery permits a fresh attempt. |
 | M2-01-R21 (Previously missed) | High | An equivalent call passed its early uncertainty check then awaited its claim; orphan registration could win while queued recovery was cancelled, yet the fresh handler still sent. | Fixed in the follow-up after `3f2f4e0`: final synchronous admission after the durable claim/policy/expiry checks shares a short lock with every registration. A winning marker durably rejects the unsent action without clearing the orphan. Unit/SQLite paused-claim regressions prove zero fresh sends/observations, original-read/lowered-risk behavior and a permitted fresh send after known recovery. |
+| M2-01-R22 (Previously missed) | Medium | A delayed Executing snapshot re-registered uncertainty after completion, then cancelled behind another holder; terminal replay never reconciled the stale marker and blocked the rest of the turn. | Fixed in the follow-up after `e0962dc`: terminal replay refreshes under the canonical proposal gate and reconciles only that action's accounting. Unit/SQLite races cover same/policy-changed success/failure, another unresolved orphan, bounded remaining attempts and no replay send/observation; cancelled waits and failed refreshes preserve uncertainty. |
 
 R9 uniquely identifies review comment `4273196189`, which reused the R7 label
 already assigned to the distinct approval-expiry race. Its review was against
@@ -241,6 +242,10 @@ R21 maps to `4275139725` in the full review against `3f2f4e0`. Its summary
 retained R6 and the need for current-head gate evidence, with no additional
 summary-only code findings. R20's cancellation fix remains valid; R21 closes
 the separate claim-to-admission interval it exposed.
+R22 maps to `4275341606` in the full review against `e0962dc`. Its summary
+retained R6 without additional summary-only findings. R20's conservative
+registration before cancellable waits remains intact; reconciliation on
+terminal replay repairs only a durably known action's stale marker.
 
 For R6, the concrete alternatives are explicit owner acceptance of status-only
 replay for M2-01 or authorization to extend durable terminal-result persistence
@@ -607,6 +612,42 @@ deferred and unaccepted.
 - No schema/storage contracts, dependencies, actual tools or SDK/process-launch
   behavior changed. The complete R1-R21 ledger and unaccepted R6 are retained;
   dedicated current-head SDK/Aspire/browser CI remains separate.
+
+## R22 regression evidence
+
+- Before the fix, all seven new unit cases failed: six could not admit the
+  fresh remaining attempt after terminal replay; the read-failure control
+  proved replay skipped the required journal refresh.
+- Terminal replay now waits for the same canonical proposal gate, refreshes
+  the durable entry, then reuses distinct-action accounting. Both unchanged
+  and policy-only-changed terminal paths and outside-gate approval/arbitration
+  replay paths use it. Existing under-gate accounting does not reacquire the
+  semaphore. Nonterminal progress responses retain their existing behavior.
+- Seven unit and three real-SQLite cases cover known success/failure, changed
+  policy, own-marker-only cleanup, no extra execution/observation, unchanged
+  SQLite terminal state/version and the exact remaining failure budget.
+  Unit controls also cancel queued terminal replay and fail its refreshed read,
+  proving uncertainty survives either failure.
+- Paused-read release is deliberately inline so stale registration reaches its
+  gate wait before cancellation. Every case also asserts a fresh equivalent
+  call is blocked before terminal reconciliation, guarding against accidentally
+  cancelling the fake read before it registered uncertainty. All waits have
+  deadlines; no production test controls or arbitrary sleeps were added.
+- No schema/storage contracts, dependencies, actual tools or SDK/process-launch
+  behavior changed. R1-R21 dispositions and R6's unaccepted gap remain intact.
+  Current-head SDK/Aspire/browser CI is separate from local follow-up checks.
+- Using the same isolated MSBuild output and unchanged scripts,
+  `tools/validate.sh build`, `unit` (265/265), `integration` (267/267),
+  `coverage`, `architecture` (6/6), and `docs` passed. Discovery was verified;
+  formatting/Release completed with zero warnings/errors.
+- Coverage inputs:
+  `artifacts/coverage/unit/20261014T194012Z-61354` and
+  `artifacts/coverage/integration/20261014T194054Z-61466`. All configured gates
+  passed: changed lines 99.1% (922/930), Application lines 98.5% (1853/1881)
+  and branches 94.3% (827/877).
+- `origin/main` was fetched again: zero commits behind, with no integration or
+  conflict resolution needed. Independent exact-commit source review follows
+  the runtime/test/documentation commit; its result is recorded separately.
 
 ## Earlier full-gate evidence
 

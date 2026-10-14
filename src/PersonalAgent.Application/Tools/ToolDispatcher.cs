@@ -142,7 +142,7 @@ public sealed class ToolDispatcher : IToolDispatcher
             {
                 if (IsTerminal(action.Status))
                 {
-                    return Recorded(action);
+                    return Recorded(await ReconcileTerminalReplayAsync(action, request, draft, cancellationToken));
                 }
 
                 if (action.Status == "Executing")
@@ -163,7 +163,7 @@ public sealed class ToolDispatcher : IToolDispatcher
 
         if (IsTerminal(action.Status))
         {
-            return Recorded(action);
+            return Recorded(await ReconcileTerminalReplayAsync(action, request, draft, cancellationToken));
         }
 
         if (action.Status == "Executing")
@@ -263,7 +263,7 @@ public sealed class ToolDispatcher : IToolDispatcher
 
         if (action.Status != "AwaitingApproval")
         {
-            return Recorded(action);
+            return Recorded(await ReconcileTerminalReplayAsync(action, request, draft, cancellationToken));
         }
 
         var approvalId = new ApprovalId(actionId.Value);
@@ -284,7 +284,7 @@ public sealed class ToolDispatcher : IToolDispatcher
 
         if (action.Status != "AwaitingApproval")
         {
-            return Recorded(action);
+            return Recorded(await ReconcileTerminalReplayAsync(action, request, draft, cancellationToken));
         }
 
         if (approval.Status == "Pending" && clock.UtcNow.ToUniversalTime() >= approval.ExpiresAtUtc)
@@ -311,7 +311,7 @@ public sealed class ToolDispatcher : IToolDispatcher
                     ?? throw new InvalidOperationException("The action disappeared while rereading its approval decision.");
                 if (action.Status != "AwaitingApproval")
                 {
-                    return Recorded(action);
+                    return Recorded(await ReconcileTerminalReplayAsync(action, request, draft, cancellationToken));
                 }
             }
         }
@@ -329,6 +329,7 @@ public sealed class ToolDispatcher : IToolDispatcher
                 action = currentAction;
             }
 
+            action = await ReconcileTerminalReplayAsync(action, request, draft, cancellationToken);
             return new(action.Status, null, $"approval_{approval.Status.ToLowerInvariant()}", action.Id, approvalId);
         }
 
@@ -351,6 +352,7 @@ public sealed class ToolDispatcher : IToolDispatcher
         if (clock.UtcNow.ToUniversalTime() >= approval.ExpiresAtUtc)
         {
             action = await TransitionAsync(action, "Expired", cancellationToken);
+            action = await ReconcileTerminalReplayAsync(action, request, draft, cancellationToken);
             return action.Status == "Expired"
                 ? new("Expired", null, "approval_expired_before_execution", action.Id, approvalId)
                 : Recorded(action);
@@ -373,14 +375,14 @@ public sealed class ToolDispatcher : IToolDispatcher
     {
         if (action.Status is not ("Prepared" or "AwaitingApproval"))
         {
-            return Recorded(action);
+            return Recorded(await ReconcileTerminalReplayAsync(action, request, draft, cancellationToken));
         }
 
         if (!activeExecutions.TryAdd(action.Id, 0))
         {
             var current = await journal.GetAsync(action.Id, cancellationToken)
                 ?? throw new InvalidOperationException("The action disappeared during execution arbitration.");
-            return Recorded(current);
+            return Recorded(await ReconcileTerminalReplayAsync(current, request, draft, cancellationToken));
         }
 
         try
@@ -642,7 +644,7 @@ public sealed class ToolDispatcher : IToolDispatcher
         {
             var current = await journal.GetAsync(action.Id, cancellationToken)
                 ?? throw new InvalidOperationException("The action disappeared during interrupted-execution recovery.");
-            return Recorded(current);
+            return Recorded(await ReconcileTerminalReplayAsync(current, request, draft, cancellationToken));
         }
 
         try
@@ -792,6 +794,32 @@ public sealed class ToolDispatcher : IToolDispatcher
         }
 
         return new(finalStatus, null, reasonCode, completed.Id);
+    }
+
+    private async ValueTask<ActionJournalEntry> ReconcileTerminalReplayAsync(
+        ActionJournalEntry action,
+        ToolDispatchRequest request,
+        ToolActionDraft draft,
+        CancellationToken cancellationToken)
+    {
+        if (!IsTerminal(action.Status))
+        {
+            return action;
+        }
+
+        var budget = GetFailureBudget(request, draft);
+        await budget.Gate.WaitAsync(cancellationToken);
+        try
+        {
+            var current = await journal.GetAsync(action.Id, cancellationToken)
+                ?? throw new InvalidOperationException("The action disappeared during terminal replay reconciliation.");
+            RecordBudgetOutcome(budget, current.Id, current.Status);
+            return current;
+        }
+        finally
+        {
+            budget.Gate.Release();
+        }
     }
 
     private FailureBudget GetFailureBudget(ToolDispatchRequest request, ToolActionDraft draft)

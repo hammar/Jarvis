@@ -753,6 +753,147 @@ public sealed class ToolDispatcherUnitTests
     }
 
     [Theory]
+    [InlineData(false, false, false, false)]
+    [InlineData(false, true, false, false)]
+    [InlineData(true, false, false, false)]
+    [InlineData(true, true, false, false)]
+    [InlineData(false, false, true, false)]
+    [InlineData(true, true, true, false)]
+    [InlineData(false, false, false, true)]
+    [Trait("Category", "Unit")]
+    public async Task TerminalReplayReconcilesCancelledStaleRecoveryWithoutClearingAnotherOrphan(
+        bool failed, bool changedPolicy, bool anotherOrphan, bool failReplayRead)
+    {
+        using var fixture = new Fixture();
+        var otherRequest = Request with { CallId = "other-unresolved-orphan" };
+        if (anotherOrphan)
+        {
+            await fixture.MarkExecutingAsync(otherRequest);
+        }
+        var restarted = fixture.CreateRestartedDispatcher();
+        var executing = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseExecution = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.Execution = async (_, _, token) =>
+        {
+            executing.SetResult();
+            await releaseExecution.Task.WaitAsync(TimeSpan.FromSeconds(5), token);
+            return new ToolExecutionOutcome(
+                failed ? ToolExecutionStatus.Failed : ToolExecutionStatus.Completed, null, null);
+        };
+        var first = restarted.DispatchAsync(Request, CancellationToken.None).AsTask();
+        await executing.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        var reading = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        // Inline completion resumes the stale read through registration to the next gate wait before cancellation.
+        var releaseRead = new TaskCompletionSource();
+        using var readDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        using var readDeadlineRegistration = readDeadline.Token.Register(
+            () => releaseRead.TrySetCanceled(readDeadline.Token));
+        var paused = 0;
+        fixture.Journal.AfterRead = async (entry, token) =>
+        {
+            if (entry?.Status == "Executing" && Interlocked.CompareExchange(ref paused, 1, 0) == 0)
+            {
+                reading.SetResult();
+                await releaseRead.Task;
+            }
+        };
+        using var cancellation = new CancellationTokenSource();
+        var stale = restarted.DispatchAsync(Request, cancellation.Token).AsTask();
+        await reading.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        releaseExecution.SetResult();
+        var winner = await first;
+        Assert.Equal(failed ? "Failed" : "Succeeded", winner.Status);
+        var holding = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseHolder = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.Execution = async (_, _, token) =>
+        {
+            holding.SetResult();
+            await releaseHolder.Task.WaitAsync(TimeSpan.FromSeconds(5), token);
+            return new ToolExecutionOutcome(ToolExecutionStatus.Completed, null, null);
+        };
+        var holder = restarted.DispatchAsync(
+            Request with { CallId = "holding-stale-recovery-gate" }, CancellationToken.None).AsTask();
+        await holding.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        releaseRead.SetResult();
+        cancellation.Cancel();
+        try
+        {
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => stale);
+            using var replayCancellation = new CancellationTokenSource();
+            var queuedReplay = restarted.DispatchAsync(Request, replayCancellation.Token).AsTask();
+            Assert.False(queuedReplay.IsCompleted);
+            replayCancellation.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => queuedReplay);
+            if (anotherOrphan)
+            {
+                using var otherCancellation = new CancellationTokenSource();
+                var other = restarted.DispatchAsync(otherRequest, otherCancellation.Token).AsTask();
+                otherCancellation.Cancel();
+                await Assert.ThrowsAnyAsync<OperationCanceledException>(() => other);
+            }
+        }
+        finally
+        {
+            releaseHolder.SetResult();
+            Assert.Equal("Succeeded", (await holder).Status);
+        }
+        var sends = fixture.ExecutionCount;
+        var observations = fixture.VerificationCount;
+        var beforeReplay = await restarted.DispatchAsync(
+            Request with { CallId = "before-terminal-reconciliation" }, CancellationToken.None);
+        Assert.Equal("equivalent_write_outcome_unknown", beforeReplay.ReasonCode);
+        Assert.Equal(sends, fixture.ExecutionCount);
+        if (changedPolicy)
+        {
+            fixture.Policy.Replace("new-policy");
+        }
+        if (failReplayRead)
+        {
+            var reads = 0;
+            fixture.Journal.AfterRead = (entry, _) =>
+            {
+                if (entry?.Id == winner.ActionId && Interlocked.Increment(ref reads) == 2)
+                {
+                    throw new InvalidOperationException("controlled terminal refresh failure");
+                }
+                return Task.CompletedTask;
+            };
+            await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+                await restarted.DispatchAsync(Request, CancellationToken.None));
+            var blocked = await restarted.DispatchAsync(
+                Request with { CallId = "after-failed-terminal-refresh" }, CancellationToken.None);
+            Assert.Equal("equivalent_write_outcome_unknown", blocked.ReasonCode);
+            fixture.Journal.AfterRead = null;
+        }
+        var replay = await restarted.DispatchAsync(Request, CancellationToken.None);
+        Assert.Equal(winner.Status, replay.Status);
+        Assert.Equal("recorded_action_outcome", replay.ReasonCode);
+        Assert.Equal(sends, fixture.ExecutionCount);
+        Assert.Equal(observations, fixture.VerificationCount);
+        fixture.Execution = (_, _, _) =>
+            ValueTask.FromResult(new ToolExecutionOutcome(ToolExecutionStatus.Failed, null, "known_failure"));
+        if (anotherOrphan)
+        {
+            var blocked = await restarted.DispatchAsync(
+                Request with { CallId = "other-orphan-must-remain-blocked" }, CancellationToken.None);
+            Assert.Equal("equivalent_write_outcome_unknown", blocked.ReasonCode);
+            Assert.Equal(sends, fixture.ExecutionCount);
+            Assert.Equal("Succeeded", (await restarted.DispatchAsync(otherRequest, CancellationToken.None)).Status);
+        }
+        Assert.Equal("Failed", (await restarted.DispatchAsync(
+            Request with { CallId = "fresh-after-terminal-reconciliation" }, CancellationToken.None)).Status);
+        if (!failed)
+        {
+            Assert.Equal("Failed", (await restarted.DispatchAsync(
+                Request with { CallId = "second-failure-after-terminal-reconciliation" }, CancellationToken.None)).Status);
+        }
+        var stopped = await restarted.DispatchAsync(
+            Request with { CallId = "past-reconciled-failure-budget" }, CancellationToken.None);
+        Assert.Equal("equivalent_failure_limit", stopped.ReasonCode);
+        Assert.Equal(sends + (failed ? 1 : 2), fixture.ExecutionCount);
+    }
+
+    [Theory]
     [InlineData("write")]
     [InlineData("read")]
     [InlineData("lowered-risk")]

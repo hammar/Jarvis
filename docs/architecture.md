@@ -153,6 +153,12 @@ policy/expiry checks. Admission and orphan registration share one short lock:
 registration that wins prevents the unsent action, while already-admitted
 operations may finish. No persistence, external callback or await runs under
 that lock. Rejection clears only the unsent action's own marker, not the orphan.
+Terminal replay also acquires the proposal gate and refreshes the journal before
+reconciling distinct failures and clearing only its own known-outcome marker.
+This repairs stale uncertainty registered by a delayed Executing read whose
+gate wait was cancelled after completion. Cancellation or a failed refresh
+preserves uncertainty; replay neither sends nor observes, and never clears
+another orphan's marker.
 The engine releases ephemeral accounting only
 after the turn's callbacks stop. Restart interrupts turns rather than resuming
 their inference, so these counters are not a durable retry mechanism.

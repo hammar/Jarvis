@@ -91,6 +91,124 @@ public sealed class ToolDispatcherTests
     }
 
     [Theory]
+    [InlineData(false, false, false)]
+    [InlineData(true, true, false)]
+    [InlineData(false, true, true)]
+    [Trait("Category", "Integration")]
+    public async Task SqliteTerminalReplayReconcilesCancelledStaleRecovery(
+        bool failed, bool changedPolicy, bool anotherOrphan)
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var otherRequest = PorchRequest with { CallId = "other-sqlite-orphan" };
+        if (anotherOrphan)
+        {
+            var other = await fixture.Dispatcher.DispatchAsync(otherRequest, CancellationToken.None);
+            var entry = (await fixture.Journal.GetAsync(other.ActionId!.Value, CancellationToken.None))!;
+            await fixture.Journal.UpdateStatusAsync(
+                entry.Id, "Executing", entry.Version, fixture.Clock.UtcNow, CancellationToken.None);
+        }
+        var reading = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        // Inline release reaches registration and the proposal wait before cancellation.
+        var releaseRead = new TaskCompletionSource();
+        using var readDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        using var readDeadlineRegistration = readDeadline.Token.Register(
+            () => releaseRead.TrySetCanceled(readDeadline.Token));
+        var paused = 0;
+        var journal = new PausedJournal(fixture.Journal, async (entry, _) =>
+        {
+            if (entry?.Id == fixture.ActionId(PorchRequest) && entry.Status == "Executing"
+                && Interlocked.CompareExchange(ref paused, 1, 0) == 0)
+            {
+                reading.SetResult();
+                await releaseRead.Task;
+            }
+        });
+        var restarted = fixture.CreateRestartedDispatcher(journal);
+        var executing = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseExecution = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.SetExecution(async (_, _, token) =>
+        {
+            executing.SetResult();
+            await releaseExecution.Task.WaitAsync(TimeSpan.FromSeconds(5), token);
+            return new ToolExecutionOutcome(
+                failed ? ToolExecutionStatus.Failed : ToolExecutionStatus.Completed, null, null);
+        });
+        var first = restarted.DispatchAsync(PorchRequest, CancellationToken.None).AsTask();
+        await executing.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        using var cancellation = new CancellationTokenSource();
+        var stale = restarted.DispatchAsync(PorchRequest, cancellation.Token).AsTask();
+        await reading.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        releaseExecution.SetResult();
+        var winner = await first;
+        Assert.Equal(failed ? "Failed" : "Succeeded", winner.Status);
+        var holding = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseHolder = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.SetExecution(async (_, _, token) =>
+        {
+            holding.SetResult();
+            await releaseHolder.Task.WaitAsync(TimeSpan.FromSeconds(5), token);
+            return new ToolExecutionOutcome(ToolExecutionStatus.Completed, null, null);
+        });
+        var holder = restarted.DispatchAsync(
+            PorchRequest with { CallId = "sqlite-terminal-replay-holder" }, CancellationToken.None).AsTask();
+        await holding.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        releaseRead.SetResult();
+        cancellation.Cancel();
+        try
+        {
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => stale);
+            if (anotherOrphan)
+            {
+                using var otherCancellation = new CancellationTokenSource();
+                var other = restarted.DispatchAsync(otherRequest, otherCancellation.Token).AsTask();
+                otherCancellation.Cancel();
+                await Assert.ThrowsAnyAsync<OperationCanceledException>(() => other);
+            }
+        }
+        finally
+        {
+            releaseHolder.SetResult();
+            Assert.Equal("Succeeded", (await holder).Status);
+        }
+        var sends = fixture.ExecutionCount;
+        var observations = fixture.VerificationCount;
+        var beforeReplay = await restarted.DispatchAsync(
+            PorchRequest with { CallId = "before-sqlite-terminal-reconciliation" }, CancellationToken.None);
+        Assert.Equal("equivalent_write_outcome_unknown", beforeReplay.ReasonCode);
+        Assert.Equal(sends, fixture.ExecutionCount);
+        var persisted = (await fixture.Journal.GetAsync(winner.ActionId!.Value, CancellationToken.None))!;
+        if (changedPolicy)
+        {
+            fixture.Policy.Replace("new-policy", fixture.AllowedPermission);
+        }
+        Assert.Equal(winner.Status, (await restarted.DispatchAsync(PorchRequest, CancellationToken.None)).Status);
+        Assert.Equal(persisted, await fixture.Journal.GetAsync(winner.ActionId.Value, CancellationToken.None));
+        Assert.Equal(sends, fixture.ExecutionCount);
+        Assert.Equal(observations, fixture.VerificationCount);
+        fixture.SetExecution((_, _, _) =>
+            ValueTask.FromResult(new ToolExecutionOutcome(ToolExecutionStatus.Failed, null, "known_failure")));
+        if (anotherOrphan)
+        {
+            var blocked = await restarted.DispatchAsync(
+                PorchRequest with { CallId = "other-sqlite-orphan-remains" }, CancellationToken.None);
+            Assert.Equal("equivalent_write_outcome_unknown", blocked.ReasonCode);
+            Assert.Equal(sends, fixture.ExecutionCount);
+            Assert.Equal("Succeeded", (await restarted.DispatchAsync(otherRequest, CancellationToken.None)).Status);
+        }
+        Assert.Equal("Failed", (await restarted.DispatchAsync(
+            PorchRequest with { CallId = "fresh-after-sqlite-terminal-replay" }, CancellationToken.None)).Status);
+        if (!failed)
+        {
+            Assert.Equal("Failed", (await restarted.DispatchAsync(
+                PorchRequest with { CallId = "second-sqlite-terminal-replay-failure" }, CancellationToken.None)).Status);
+        }
+        var stopped = await restarted.DispatchAsync(
+            PorchRequest with { CallId = "past-sqlite-terminal-replay-budget" }, CancellationToken.None);
+        Assert.Equal("equivalent_failure_limit", stopped.ReasonCode);
+        Assert.Equal(sends + (failed ? 1 : 2), fixture.ExecutionCount);
+    }
+
+    [Theory]
     [InlineData(ToolRiskClass.LowRiskWrite)]
     [InlineData(ToolRiskClass.ReadOnly)]
     [Trait("Category", "Integration")]
