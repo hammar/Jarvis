@@ -145,7 +145,6 @@ public sealed class ToolDispatcher : IToolDispatcher
                 {
                     return await ReconcileInterruptedExecutionAsync(
                         action, preparation.Arguments!, registration, draft, request,
-                        authorization.Allowed && authorization.EffectiveRisk != ToolRiskClass.Unsupported,
                         cancellationToken);
                 }
             }
@@ -171,7 +170,6 @@ public sealed class ToolDispatcher : IToolDispatcher
                 registration,
                 draft,
                 request,
-                authorization.Allowed && authorization.EffectiveRisk != ToolRiskClass.Unsupported,
                 cancellationToken);
         }
 
@@ -601,7 +599,7 @@ public sealed class ToolDispatcher : IToolDispatcher
         var finalStatus = verification.Status switch
         {
             ToolVerificationStatus.Verified => "Succeeded",
-            ToolVerificationStatus.NotApplied when execution.Status == ToolExecutionStatus.Completed => "Failed",
+            ToolVerificationStatus.NotApplied => "Failed",
             _ => "Unknown"
         };
         var reasonCode = finalStatus switch
@@ -625,7 +623,6 @@ public sealed class ToolDispatcher : IToolDispatcher
         IRuntimeToolRegistration registration,
         ToolActionDraft draft,
         ToolDispatchRequest request,
-        bool observationAllowed,
         CancellationToken cancellationToken)
     {
         if (!activeExecutions.TryAdd(action.Id, 0))
@@ -641,8 +638,11 @@ public sealed class ToolDispatcher : IToolDispatcher
             await budget.Gate.WaitAsync(cancellationToken);
             try
             {
+                var authorization = policy.Evaluate(request.ToolName, draft, registration.RiskClass);
                 var result = await ObserveInterruptedExecutionAsync(
-                    action, arguments, registration, draft, observationAllowed, cancellationToken);
+                    action, arguments, registration, draft,
+                    authorization.Allowed && authorization.EffectiveRisk != ToolRiskClass.Unsupported,
+                    cancellationToken);
                 RecordBudgetOutcome(budget, action.Id, result.Status);
                 return result;
             }

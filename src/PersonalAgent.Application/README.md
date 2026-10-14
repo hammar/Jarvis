@@ -59,6 +59,10 @@ Observation-only recovery shares the proposal gate and updates distinct-action
 failure accounting only after journaling. A known recovered outcome clears
 only its own write uncertainty; other actions' uncertainty and unsuccessful
 observation/journaling remain blocked.
+Recovery rechecks authorization after any proposal-gate wait, before observing.
+Definitive `NotApplied` means known failure even after uncertain delivery and
+retains only the remaining bounded attempt; an unchanged snapshot with possible
+late application must remain `Unknown`, not authorize a blind retry.
 `IToolDispatcher.ReleaseTurn` releases only ephemeral failure accounting once
 all turn callbacks have stopped; durable action identity remains authoritative.
 T03 supports status-only replay, not replay of the original result JSON/reason.

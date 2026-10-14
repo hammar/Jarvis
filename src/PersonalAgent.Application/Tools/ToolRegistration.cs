@@ -97,6 +97,8 @@ public enum ToolVerificationStatus
     /// <summary>Current state satisfies the intended action.</summary>
     Verified,
     /// <summary>The adapter established that the requested effect did not occur.</summary>
+    /// <remarks>An unchanged snapshot after uncertain delivery is insufficient if late application remains possible;
+    /// report <see cref="Unknown"/> until non-application can be established.</remarks>
     NotApplied,
     /// <summary>Observation could not determine whether the action took effect.</summary>
     Unknown

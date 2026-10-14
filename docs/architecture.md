@@ -109,6 +109,11 @@ dispatcher return the in-progress journal state rather than mistaking it for a
 restart. SQLite cannot transact with Home Assistant, so `Succeeded` means the
 intended state was verified, not exactly-once physical execution. Approval UI
 and real Home Assistant handlers remain M2-04 and M2-02 respectively.
+Definitive `NotApplied` verification records `Failed` even after an `Unknown`
+execution result, consistently with interrupted-execution recovery. It permits
+only the remaining known-failure attempt, not an automatic retry. An unchanged
+snapshot after uncertain delivery is not definitive when late application
+remains possible; the adapter must report `Unknown` in that case.
 
 Equivalent proposals within one host turn share a two-failure budget independent
 of call ID, argument property order, or resolved aliases. Equivalent executions
@@ -133,8 +138,10 @@ after the turn's callbacks stop. Restart interrupts turns rather than resuming
 their inference, so these counters are not a durable retry mechanism.
 
 A policy-only change does not strand an interrupted `Executing` action.
-Redispatch observes it only if the current policy still permits the capability;
-otherwise it records `Unknown` without observation. Active execution arbitration
+Redispatch reevaluates policy after acquiring the equivalent-proposal gate,
+immediately before observation. If the current permission is denied or
+Unsupported, it records `Unknown` without observing; an allowed policy-version
+change still permits observation. Active execution arbitration
 still applies, including when policy changes while a handler is running.
 
 **Status-only replay limitation:** the frozen T03 journal retains canonical

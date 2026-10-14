@@ -327,6 +327,33 @@ public sealed class ToolDispatcherTests
 
     [Fact]
     [Trait("Category", "Integration")]
+    public async Task DefinitiveNonApplicationAfterUnknownDeliveryAllowsOnlyOneFreshRetry()
+    {
+        using var fixture = await Fixture.CreateAsync(
+            execution: (_, _, _) => ValueTask.FromResult(
+                new ToolExecutionOutcome(ToolExecutionStatus.Unknown, null, "transport_timeout")),
+            verification: (_, _, _, _) => ValueTask.FromResult(
+                new ToolVerificationOutcome(ToolVerificationStatus.NotApplied, "definitively_not_applied")));
+
+        var first = await fixture.Dispatcher.DispatchAsync(PorchRequest, CancellationToken.None);
+        var replay = await fixture.Dispatcher.DispatchAsync(PorchRequest, CancellationToken.None);
+        var second = await fixture.Dispatcher.DispatchAsync(
+            PorchRequest with { CallId = "second-definitive-failure" }, CancellationToken.None);
+        var stopped = await fixture.Dispatcher.DispatchAsync(
+            PorchRequest with { CallId = "third-definitive-failure" }, CancellationToken.None);
+
+        Assert.Equal("Failed", first.Status);
+        Assert.Equal("Failed", replay.Status);
+        Assert.Equal("Failed", second.Status);
+        Assert.Equal("Rejected", stopped.Status);
+        Assert.Equal("equivalent_failure_limit", stopped.ReasonCode);
+        Assert.Equal("Failed", (await fixture.Journal.GetAsync(first.ActionId!.Value, CancellationToken.None))!.Status);
+        Assert.Equal(2, fixture.ExecutionCount);
+        Assert.Equal(2, fixture.VerificationCount);
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
     public async Task FailedExecutionAndConfirmedNotAppliedVerificationRemainFailed()
     {
         using var knownFailure = await Fixture.CreateAsync(

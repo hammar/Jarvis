@@ -752,6 +752,80 @@ public sealed class ToolDispatcherUnitTests
         Assert.Equal(3, fixture.VerificationCount);
     }
 
+    [Theory]
+    [InlineData(ToolExecutionStatus.Completed)]
+    [InlineData(ToolExecutionStatus.Unknown)]
+    [Trait("Category", "Unit")]
+    public async Task DefinitiveNonApplicationPermitsOnlyTheSecondEquivalentAttempt(ToolExecutionStatus executionStatus)
+    {
+        using var fixture = new Fixture();
+        fixture.Execution = (_, _, _) =>
+            ValueTask.FromResult(new ToolExecutionOutcome(executionStatus, null, "transport_result"));
+        fixture.Verification = (_, _, _, _) =>
+            ValueTask.FromResult(new ToolVerificationOutcome(ToolVerificationStatus.NotApplied, "definitively_not_applied"));
+
+        var first = await fixture.Dispatcher.DispatchAsync(Request, CancellationToken.None);
+        Assert.Equal("Failed", first.Status);
+        Assert.Equal("Failed", fixture.Journal.Entries.Single().Status);
+        Assert.Equal("Failed", (await fixture.Dispatcher.DispatchAsync(Request, CancellationToken.None)).Status);
+        Assert.Equal(1, fixture.ExecutionCount);
+        Assert.Equal("Failed", (await fixture.Dispatcher.DispatchAsync(
+            Request with { CallId = "second-definitively-failed-attempt" }, CancellationToken.None)).Status);
+        var stopped = await fixture.Dispatcher.DispatchAsync(
+            Request with { CallId = "third-definitively-failed-attempt" }, CancellationToken.None);
+        Assert.Equal("Rejected", stopped.Status);
+        Assert.Equal("equivalent_failure_limit", stopped.ReasonCode);
+        Assert.Equal(2, fixture.ExecutionCount);
+        Assert.Equal(2, fixture.VerificationCount);
+    }
+
+    [Theory]
+    [InlineData("denied")]
+    [InlineData("unsupported")]
+    [InlineData("allowed")]
+    [Trait("Category", "Unit")]
+    public async Task QueuedRecoveryRechecksCurrentAuthorizationBeforeObserving(string permission)
+    {
+        using var fixture = new Fixture(ToolRiskClass.ReadOnly);
+        await fixture.MarkExecutingAsync(Request);
+        var executing = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseExecution = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.Execution = async (_, _, token) =>
+        {
+            executing.SetResult();
+            await releaseExecution.Task.WaitAsync(TimeSpan.FromSeconds(5), token);
+            return new ToolExecutionOutcome(ToolExecutionStatus.Failed, null, "known_failure");
+        };
+        var first = fixture.Dispatcher.DispatchAsync(
+            Request with { CallId = "holding-recovery-gate" }, CancellationToken.None).AsTask();
+        await executing.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        var recovery = fixture.Dispatcher.DispatchAsync(Request, CancellationToken.None).AsTask();
+        if (permission == "unsupported")
+        {
+            fixture.Policy.AllowUnsupported = true;
+        }
+        else if (permission == "denied")
+        {
+            fixture.Policy.RevokePermissions();
+        }
+        else
+        {
+            fixture.Policy.Replace("policy-v2");
+        }
+
+        releaseExecution.SetResult();
+        Assert.Equal("Failed", (await first).Status);
+        var result = await recovery.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.Equal(permission == "allowed" ? "Succeeded" : "Unknown", result.Status);
+        if (permission != "allowed")
+        {
+            Assert.Equal("interrupted_execution_observation_not_permitted", result.ReasonCode);
+        }
+        Assert.Equal(permission == "allowed" ? 2 : 1, fixture.VerificationCount);
+        Assert.Equal(2, fixture.ExecutionCount);
+        Assert.Equal(result.Status, fixture.Journal.Entries.Single(entry => entry.Id == result.ActionId).Status);
+    }
+
     [Fact]
     [Trait("Category", "Unit")]
     public async Task ExpiredPendingApprovalConflictRemainsVisibleWhenNoDecisionWasRecorded()
@@ -1728,6 +1802,7 @@ public sealed class ToolDispatcherUnitTests
         private ToolAllowlistPolicy current = Create(version);
 
         public void Replace(string newVersion) => current = Create(newVersion);
+        public void RevokePermissions() => current = new ToolAllowlistPolicy("revoked", []);
 
         public ToolAuthorizationDecision Evaluate(
             string toolName,
