@@ -148,6 +148,11 @@ Original write risk is registered in a concurrent action-ID set before
 cancellable proposal-gate acquisition. Cancelling queued recovery releases its
 active claim, not the unresolved write marker. Valid original reads never add
 a marker; malformed risk metadata adds one before surfacing its error.
+Fresh execution has a final synchronous admission after its durable claim and
+policy/expiry checks. Admission and orphan registration share one short lock:
+registration that wins prevents the unsent action, while already-admitted
+operations may finish. No persistence, external callback or await runs under
+that lock. Rejection clears only the unsent action's own marker, not the orphan.
 The engine releases ephemeral accounting only
 after the turn's callbacks stop. Restart interrupts turns rather than resuming
 their inference, so these counters are not a durable retry mechanism.

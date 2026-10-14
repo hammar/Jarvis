@@ -389,7 +389,7 @@ public sealed class ToolDispatcher : IToolDispatcher
             await budget.Gate.WaitAsync(cancellationToken);
             try
             {
-                if (!budget.UncertainWrites.IsEmpty)
+                if (budget.HasUncertainWrites)
                 {
                     action = await TransitionAsync(action, "Rejected", cancellationToken);
                     return new(action.Status, null, "equivalent_write_outcome_unknown", action.Id);
@@ -416,7 +416,7 @@ public sealed class ToolDispatcher : IToolDispatcher
 
                 if (mayWrite && result.Status == "Unknown")
                 {
-                    budget.UncertainWrites.TryAdd(action.Id, 0);
+                    budget.RegisterUncertainWrite(action.Id);
                 }
 
                 RecordBudgetOutcome(budget, action.Id, result.Status);
@@ -493,10 +493,10 @@ public sealed class ToolDispatcher : IToolDispatcher
             return new(rejected.Status, null, "policy_changed_before_execution", rejected.Id);
         }
 
-        // Keep equivalent writes blocked if sending, verification, or terminal journaling throws.
-        if (mayWrite)
+        if (!budget.TryAdmitExecution(action.Id, mayWrite))
         {
-            budget.UncertainWrites.TryAdd(action.Id, 0);
+            var rejected = await TransitionAsync(action, "Rejected", CancellationToken.None);
+            return new(rejected.Status, null, "equivalent_write_outcome_unknown", rejected.Id);
         }
         ToolExecutionOutcome execution;
         try
@@ -657,14 +657,14 @@ public sealed class ToolDispatcher : IToolDispatcher
             }
             catch (Exception exception) when (exception is JsonException or InvalidOperationException)
             {
-                budget.UncertainWrites.TryAdd(action.Id, 0);
+                budget.RegisterUncertainWrite(action.Id);
                 throw;
             }
 
             // Register original write risk before cancellable gate acquisition; valid reads never add a marker.
             if (originalRisk != ToolRiskClass.ReadOnly)
             {
-                budget.UncertainWrites.TryAdd(action.Id, 0);
+                budget.RegisterUncertainWrite(action.Id);
             }
             await budget.Gate.WaitAsync(cancellationToken);
             try
@@ -822,7 +822,7 @@ public sealed class ToolDispatcher : IToolDispatcher
 
         if (status is "Succeeded" or "Failed" or "Rejected" or "Expired")
         {
-            budget.UncertainWrites.TryRemove(actionId, out _);
+            budget.ClearUncertainWrite(actionId);
         }
     }
 
@@ -1049,8 +1049,38 @@ public sealed class ToolDispatcher : IToolDispatcher
 
     private sealed class FailureBudget
     {
+        private readonly object sendAdmission = new();
+        private readonly ConcurrentDictionary<ActionId, byte> uncertainWrites = new();
+
         public SemaphoreSlim Gate { get; } = new(1, 1);
         public HashSet<ActionId> FailedActions { get; } = [];
-        public ConcurrentDictionary<ActionId, byte> UncertainWrites { get; } = new();
+        public bool HasUncertainWrites => !uncertainWrites.IsEmpty;
+
+        public void RegisterUncertainWrite(ActionId actionId)
+        {
+            lock (sendAdmission)
+            {
+                uncertainWrites.TryAdd(actionId, 0);
+            }
+        }
+
+        public bool TryAdmitExecution(ActionId actionId, bool mayWrite)
+        {
+            // Admission linearizes with orphan registration; no external callback runs under this lock.
+            lock (sendAdmission)
+            {
+                if (HasUncertainWrites)
+                {
+                    return false;
+                }
+                if (mayWrite)
+                {
+                    uncertainWrites.TryAdd(actionId, 0);
+                }
+                return true;
+            }
+        }
+
+        public void ClearUncertainWrite(ActionId actionId) => uncertainWrites.TryRemove(actionId, out _);
     }
 }

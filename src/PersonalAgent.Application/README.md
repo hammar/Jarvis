@@ -71,6 +71,10 @@ observing again; known pre-send rejection/expiry does not invent uncertainty.
 Original write risk is registered thread-safely before cancellable gate waits,
 so cancelling queued recovery cannot discard an orphan's marker when another
 action completes. Valid reads do not add markers; malformed metadata does.
+Final send admission after the durable claim shares a short synchronous lock
+with orphan registration. A winning registration rejects the unsent proposal
+without clearing the orphan; already-admitted operations may finish. The lock
+never encloses persistence, an external handler or an await.
 Recovery rechecks authorization after any proposal-gate wait, before observing.
 Definitive `NotApplied` means known failure even after uncertain delivery and
 retains only the remaining bounded attempt; an unchanged snapshot with possible

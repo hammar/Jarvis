@@ -94,6 +94,74 @@ public sealed class ToolDispatcherTests
     [InlineData(ToolRiskClass.LowRiskWrite)]
     [InlineData(ToolRiskClass.ReadOnly)]
     [Trait("Category", "Integration")]
+    public async Task OrphanRegisteredDuringSqliteClaimPreventsFinalSendAdmission(ToolRiskClass risk)
+    {
+        using var fixture = await Fixture.CreateAsync(risk);
+        var completed = await fixture.Dispatcher.DispatchAsync(PorchRequest, CancellationToken.None);
+        var orphan = (await fixture.Journal.GetAsync(completed.ActionId!.Value, CancellationToken.None))!;
+        await fixture.Journal.UpdateStatusAsync(
+            orphan.Id, "Executing", orphan.Version, fixture.Clock.UtcNow, CancellationToken.None);
+        var claiming = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseClaim = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var reading = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var paused = 0;
+        var journal = new PausedJournal(fixture.Journal, (entry, _) =>
+        {
+            if (entry?.Id == orphan.Id && entry.Status == "Executing")
+            {
+                reading.TrySetResult();
+            }
+            return Task.CompletedTask;
+        }, async token =>
+        {
+            if (Interlocked.CompareExchange(ref paused, 1, 0) == 0)
+            {
+                claiming.SetResult();
+                await releaseClaim.Task.WaitAsync(TimeSpan.FromSeconds(5), token);
+            }
+        });
+        var restarted = fixture.CreateRestartedDispatcher(journal);
+        var request = PorchRequest with { CallId = "claiming-during-orphan-discovery" };
+        var fresh = restarted.DispatchAsync(request, CancellationToken.None).AsTask();
+        await claiming.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        using var cancellation = new CancellationTokenSource();
+        var recovery = restarted.DispatchAsync(PorchRequest, cancellation.Token).AsTask();
+        await reading.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        cancellation.Cancel();
+        try
+        {
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => recovery);
+        }
+        finally
+        {
+            releaseClaim.SetResult();
+        }
+        var result = await fresh;
+        var read = risk == ToolRiskClass.ReadOnly;
+        Assert.Equal(read ? "Succeeded" : "Rejected", result.Status);
+        Assert.Equal(result.Status, (await fixture.Journal.GetAsync(result.ActionId!.Value, CancellationToken.None))!.Status);
+        Assert.Equal("Executing", (await fixture.Journal.GetAsync(orphan.Id, CancellationToken.None))!.Status);
+        Assert.Equal(read ? 2 : 1, fixture.ExecutionCount);
+        Assert.Equal(read ? 2 : 1, fixture.VerificationCount);
+        if (!read)
+        {
+            Assert.Equal("equivalent_write_outcome_unknown", result.ReasonCode);
+            var stopped = await restarted.DispatchAsync(
+                request with { CallId = "after-unsent-sqlite-claim" }, CancellationToken.None);
+            Assert.Equal("equivalent_write_outcome_unknown", stopped.ReasonCode);
+            Assert.Equal(1, fixture.ExecutionCount);
+        }
+        Assert.Equal("Succeeded", (await restarted.DispatchAsync(PorchRequest, CancellationToken.None)).Status);
+        Assert.Equal("Succeeded", (await restarted.DispatchAsync(
+            request with { CallId = "after-known-sqlite-orphan" }, CancellationToken.None)).Status);
+        Assert.Equal(read ? 3 : 2, fixture.ExecutionCount);
+        Assert.Equal(read ? 4 : 3, fixture.VerificationCount);
+    }
+
+    [Theory]
+    [InlineData(ToolRiskClass.LowRiskWrite)]
+    [InlineData(ToolRiskClass.ReadOnly)]
+    [Trait("Category", "Integration")]
     public async Task CancelledQueuedRecoveryPreservesSqliteOrphanRiskAfterTheGateHolderSucceeds(ToolRiskClass risk)
     {
         using var fixture = await Fixture.CreateAsync(risk);
@@ -110,7 +178,7 @@ public sealed class ToolDispatcherTests
             return new ToolExecutionOutcome(ToolExecutionStatus.Completed, null, null);
         });
         var reading = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var journal = new PausedReadJournal(fixture.Journal, (entry, _) =>
+        var journal = new PausedJournal(fixture.Journal, (entry, _) =>
         {
             if (entry?.Id == orphan.Id && entry.Status == "Executing")
             {
@@ -219,7 +287,7 @@ public sealed class ToolDispatcherTests
         var reading = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var releaseRead = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var paused = 0;
-        var journal = new PausedReadJournal(fixture.Journal, async (entry, token) =>
+        var journal = new PausedJournal(fixture.Journal, async (entry, token) =>
         {
             if (entry?.Status == "Executing" && Interlocked.CompareExchange(ref paused, 1, 0) == 0)
             {
@@ -955,9 +1023,10 @@ public sealed class ToolDispatcherTests
         }
     }
 
-    private sealed class PausedReadJournal(
+    private sealed class PausedJournal(
         IActionJournalStore inner,
-        Func<ActionJournalEntry?, CancellationToken, Task> afterRead) : IActionJournalStore
+        Func<ActionJournalEntry?, CancellationToken, Task> afterRead,
+        Func<CancellationToken, Task>? beforeExecuting = null) : IActionJournalStore
     {
         public ValueTask<ActionJournalEntry> CreateAsync(ActionJournalEntry entry, CancellationToken cancellationToken) =>
             inner.CreateAsync(entry, cancellationToken);
@@ -969,9 +1038,15 @@ public sealed class ToolDispatcherTests
             return entry;
         }
 
-        public ValueTask<ActionJournalEntry> UpdateStatusAsync(
-            ActionId id, string status, long expectedVersion, DateTimeOffset updatedAtUtc, CancellationToken cancellationToken) =>
-            inner.UpdateStatusAsync(id, status, expectedVersion, updatedAtUtc, cancellationToken);
+        public async ValueTask<ActionJournalEntry> UpdateStatusAsync(
+            ActionId id, string status, long expectedVersion, DateTimeOffset updatedAtUtc, CancellationToken cancellationToken)
+        {
+            if (status == "Executing" && beforeExecuting is not null)
+            {
+                await beforeExecuting(cancellationToken);
+            }
+            return await inner.UpdateStatusAsync(id, status, expectedVersion, updatedAtUtc, cancellationToken);
+        }
     }
 
     private sealed record ToolArguments(string Entity, bool On);

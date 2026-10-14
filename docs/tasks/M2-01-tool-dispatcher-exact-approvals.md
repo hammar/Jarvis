@@ -62,6 +62,9 @@ Acceptance scenarios include:
 - Recovery registers original write risk thread-safely before a cancellable
   proposal-gate wait; cancelled queued recovery cannot lose an orphan marker.
   Original reads never add a marker, and malformed metadata fails closed.
+- Final send admission follows the durable claim and shares synchronization
+  with orphan registration. A winning marker rejects the unsent proposal,
+  preserving the orphan; already-admitted operations may finish.
 
 ## Scope
 
@@ -192,6 +195,7 @@ R7/R8, both labelled "Previously missed"; both are retained below. Commit
 | M2-01-R18 (Previously missed) | Medium | Permission revoked or Unsupported during execution was not checked before normal external verification. | Fixed in the follow-up after `a1fd7de`: re-evaluate before verification; record Unknown without observing and retain equivalent-write uncertainty. Completed/Unknown paused-execution unit/SQLite regressions assert zero observations; still-allowed version changes remain observable. |
 | M2-01-R19 (Previously missed) | Medium | A stale Executing snapshot could observe after another dispatch completed, then fail its terminal CAS rather than return the winner. | Fixed in the follow-up after `a1fd7de`: reread under the proposal gate and return non-Executing state with budget reconciliation before observing. Unit/SQLite races cover Succeeded/Failed/Unknown, revoked/Unsupported policy and cancelled observation; pre-send Rejected/Expired controls preserve the winner without inventing uncertainty. |
 | M2-01-R20 (Previously missed) | High | Cancelling fresh-dispatcher orphan recovery while it waited for the proposal gate lost original write uncertainty; the successful holder then allowed a fresh equivalent send. | Fixed in the follow-up after `95b7575`: strict original-risk classification and concurrent action-ID registration precede the cancellable wait. Existing reads never add markers, malformed metadata marks then throws, and cancellation releases the active claim without removing the marker. Unit/SQLite controls prove a holder's success cannot clear the orphan, lower current risk cannot erase it, and later known recovery permits a fresh attempt. |
+| M2-01-R21 (Previously missed) | High | An equivalent call passed its early uncertainty check then awaited its claim; orphan registration could win while queued recovery was cancelled, yet the fresh handler still sent. | Fixed in the follow-up after `3f2f4e0`: final synchronous admission after the durable claim/policy/expiry checks shares a short lock with every registration. A winning marker durably rejects the unsent action without clearing the orphan. Unit/SQLite paused-claim regressions prove zero fresh sends/observations, original-read/lowered-risk behavior and a permitted fresh send after known recovery. |
 
 R9 uniquely identifies review comment `4273196189`, which reused the R7 label
 already assigned to the distinct approval-expiry race. Its review was against
@@ -233,6 +237,10 @@ R20 maps to `4274901132` in the full review against `95b7575`. Its summary
 retained the unaccepted R6 gap without additional summary-only findings.
 The intervening full review against `81bea7b` reported no open code findings
 and retained R6; neither review accepts the deferred replay limitation.
+R21 maps to `4275139725` in the full review against `3f2f4e0`. Its summary
+retained R6 and the need for current-head gate evidence, with no additional
+summary-only code findings. R20's cancellation fix remains valid; R21 closes
+the separate claim-to-admission interval it exposed.
 
 For R6, the concrete alternatives are explicit owner acceptance of status-only
 replay for M2-01 or authorization to extend durable terminal-result persistence
@@ -557,6 +565,37 @@ unaccepted.
 - No schema/storage contracts, dependencies, feature registrations or
   SDK/process-launch behavior changed. R6 remains deferred and unaccepted;
   dedicated current-head SDK/Aspire/browser CI is separate.
+
+## R21 regression evidence
+
+- Before the fix, original-write and lowered-current-risk unit cases failed:
+  the fresh handler ran after a marker registered during its paused durable
+  claim. The original-read negative control passed. After the fix, dispatcher
+  unit127/127 and SQLite44/44 passed, including two new real-SQLite cases.
+- Final admission synchronizes its last uncertainty check and own-marker
+  insertion with every orphan registration. The short synchronous lock has no
+  await, persistence or external callback. Registration first means durable
+  Rejected with zero new execution/observation; admission first is an in-flight
+  operation allowed to finish, covered by retained R20 holder-success tests.
+  This is a host admission boundary, not exactly-once physical execution.
+- Tests pause the actual claim path, cancel the competing queued recovery,
+  then assert durable rejection, the unchanged Executing orphan, no fresh
+  send/observation, continued equivalent blocking and later known recovery
+  permitting a fresh send. Read controls and original elevated-risk coverage
+  are retained; SQLite uses production stores behind the extended pause
+  adapter. No test-only control was added to production.
+- With the same isolated MSBuild output and unchanged scripts,
+  `tools/validate.sh build`, `unit` (258/258), `integration` (264/264),
+  `coverage`, `architecture` (6/6), and `docs` passed. Discovery was verified;
+  formatting/Release completed with zero warnings/errors.
+- Coverage inputs:
+  `artifacts/coverage/unit/20261014T191731Z-58474` and
+  `artifacts/coverage/integration/20261014T191759Z-58553`. All configured gates
+  passed: changed lines 99.1% (910/918), Application lines 98.6% (1842/1869)
+  and branches 94.4% (830/879).
+- No schema/storage contracts, dependencies, actual tools or SDK/process-launch
+  behavior changed. The complete R1-R21 ledger and unaccepted R6 are retained;
+  dedicated current-head SDK/Aspire/browser CI remains separate.
 
 ## Earlier full-gate evidence
 

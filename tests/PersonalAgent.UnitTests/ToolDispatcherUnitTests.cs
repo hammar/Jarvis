@@ -757,6 +757,72 @@ public sealed class ToolDispatcherUnitTests
     [InlineData("read")]
     [InlineData("lowered-risk")]
     [Trait("Category", "Unit")]
+    public async Task OrphanRegisteredDuringTheClaimPreventsFinalSendAdmission(string originalRisk)
+    {
+        using var fixture = new Fixture(
+            originalRisk == "write" ? ToolRiskClass.LowRiskWrite : ToolRiskClass.ReadOnly);
+        if (originalRisk == "lowered-risk")
+        {
+            fixture.Policy.RequireApproval();
+            var pending = await fixture.Dispatcher.DispatchAsync(Request, CancellationToken.None);
+            await fixture.Approvals.ResolveAsync(
+                pending.ApprovalId!.Value, "owner", 1, true, CancellationToken.None);
+        }
+        var orphan = await fixture.MarkExecutingAsync(Request);
+        fixture.Policy.Replace("current-policy");
+        var claiming = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseClaim = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var paused = 0;
+        fixture.Journal.BeforeExecutingUpdate = async token =>
+        {
+            if (Interlocked.CompareExchange(ref paused, 1, 0) == 0)
+            {
+                claiming.SetResult();
+                await releaseClaim.Task.WaitAsync(TimeSpan.FromSeconds(5), token);
+            }
+        };
+        var restarted = fixture.CreateRestartedDispatcher();
+        var request = Request with { CallId = "claiming-while-orphan-is-discovered" };
+        var fresh = restarted.DispatchAsync(request, CancellationToken.None).AsTask();
+        await claiming.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        using var cancellation = new CancellationTokenSource();
+        var recovery = restarted.DispatchAsync(Request, cancellation.Token).AsTask();
+        cancellation.Cancel();
+        try
+        {
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => recovery);
+        }
+        finally
+        {
+            releaseClaim.SetResult();
+        }
+        var result = await fresh;
+        var read = originalRisk == "read";
+        Assert.Equal(read ? "Succeeded" : "Rejected", result.Status);
+        Assert.Equal(result.Status, fixture.Journal.Entries.Single(entry => entry.Id == result.ActionId).Status);
+        Assert.Equal("Executing", fixture.Journal.Entries.Single(entry => entry.Id == orphan.Id).Status);
+        Assert.Equal(read ? 2 : 1, fixture.ExecutionCount);
+        Assert.Equal(read ? 2 : 1, fixture.VerificationCount);
+        if (!read)
+        {
+            Assert.Equal("equivalent_write_outcome_unknown", result.ReasonCode);
+            var stopped = await restarted.DispatchAsync(
+                request with { CallId = "after-rejected-unsent-claim" }, CancellationToken.None);
+            Assert.Equal("equivalent_write_outcome_unknown", stopped.ReasonCode);
+            Assert.Equal(1, fixture.ExecutionCount);
+        }
+        Assert.Equal("Succeeded", (await restarted.DispatchAsync(Request, CancellationToken.None)).Status);
+        Assert.Equal("Succeeded", (await restarted.DispatchAsync(
+            request with { CallId = "after-known-orphan-recovery" }, CancellationToken.None)).Status);
+        Assert.Equal(read ? 3 : 2, fixture.ExecutionCount);
+        Assert.Equal(read ? 4 : 3, fixture.VerificationCount);
+    }
+
+    [Theory]
+    [InlineData("write")]
+    [InlineData("read")]
+    [InlineData("lowered-risk")]
+    [Trait("Category", "Unit")]
     public async Task CancelledQueuedRecoveryRetainsOriginalWriteRiskAfterTheGateHolderSucceeds(string originalRisk)
     {
         using var fixture = new Fixture(
