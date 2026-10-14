@@ -36,6 +36,9 @@ Acceptance scenarios include:
   turn, including concurrent attempts, fresh call IDs, and normalized aliases.
 - A stale approval expiry transition cannot misreport an action that another
   dispatch already claimed or completed.
+- Concurrent approval decisions and matching action settlement return the
+  recorded winner; unresolved conflicts and other persistence errors surface
+  without falsely reporting success or sending.
 
 ## Scope
 
@@ -154,13 +157,19 @@ R7/R8, both labelled "Previously missed"; both are retained below. Commit
 | M2-01-R6 | Medium | Duplicate/restarted dispatch loses the original result JSON and detailed reason. | Deferred outside the authorized unchanged-T03 persistence scope, not fixed or owner-accepted. The journal persists intent/status/version only; API/docs explicitly disclose status-only replay. The review thread is handled as a scope deferral, not as proof that the acceptance gap is fixed. |
 | M2-01-R7 (Previously missed) | Medium | A stale approval read could falsely report expiry after another dispatch began or completed execution. | Fixed in `c5f3d63`: report `Expired` only when the transition actually produced that status; otherwise return the recorded action outcome. `StaleApprovalReadCannotReportExpiryAfterExecutionBegins` exercises both `Executing` and `Succeeded` across the expiry boundary. |
 | M2-01-R8 (Previously missed) | High | A fresh equivalent call ID could resend after an uncertain write. | Fixed in `c5f3d63`: serialize equivalent proposals and keep their write gate closed from the send boundary until a known outcome is durably recorded. `UncertainWritesBlockEquivalentFreshIdsIncludingQueuedAttempts` and `EquivalentUncertainWritesCannotResendWithFreshIds` cover sequential/concurrent fresh IDs, unknown results, cancellation, handler/verification exceptions, and terminal-journal failure. Known failed writes retain two attempts; later owner turns remain independent. |
-| M2-01-R9 (review label R7; Previously missed) | Medium | A delayed duplicate returning a recorded failure could consume the second failure slot without executing. | Fixed in the follow-up after `b54e558`: deduplicate failed-attempt accounting by action ID on both returned-outcome and exception paths. `DelayedDuplicateDoesNotConsumeASecondFailureSlot` pauses a duplicate's `Prepared` snapshot until the first attempt fails; the next fresh call still executes, and a third distinct attempt is rejected only after two failures. |
+| M2-01-R9 (review label R7; Previously missed) | Medium | A delayed duplicate returning a recorded failure could consume the second failure slot without executing. | Fixed in `1669296`: deduplicate failed-attempt accounting by action ID on both returned-outcome and exception paths. `DelayedDuplicateDoesNotConsumeASecondFailureSlot` pauses a duplicate's `Prepared` snapshot until the first attempt fails; the next fresh call still executes, and a third distinct attempt is rejected only after two failures. |
+| M2-01-R10 (Previously missed) | Medium | Action settlement could throw after the approval decision and matching action status were both successfully committed by concurrent callers. | Fixed in the follow-up after `1669296`: accept an action-update CAS conflict only when rereading proves the same terminal `Rejected`/`Expired` status. `ConcurrentActionSettlementReturnsTheCommittedApprovalDecision` covers both outcomes; `ApprovalSettlementPreservesOtherConflictsAndPersistenceErrors` proves incompatible states and other failures still surface. |
+| M2-01-R11 (review label R9; Previously missed) | Medium | A stale expired `Pending` snapshot could throw after another expiry or owner decision won resolution. | Fixed in the follow-up after `1669296`: reread the winning approval and current action after a resolution conflict; retain the execution-time expiry check and propagate conflicts with no decision. `StalePendingApprovalReadUsesTheWinningDecisionWithoutSending` covers expiry/approval/rejection; the stale-read execution test also covers in-progress/completed winning actions. |
 
 R9 uniquely identifies review comment `4273196189`, which reused the R7 label
 already assigned to the distinct approval-expiry race. Its review was against
 `c8d62dd`; the comment remains tracked separately so neither finding is erased.
 The complete top-level review contained R6-R9 and no additional summary-only
 findings; R6's deferral and R7/R8 fixes above remain unchanged.
+R10 maps to comment `4273628171`; R11 maps to `4273628253`, whose review reused
+R9's label. The subsequent full review against `b54e558` contained these two
+additional findings and acknowledged the earlier four conversations resolved.
+It did not add summary-only findings or accept R6's deferred limitation.
 
 For R6, the concrete alternatives are explicit owner acceptance of status-only
 replay for M2-01 or authorization to extend durable terminal-result persistence
@@ -232,6 +241,29 @@ tests or exercised live/cross-process device behavior.
   per-proposal semaphore and released only after the turn's callbacks stop.
 - This small internal accounting fix changes neither storage nor public
   contracts. Full required current-head CI remains a separate gate.
+
+## R10/R11 regression evidence
+
+- The targeted pre-fix run had five failing approval-race cases and five passing
+  negative controls. After the fixes, the dispatcher unit subset passed (64/64).
+  The stale-read scenario was then expanded to cover both Pending/Approved
+  snapshots against active/completed winning execution.
+- `tools/validate.sh build`, `unit` (197/197), `integration` (248/248),
+  `coverage`, `architecture` (6/6), and `docs` passed against the final
+  approval-reconciliation tree, with discovery verified.
+- Coverage inputs:
+  `artifacts/coverage/unit/20261014T164850Z-34033` and
+  `artifacts/coverage/integration/20261014T165023Z-34350`. All configured gates
+  passed: changed executable lines 98.7% (841/852), Application lines 98.3%
+  (1773/1803), and branches 93.7% (769/821).
+- Reconciliation accepts only a matching committed terminal action state or a
+  winning decided approval. Still-pending conflicts, incompatible action
+  outcomes, and non-concurrency persistence failures remain explicit errors.
+  A winning approval cannot bypass expiry or replay its side effect.
+- The public approval XML contract now documents the separate-write failure
+  boundary. No signatures, storage contracts, schema, or dependencies changed.
+  Dedicated SDK/Aspire/browser gates remain for current-head CI rather than
+  being claimed from earlier-head execution.
 
 ## Earlier full-gate evidence
 

@@ -273,12 +273,31 @@ public sealed class ToolDispatcher : IToolDispatcher
 
         if (approval.Status == "Pending" && clock.UtcNow.ToUniversalTime() >= approval.ExpiresAtUtc)
         {
-            approval = await approvals.ResolveAsync(
-                approval.Id,
-                request.OwnerId!,
-                approval.ExpectedVersion,
-                approved: false,
-                cancellationToken);
+            try
+            {
+                approval = await approvals.ResolveAsync(
+                    approval.Id,
+                    request.OwnerId!,
+                    approval.ExpectedVersion,
+                    approved: false,
+                    cancellationToken);
+            }
+            catch (PersistenceConcurrencyException)
+            {
+                var winner = await approvals.GetAsync(approvalId, cancellationToken);
+                if (winner is null || winner.Status == "Pending")
+                {
+                    throw;
+                }
+
+                approval = winner;
+                action = await journal.GetAsync(actionId, cancellationToken)
+                    ?? throw new InvalidOperationException("The action disappeared while rereading its approval decision.");
+                if (action.Status != "AwaitingApproval")
+                {
+                    return Recorded(action);
+                }
+            }
         }
 
         if (approval.Status == "Rejected" || approval.Status == "Expired")

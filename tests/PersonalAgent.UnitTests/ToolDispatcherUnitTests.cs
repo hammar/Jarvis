@@ -216,20 +216,26 @@ public sealed class ToolDispatcherUnitTests
     }
 
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
     [Trait("Category", "Unit")]
-    public async Task StaleApprovalReadCannotReportExpiryAfterExecutionBegins(bool completed)
+    public async Task StaleApprovalReadCannotReportExpiryAfterExecutionBegins(bool completed, bool pendingRead)
     {
         using var fixture = new Fixture(ToolRiskClass.ApprovalRequired);
         var pending = await fixture.Dispatcher.DispatchAsync(Request, CancellationToken.None);
-        await fixture.Approvals.ResolveAsync(pending.ApprovalId!.Value, "owner", 1, true, CancellationToken.None);
+        if (!pendingRead)
+        {
+            await fixture.Approvals.ResolveAsync(pending.ApprovalId!.Value, "owner", 1, true, CancellationToken.None);
+        }
+
         var reading = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var releaseRead = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var executing = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var releaseExecution = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var reads = 0;
-        fixture.ApprovalStore.BeforeRead = async token =>
+        fixture.ApprovalStore.AfterRead = async (_, token) =>
         {
             if (Interlocked.Increment(ref reads) == 1)
             {
@@ -247,6 +253,11 @@ public sealed class ToolDispatcherUnitTests
 
         var stale = fixture.Dispatcher.DispatchAsync(Request, CancellationToken.None).AsTask();
         await reading.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        if (pendingRead)
+        {
+            await fixture.Approvals.ResolveAsync(pending.ApprovalId!.Value, "owner", 1, true, CancellationToken.None);
+        }
+
         var first = fixture.Dispatcher.DispatchAsync(Request, CancellationToken.None).AsTask();
         await executing.Task.WaitAsync(TimeSpan.FromSeconds(2));
         try
@@ -419,6 +430,148 @@ public sealed class ToolDispatcherUnitTests
         Assert.Equal("Rejected", stopped.Status);
         Assert.Equal("equivalent_failure_limit", stopped.ReasonCode);
         Assert.Equal(2, fixture.ExecutionCount);
+    }
+
+    [Fact]
+    [Trait("Category", "Unit")]
+    public async Task ExpiredPendingApprovalConflictRemainsVisibleWhenNoDecisionWasRecorded()
+    {
+        using var fixture = new Fixture(ToolRiskClass.ApprovalRequired);
+        await fixture.Dispatcher.DispatchAsync(Request, CancellationToken.None);
+        fixture.Clock.Advance(TimeSpan.FromMinutes(5));
+        fixture.ApprovalStore.FailResolution = true;
+
+        await Assert.ThrowsAsync<PersistenceConcurrencyException>(async () =>
+            await fixture.Dispatcher.DispatchAsync(Request, CancellationToken.None));
+
+        Assert.Equal("Pending", fixture.ApprovalStore.Entries.Single().Status);
+        Assert.Equal("AwaitingApproval", fixture.Journal.Entries.Single().Status);
+        Assert.Equal(0, fixture.ExecutionCount);
+    }
+
+    [Theory]
+    [InlineData("expired")]
+    [InlineData("approved")]
+    [InlineData("rejected")]
+    [Trait("Category", "Unit")]
+    public async Task StalePendingApprovalReadUsesTheWinningDecisionWithoutSending(string winner)
+    {
+        using var fixture = new Fixture(ToolRiskClass.ApprovalRequired);
+        var pending = await fixture.Dispatcher.DispatchAsync(Request, CancellationToken.None);
+        var reading = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseRead = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var reads = 0;
+        fixture.ApprovalStore.AfterRead = async (entry, token) =>
+        {
+            if (entry?.Status == "Pending" && Interlocked.Increment(ref reads) == 1)
+            {
+                reading.SetResult();
+                await releaseRead.Task.WaitAsync(TimeSpan.FromSeconds(5), token);
+            }
+        };
+        if (winner == "expired")
+        {
+            fixture.Clock.Advance(TimeSpan.FromMinutes(5));
+        }
+
+        var stale = fixture.Dispatcher.DispatchAsync(Request, CancellationToken.None).AsTask();
+        await reading.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        if (winner == "expired")
+        {
+            Assert.Equal("Expired", (await fixture.Dispatcher.DispatchAsync(Request, CancellationToken.None)).Status);
+        }
+        else
+        {
+            await fixture.Approvals.ResolveAsync(
+                pending.ApprovalId!.Value, "owner", 1, winner == "approved", CancellationToken.None);
+            fixture.Clock.Advance(TimeSpan.FromMinutes(5));
+        }
+
+        releaseRead.SetResult();
+        var result = await stale.WaitAsync(TimeSpan.FromSeconds(2));
+        var expectedStatus = winner == "rejected" ? "Rejected" : "Expired";
+        Assert.Equal(expectedStatus, result.Status);
+        Assert.Equal(expectedStatus, fixture.Journal.Entries.Single().Status);
+        Assert.Equal(winner == "approved" ? "Approved" : expectedStatus, fixture.ApprovalStore.Entries.Single().Status);
+        Assert.Equal(0, fixture.ExecutionCount);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("Category", "Unit")]
+    public async Task ConcurrentActionSettlementReturnsTheCommittedApprovalDecision(bool expired)
+    {
+        using var fixture = new Fixture(ToolRiskClass.ApprovalRequired);
+        var pending = await fixture.Dispatcher.DispatchAsync(Request, CancellationToken.None);
+        if (expired)
+        {
+            fixture.Clock.Advance(TimeSpan.FromMinutes(5));
+        }
+
+        var decided = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseSettlement = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.ApprovalStore.AfterResolve = async (_, token) =>
+        {
+            decided.SetResult();
+            await releaseSettlement.Task.WaitAsync(TimeSpan.FromSeconds(5), token);
+        };
+        var resolution = fixture.Approvals.ResolveAsync(
+            pending.ApprovalId!.Value, "owner", 1, false, CancellationToken.None).AsTask();
+        await decided.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        var duplicate = await fixture.Dispatcher.DispatchAsync(Request, CancellationToken.None);
+        releaseSettlement.SetResult();
+        var settled = await resolution.WaitAsync(TimeSpan.FromSeconds(2));
+
+        var expectedStatus = expired ? "Expired" : "Rejected";
+        Assert.Equal(expectedStatus, settled.Status);
+        Assert.Equal(expectedStatus, duplicate.Status);
+        Assert.Equal(expectedStatus, fixture.Journal.Entries.Single().Status);
+        Assert.Equal(0, fixture.ExecutionCount);
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    [Trait("Category", "Unit")]
+    public async Task ApprovalSettlementPreservesOtherConflictsAndPersistenceErrors(bool expired, bool persistenceError)
+    {
+        using var fixture = new Fixture(ToolRiskClass.ApprovalRequired);
+        var pending = await fixture.Dispatcher.DispatchAsync(Request, CancellationToken.None);
+        if (expired)
+        {
+            fixture.Clock.Advance(TimeSpan.FromMinutes(5));
+        }
+
+        fixture.ApprovalStore.AfterResolve = async (_, token) =>
+        {
+            if (persistenceError)
+            {
+                fixture.Journal.FailTerminalUpdate = true;
+            }
+            else
+            {
+                var action = fixture.Journal.Entries.Single();
+                await fixture.Journal.UpdateStatusAsync(
+                    action.Id, "Unknown", action.Version, fixture.Clock.UtcNow, token);
+            }
+        };
+        var resolution = fixture.Approvals.ResolveAsync(
+            pending.ApprovalId!.Value, "owner", 1, false, CancellationToken.None).AsTask();
+        if (persistenceError)
+        {
+            await Assert.ThrowsAsync<InvalidOperationException>(() => resolution);
+        }
+        else
+        {
+            await Assert.ThrowsAsync<PersistenceConcurrencyException>(() => resolution);
+        }
+
+        Assert.Equal(expired ? "Expired" : "Rejected", fixture.ApprovalStore.Entries.Single().Status);
+        Assert.Equal(persistenceError ? "AwaitingApproval" : "Unknown", fixture.Journal.Entries.Single().Status);
+        Assert.Equal(0, fixture.ExecutionCount);
     }
 
     [Fact]
@@ -1280,6 +1433,7 @@ public sealed class ToolDispatcherUnitTests
         private readonly object gate = new();
 
         public bool FailNextExecutingUpdate { get; set; }
+        public bool FailTerminalUpdate { get; set; }
         public string? ReturnStatusAfterExecuting { get; set; }
         public string? ReturnStatusAfterAwaitingApproval { get; set; }
         public Action<string>? StatusUpdated { get; set; }
@@ -1363,6 +1517,11 @@ public sealed class ToolDispatcherUnitTests
 
             lock (gate)
             {
+                if (FailTerminalUpdate && status is "Expired" or "Rejected")
+                {
+                    throw new InvalidOperationException("Controlled terminal persistence failure.");
+                }
+
                 if (status == "Executing" && FailNextExecutingUpdate)
                 {
                     FailNextExecutingUpdate = false;
@@ -1403,7 +1562,9 @@ public sealed class ToolDispatcherUnitTests
         private readonly Dictionary<ApprovalId, ApprovalStorageRecord> entries = [];
         private readonly object gate = new();
 
-        public Func<CancellationToken, Task>? BeforeRead { get; set; }
+        public Func<ApprovalStorageRecord?, CancellationToken, Task>? AfterRead { get; set; }
+        public Func<ApprovalStorageRecord, CancellationToken, Task>? AfterResolve { get; set; }
+        public bool FailResolution { get; set; }
 
         public IReadOnlyCollection<ApprovalStorageRecord> Entries
         {
@@ -1442,19 +1603,21 @@ public sealed class ToolDispatcherUnitTests
         public async ValueTask<ApprovalStorageRecord?> GetAsync(ApprovalId id, CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (BeforeRead is { } beforeRead)
-            {
-                await beforeRead(cancellationToken);
-            }
-
+            ApprovalStorageRecord? entry;
             lock (gate)
             {
-                entries.TryGetValue(id, out var entry);
-                return entry;
+                entries.TryGetValue(id, out entry);
             }
+
+            if (AfterRead is { } afterRead)
+            {
+                await afterRead(entry, cancellationToken);
+            }
+
+            return entry;
         }
 
-        public ValueTask<ApprovalStorageRecord> ResolveAsync(
+        public async ValueTask<ApprovalStorageRecord> ResolveAsync(
             ApprovalId id,
             string ownerId,
             string status,
@@ -1463,9 +1626,11 @@ public sealed class ToolDispatcherUnitTests
             CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            ApprovalStorageRecord updated;
             lock (gate)
             {
-                if (!entries.TryGetValue(id, out var entry)
+                if (FailResolution
+                    || !entries.TryGetValue(id, out var entry)
                     || entry.OwnerId != ownerId
                     || entry.Version != expectedVersion
                     || entry.Status != "Pending"
@@ -1475,15 +1640,21 @@ public sealed class ToolDispatcherUnitTests
                     throw new PersistenceConcurrencyException("Approval is stale, expired, or belongs to another owner.");
                 }
 
-                var updated = entry with
+                updated = entry with
                 {
                     Status = status,
                     ResolvedAtUtc = resolvedAtUtc,
                     Version = entry.Version + 1
                 };
                 entries[id] = updated;
-                return ValueTask.FromResult(updated);
             }
+
+            if (AfterResolve is { } afterResolve)
+            {
+                await afterResolve(updated, cancellationToken);
+            }
+
+            return updated;
         }
     }
 }

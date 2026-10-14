@@ -48,6 +48,9 @@ expiry transition. Equivalent reads and known failed writes have a two-failure
 limit per turn. An uncertain write blocks any further equivalent send in that
 turn, including fresh call IDs, queued attempts, and exceptions after dispatch.
 Equivalent attempts serialize to enforce these limits under concurrency.
+Concurrent approval settlement accepts an already-matching terminal action
+status, while other conflicts/errors propagate. A stale expired Pending read
+uses the winning persisted decision and current action, not a second resolution.
 `IToolDispatcher.ReleaseTurn` releases only ephemeral failure accounting once
 all turn callbacks have stopped; durable action identity remains authoritative.
 T03 supports status-only replay, not replay of the original result JSON/reason.

@@ -79,6 +79,13 @@ feature task registers a real handler.
 If a concurrent dispatch already claimed or completed the action, a stale
 approval expiry attempt returns that recorded state instead of falsely claiming
 that expiry stopped execution.
+Approval decisions and action settlement are separate writes. A concurrent
+matching `Rejected`/`Expired` action status satisfies settlement; a different
+status or persistence failure still surfaces as an error. When an expired
+`Pending` snapshot loses to another resolution, the dispatcher rereads both the
+winning approval and current action instead of replaying the stale decision.
+A still-pending conflict propagates, and a winning approval still has to pass
+the execution-time expiry check.
 
 The action state machine persists `Prepared` before any external execution;
 approval-required actions move to `AwaitingApproval`, then `Executing` only

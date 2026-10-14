@@ -108,12 +108,7 @@ public sealed class ApprovalService : IApprovalService
                 expectedVersion,
                 nowUtc,
                 cancellationToken);
-            await actions.UpdateStatusAsync(
-                current.ActionId,
-                "Expired",
-                action.Version,
-                nowUtc,
-                cancellationToken);
+            await SettleActionAsync(action, "Expired", nowUtc, cancellationToken);
             return ToRequest(expired);
         }
 
@@ -127,15 +122,30 @@ public sealed class ApprovalService : IApprovalService
             cancellationToken);
         if (!approved)
         {
-            await actions.UpdateStatusAsync(
-                current.ActionId,
-                "Rejected",
-                action.Version,
-                nowUtc,
-                cancellationToken);
+            await SettleActionAsync(action, "Rejected", nowUtc, cancellationToken);
         }
 
         return ToRequest(resolved);
+    }
+
+    private async ValueTask SettleActionAsync(
+        ActionJournalEntry action,
+        string status,
+        DateTimeOffset nowUtc,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await actions.UpdateStatusAsync(action.Id, status, action.Version, nowUtc, cancellationToken);
+        }
+        catch (PersistenceConcurrencyException)
+        {
+            var current = await actions.GetAsync(action.Id, cancellationToken);
+            if (current?.Status != status)
+            {
+                throw;
+            }
+        }
     }
 
     private static ApprovalRequest ToRequest(ApprovalStorageRecord record) =>

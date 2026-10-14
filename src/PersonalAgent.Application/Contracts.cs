@@ -693,6 +693,9 @@ public interface IApprovalService
     /// <param name="approved">Whether to approve the exact action or reject it.</param>
     /// <param name="cancellationToken">Token that cancels the state update.</param>
     /// <returns>The resolved request; expired, replayed, or changed requests are rejected.</returns>
+    /// <remarks>Rejection or expiry may already be committed if settling the separate action record fails.
+    /// A concurrent matching terminal action status is accepted; other conflicts and persistence errors propagate.
+    /// This does not permit re-resolving an already decided approval.</remarks>
     ValueTask<ApprovalRequest> ResolveAsync(
         ApprovalId approvalId,
         string ownerId,
