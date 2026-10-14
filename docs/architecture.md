@@ -86,6 +86,10 @@ status or persistence failure still surfaces as an error. When an expired
 winning approval and current action instead of replaying the stale decision.
 A still-pending conflict propagates, and a winning approval still has to pass
 the execution-time expiry check.
+Approval creation first returns an existing exact owner/action binding, even
+when another dispatch has already started or completed execution. Only new
+approval records require an action still awaiting approval; this lookup neither
+renews a decided approval nor permits another owner to reuse it.
 
 The action state machine persists `Prepared` before any external execution;
 approval-required actions move to `AwaitingApproval`, then `Executing` only
@@ -114,6 +118,12 @@ outcome is recorded. `Unknown`, handler/verification exceptions, and failure to
 journal the terminal outcome leave this block in place, including for queued
 attempts and fresh call IDs. Known failed writes and failed reads still have the
 two-attempt limit; distinct later owner turns remain independent.
+Observation-only recovery uses the same proposal semaphore as execution.
+Only after a known outcome is durably recorded can recovery clear uncertainty,
+and only for the action that owns that uncertainty. Verified success removes
+that action's provisional failure slot; confirmed failure consumes one slot,
+deduplicated by action ID. Unknown outcomes and failed observation or journaling
+retain the write block. Recovery of another action cannot clear it.
 The engine releases ephemeral accounting only
 after the turn's callbacks stop. Restart interrupts turns rather than resuming
 their inference, so these counters are not a durable retry mechanism.

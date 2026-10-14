@@ -675,6 +675,8 @@ public interface IApprovalService
     /// <param name="ownerId">Authenticated owner who may decide the request.</param>
     /// <param name="cancellationToken">Token that cancels persistence before creation completes.</param>
     /// <returns>The persisted request with expiry and concurrency version.</returns>
+    /// <remarks>An existing exact owner/action binding is returned even if execution has since started or completed.
+    /// New requests are created only for actions awaiting approval; returning a decided request does not renew it.</remarks>
     ValueTask<ApprovalRequest> CreateAsync(
         ActionId actionId,
         string ownerId,

@@ -432,6 +432,253 @@ public sealed class ToolDispatcherUnitTests
         Assert.Equal(2, fixture.ExecutionCount);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("Category", "Unit")]
+    public async Task MissingApprovalSnapshotReturnsTheExistingDecisionAfterExecutionStarts(bool completed)
+    {
+        using var fixture = new Fixture(ToolRiskClass.ApprovalRequired);
+        var reading = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseRead = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var executing = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseExecution = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var missingReads = 0;
+        fixture.ApprovalStore.AfterRead = async (entry, token) =>
+        {
+            if (entry is null && Interlocked.Increment(ref missingReads) == 1)
+            {
+                reading.SetResult();
+                await releaseRead.Task.WaitAsync(TimeSpan.FromSeconds(5), token);
+            }
+        };
+        fixture.Execution = async (_, _, token) =>
+        {
+            executing.SetResult();
+            await releaseExecution.Task.WaitAsync(TimeSpan.FromSeconds(5), token);
+            return new ToolExecutionOutcome(ToolExecutionStatus.Completed, null, null);
+        };
+
+        var stale = fixture.Dispatcher.DispatchAsync(Request, CancellationToken.None).AsTask();
+        await reading.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        var pending = await fixture.Dispatcher.DispatchAsync(Request, CancellationToken.None);
+        await fixture.Approvals.ResolveAsync(pending.ApprovalId!.Value, "owner", 1, true, CancellationToken.None);
+        var first = fixture.Dispatcher.DispatchAsync(Request, CancellationToken.None).AsTask();
+        await executing.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        try
+        {
+            if (completed)
+            {
+                releaseExecution.SetResult();
+                Assert.Equal("Succeeded", (await first).Status);
+            }
+
+            releaseRead.SetResult();
+            var duplicate = await stale.WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.Equal(completed ? "Succeeded" : "Executing", duplicate.Status);
+            Assert.Equal(pending.ActionId, duplicate.ActionId);
+            Assert.Equal("Approved", fixture.ApprovalStore.Entries.Single().Status);
+            Assert.Equal(1, fixture.ExecutionCount);
+            await Assert.ThrowsAsync<PersistenceConcurrencyException>(async () =>
+                await fixture.Approvals.CreateAsync(pending.ActionId!.Value, "another-owner", CancellationToken.None));
+        }
+        finally
+        {
+            releaseRead.TrySetResult();
+            releaseExecution.TrySetResult();
+            await first;
+        }
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    [Trait("Category", "Unit")]
+    public async Task KnownRecoveryUpdatesTheSameProposalBudgetBeforeFreshCalls(bool verified, bool queued)
+    {
+        using var fixture = new Fixture();
+        fixture.Journal.FailCompletionUpdate = true;
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await fixture.Dispatcher.DispatchAsync(Request, CancellationToken.None));
+        Assert.Equal("Executing", fixture.Journal.Entries.Single().Status);
+        fixture.Journal.FailCompletionUpdate = false;
+        var observing = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseObservation = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.Verification = async (_, _, outcome, token) =>
+        {
+            Assert.Equal(ToolExecutionStatus.Unknown, outcome.Status);
+            observing.SetResult();
+            await releaseObservation.Task.WaitAsync(TimeSpan.FromSeconds(5), token);
+            return new ToolVerificationOutcome(
+                verified ? ToolVerificationStatus.Verified : ToolVerificationStatus.NotApplied, null);
+        };
+        fixture.Execution = (_, _, _) =>
+            ValueTask.FromResult(new ToolExecutionOutcome(ToolExecutionStatus.Failed, null, "known_failure"));
+
+        var recovery = fixture.Dispatcher.DispatchAsync(Request, CancellationToken.None).AsTask();
+        await observing.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        var freshRequest = Request with { CallId = "after-recovery", ArgumentsJson = """{"On":true,"Entity":"porch-lamp"}""" };
+        var fresh = queued ? fixture.Dispatcher.DispatchAsync(freshRequest, CancellationToken.None).AsTask() : null;
+        releaseObservation.SetResult();
+        Assert.Equal(verified ? "Succeeded" : "Failed", (await recovery).Status);
+        Assert.Equal("Failed", (await (fresh ?? fixture.Dispatcher.DispatchAsync(freshRequest, CancellationToken.None).AsTask())).Status);
+        Assert.Equal(2, fixture.ExecutionCount);
+
+        if (verified)
+        {
+            Assert.Equal("Failed", (await fixture.Dispatcher.DispatchAsync(
+                Request with { CallId = "second-known-failure" }, CancellationToken.None)).Status);
+        }
+
+        var stopped = await fixture.Dispatcher.DispatchAsync(
+            Request with { CallId = "past-two-known-failures" }, CancellationToken.None);
+        Assert.Equal("Rejected", stopped.Status);
+        Assert.Equal("equivalent_failure_limit", stopped.ReasonCode);
+        Assert.Equal(verified ? 3 : 2, fixture.ExecutionCount);
+    }
+
+    [Theory]
+    [InlineData("unknown")]
+    [InlineData("verification-error")]
+    [InlineData("verification-cancelled")]
+    [InlineData("journal-error")]
+    [Trait("Category", "Unit")]
+    public async Task InconclusiveOrUnjournaledRecoveryKeepsEquivalentWritesBlocked(string outcome)
+    {
+        using var fixture = new Fixture();
+        fixture.Journal.FailCompletionUpdate = true;
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await fixture.Dispatcher.DispatchAsync(Request, CancellationToken.None));
+        fixture.Journal.FailCompletionUpdate = outcome == "journal-error";
+        fixture.Verification = (_, _, _, _) => outcome switch
+        {
+            "verification-error" => throw new InvalidOperationException("controlled recovery error"),
+            "verification-cancelled" => throw new OperationCanceledException(),
+            "journal-error" => ValueTask.FromResult(new ToolVerificationOutcome(ToolVerificationStatus.Verified, null)),
+            _ => ValueTask.FromResult(new ToolVerificationOutcome(ToolVerificationStatus.Unknown, "unconfirmed"))
+        };
+        var recovery = fixture.Dispatcher.DispatchAsync(Request, CancellationToken.None).AsTask();
+        if (outcome is "verification-error" or "journal-error")
+        {
+            await Assert.ThrowsAsync<InvalidOperationException>(() => recovery);
+        }
+        else
+        {
+            Assert.Equal("Unknown", (await recovery).Status);
+        }
+
+        var stopped = await fixture.Dispatcher.DispatchAsync(
+            Request with { CallId = "after-unconfirmed-recovery" }, CancellationToken.None);
+        Assert.Equal("Rejected", stopped.Status);
+        Assert.Equal("equivalent_write_outcome_unknown", stopped.ReasonCode);
+        Assert.Equal(1, fixture.ExecutionCount);
+        Assert.Equal(outcome == "journal-error" ? "Executing" : "Unknown",
+            fixture.Journal.Entries.Single(entry => entry.Id != stopped.ActionId).Status);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("Category", "Unit")]
+    public async Task KnownRecoveryCannotClearAnotherActionsWriteUncertainty(bool verified)
+    {
+        using var fixture = new Fixture();
+        await fixture.MarkExecutingAsync(Request);
+        fixture.Execution = (_, _, _) => throw new InvalidOperationException("controlled second-action failure");
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await fixture.Dispatcher.DispatchAsync(Request with { CallId = "uncertain-action" }, CancellationToken.None));
+        fixture.Verification = (_, _, _, _) => ValueTask.FromResult(new ToolVerificationOutcome(
+            verified ? ToolVerificationStatus.Verified : ToolVerificationStatus.NotApplied, null));
+
+        Assert.Equal(verified ? "Succeeded" : "Failed",
+            (await fixture.Dispatcher.DispatchAsync(Request, CancellationToken.None)).Status);
+        var stopped = await fixture.Dispatcher.DispatchAsync(
+            Request with { CallId = "after-unrelated-recovery" }, CancellationToken.None);
+        Assert.Equal("Rejected", stopped.Status);
+        Assert.Equal("equivalent_write_outcome_unknown", stopped.ReasonCode);
+        Assert.Equal(2, fixture.ExecutionCount);
+    }
+
+    [Fact]
+    [Trait("Category", "Unit")]
+    public async Task RecoveredReadFailureConsumesOnlyOneAttempt()
+    {
+        using var fixture = new Fixture(ToolRiskClass.ReadOnly);
+        await fixture.MarkExecutingAsync(Request);
+        fixture.Verification = (_, _, _, _) =>
+            ValueTask.FromResult(new ToolVerificationOutcome(ToolVerificationStatus.NotApplied, null));
+        Assert.Equal("Failed", (await fixture.Dispatcher.DispatchAsync(Request, CancellationToken.None)).Status);
+        Assert.Equal("Failed", (await fixture.Dispatcher.DispatchAsync(Request, CancellationToken.None)).Status);
+        fixture.Execution = (_, _, _) =>
+            ValueTask.FromResult(new ToolExecutionOutcome(ToolExecutionStatus.Failed, null, "known_failure"));
+        Assert.Equal("Failed", (await fixture.Dispatcher.DispatchAsync(
+            Request with { CallId = "second-failed-read" }, CancellationToken.None)).Status);
+
+        var stopped = await fixture.Dispatcher.DispatchAsync(
+            Request with { CallId = "third-failed-read" }, CancellationToken.None);
+        Assert.Equal("Rejected", stopped.Status);
+        Assert.Equal("equivalent_failure_limit", stopped.ReasonCode);
+        Assert.Equal(2, fixture.ExecutionCount);
+    }
+
+    [Fact]
+    [Trait("Category", "Unit")]
+    public async Task ExceptionalReadRecoveryConsumesOnlyOneAttempt()
+    {
+        using var fixture = new Fixture(ToolRiskClass.ReadOnly);
+        await fixture.MarkExecutingAsync(Request);
+        fixture.Verification = (_, _, _, _) => throw new InvalidOperationException("controlled observation failure");
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await fixture.Dispatcher.DispatchAsync(Request, CancellationToken.None));
+        Assert.Equal("Unknown", (await fixture.Dispatcher.DispatchAsync(Request, CancellationToken.None)).Status);
+        fixture.Execution = (_, _, _) =>
+            ValueTask.FromResult(new ToolExecutionOutcome(ToolExecutionStatus.Failed, null, "known_failure"));
+        Assert.Equal("Failed", (await fixture.Dispatcher.DispatchAsync(
+            Request with { CallId = "after-failed-observation" }, CancellationToken.None)).Status);
+        var stopped = await fixture.Dispatcher.DispatchAsync(
+            Request with { CallId = "past-failure-budget" }, CancellationToken.None);
+        Assert.Equal("Rejected", stopped.Status);
+        Assert.Equal("equivalent_failure_limit", stopped.ReasonCode);
+        Assert.Equal(2, fixture.ExecutionCount);
+    }
+
+    [Fact]
+    [Trait("Category", "Unit")]
+    public async Task CancellingRecoveryWhileWaitingForTheProposalGateReleasesItsActiveClaim()
+    {
+        using var fixture = new Fixture(ToolRiskClass.ReadOnly);
+        await fixture.MarkExecutingAsync(Request);
+        var executing = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseExecution = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.Execution = async (_, _, token) =>
+        {
+            executing.SetResult();
+            await releaseExecution.Task.WaitAsync(TimeSpan.FromSeconds(5), token);
+            return new ToolExecutionOutcome(ToolExecutionStatus.Completed, null, null);
+        };
+        var first = fixture.Dispatcher.DispatchAsync(
+            Request with { CallId = "holding-proposal-gate" }, CancellationToken.None).AsTask();
+        await executing.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        try
+        {
+            using var cancellation = new CancellationTokenSource();
+            var cancelled = fixture.Dispatcher.DispatchAsync(Request, cancellation.Token).AsTask();
+            cancellation.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => cancelled);
+        }
+        finally
+        {
+            releaseExecution.SetResult();
+            await first;
+        }
+
+        Assert.Equal("Succeeded", (await fixture.Dispatcher.DispatchAsync(Request, CancellationToken.None)).Status);
+        Assert.Equal(2, fixture.ExecutionCount);
+        Assert.Equal(3, fixture.VerificationCount);
+    }
+
     [Fact]
     [Trait("Category", "Unit")]
     public async Task ExpiredPendingApprovalConflictRemainsVisibleWhenNoDecisionWasRecorded()
@@ -1434,6 +1681,7 @@ public sealed class ToolDispatcherUnitTests
 
         public bool FailNextExecutingUpdate { get; set; }
         public bool FailTerminalUpdate { get; set; }
+        public bool FailCompletionUpdate { get; set; }
         public string? ReturnStatusAfterExecuting { get; set; }
         public string? ReturnStatusAfterAwaitingApproval { get; set; }
         public Action<string>? StatusUpdated { get; set; }
@@ -1517,6 +1765,11 @@ public sealed class ToolDispatcherUnitTests
 
             lock (gate)
             {
+                if (FailCompletionUpdate && status is "Succeeded" or "Failed")
+                {
+                    throw new InvalidOperationException("Controlled completion persistence failure.");
+                }
+
                 if (FailTerminalUpdate && status is "Expired" or "Rejected")
                 {
                     throw new InvalidOperationException("Controlled terminal persistence failure.");

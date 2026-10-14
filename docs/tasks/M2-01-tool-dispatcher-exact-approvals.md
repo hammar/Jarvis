@@ -39,6 +39,11 @@ Acceptance scenarios include:
 - Concurrent approval decisions and matching action settlement return the
   recorded winner; unresolved conflicts and other persistence errors surface
   without falsely reporting success or sending.
+- A missing-approval snapshot can return an existing exact approval after another
+  dispatch starts/completes execution, without renewing it or relaxing ownership.
+- Observation-only recovery shares equivalent-proposal accounting: a durable
+  known outcome clears only its own write uncertainty, verified success removes
+  its provisional failure, and confirmed failure consumes one distinct slot.
 
 ## Scope
 
@@ -160,6 +165,8 @@ R7/R8, both labelled "Previously missed"; both are retained below. Commit
 | M2-01-R9 (review label R7; Previously missed) | Medium | A delayed duplicate returning a recorded failure could consume the second failure slot without executing. | Fixed in `1669296`: deduplicate failed-attempt accounting by action ID on both returned-outcome and exception paths. `DelayedDuplicateDoesNotConsumeASecondFailureSlot` pauses a duplicate's `Prepared` snapshot until the first attempt fails; the next fresh call still executes, and a third distinct attempt is rejected only after two failures. |
 | M2-01-R10 (Previously missed) | Medium | Action settlement could throw after the approval decision and matching action status were both successfully committed by concurrent callers. | Fixed in the follow-up after `1669296`: accept an action-update CAS conflict only when rereading proves the same terminal `Rejected`/`Expired` status. `ConcurrentActionSettlementReturnsTheCommittedApprovalDecision` covers both outcomes; `ApprovalSettlementPreservesOtherConflictsAndPersistenceErrors` proves incompatible states and other failures still surface. |
 | M2-01-R11 (review label R9; Previously missed) | Medium | A stale expired `Pending` snapshot could throw after another expiry or owner decision won resolution. | Fixed in the follow-up after `1669296`: reread the winning approval and current action after a resolution conflict; retain the execution-time expiry check and propagate conflicts with no decision. `StalePendingApprovalReadUsesTheWinningDecisionWithoutSending` covers expiry/approval/rejection; the stale-read execution test also covers in-progress/completed winning actions. |
+| M2-01-R12 | Medium | A delayed duplicate that read no approval could fail creation after another dispatch obtained approval and began/completed execution. | Fixed in the follow-up after `08d061c`: validate and return an existing owner/action binding before enforcing the action status for new creation. `MissingApprovalSnapshotReturnsTheExistingDecisionAfterExecutionStarts` covers active/completed execution and retains wrong-owner rejection. |
+| M2-01-R13 | Medium | Observation-only recovery could persist a known outcome without clearing its proposal's write uncertainty or updating failure accounting. | Fixed in the follow-up after `08d061c`: share the execution proposal gate, track the uncertain action ID, and reconcile accounting only after a durable outcome. `KnownRecoveryUpdatesTheSameProposalBudgetBeforeFreshCalls` covers sequential/queued success/failure; negative controls retain uncertainty on inconclusive observation, errors, failed journaling, or another action's recovery. Read-failure and queued-cancellation tests cover accounting and cleanup. |
 
 R9 uniquely identifies review comment `4273196189`, which reused the R7 label
 already assigned to the distinct approval-expiry race. Its review was against
@@ -170,6 +177,10 @@ R10 maps to comment `4273628171`; R11 maps to `4273628253`, whose review reused
 R9's label. The subsequent full review against `b54e558` contained these two
 additional findings and acknowledged the earlier four conversations resolved.
 It did not add summary-only findings or accept R6's deferred limitation.
+R12 maps to comment `4273719016`; R13 maps to `4273719101`. The subsequent full
+review against `1669296` raised these two findings and repeated R10/R11, already
+fixed in `08d061c`; its summary also retained R6's need for an owner decision.
+No additional summary-only finding was omitted.
 
 For R6, the concrete alternatives are explicit owner acceptance of status-only
 replay for M2-01 or authorization to extend durable terminal-result persistence
@@ -202,6 +213,11 @@ ledger, changed dispatcher/tests/docs, and spec §§7/13/14. It found no new
 significant issues and supported the R7/R8 fixes. It retained R6 as a deferred,
 unaccepted acceptance gap. This was source review, not a claim to have rerun
 tests or exercised live/cross-process device behavior.
+
+The bounded independent review of exact commit
+`08d061c8a5780e01e8094f55c2437d714e1ec529` against `1669296` supported
+R10/R11 and found no new significant issues within that follow-up. It retained
+R6's deferred, unaccepted acceptance gap and did not rerun tests.
 
 ## R7/R8 regression evidence
 
@@ -264,6 +280,34 @@ tests or exercised live/cross-process device behavior.
   boundary. No signatures, storage contracts, schema, or dependencies changed.
   Dedicated SDK/Aspire/browser gates remain for current-head CI rather than
   being claimed from earlier-head execution.
+
+## R12/R13 regression evidence
+
+- Before the production fixes, the targeted 13-case run had seven failures
+  demonstrating stale approval creation, blocked known write recovery, and
+  omitted recovered-read failure accounting; six negative controls passed.
+  After the fixes and additional exceptional-read/queued-cancellation controls,
+  the complete dispatcher unit subset passed (81/81).
+- `tools/validate.sh build`, `unit` (212/212), `integration` (248/248),
+  `coverage`, `architecture` (6/6), and `docs` passed on the final runtime/test
+  tree, with discovery verified and zero build warnings/errors.
+- Coverage inputs:
+  `artifacts/coverage/unit/20261014T170509Z-37354` and
+  `artifacts/coverage/integration/20261014T170728Z-37835`. All configured gates
+  passed: changed executable lines 99.1% (864/872), Application lines 98.5%
+  (1796/1823), and branches 94.0% (796/847).
+- Recovery remains bounded observation, never execution replay. The larger
+  diff extracts the existing observer from its arbitration wrapper so recovery
+  and normal execution can share one canonical proposal gate and outcome
+  accounting helper; it does not add a new recovery mechanism.
+- No storage contracts, schema, dependencies, SDK integration, process launch,
+  or functional production registrations changed. Public XML remarks document
+  the existing-binding creation behavior; R6 remains deferred and unaccepted.
+- Current-head CI on `08d061c` found the unchanged SDK README URL returned HTTP
+  503 during remote Markdown validation. A direct GET reproduced 503; GitHub
+  refused the targeted docs-job rerun while the workflow was in progress.
+  Local Markdown validation passed. No link or required check was weakened;
+  the subsequent pushed head must establish fresh required CI evidence.
 
 ## Earlier full-gate evidence
 

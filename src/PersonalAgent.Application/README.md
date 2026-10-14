@@ -51,6 +51,12 @@ Equivalent attempts serialize to enforce these limits under concurrency.
 Concurrent approval settlement accepts an already-matching terminal action
 status, while other conflicts/errors propagate. A stale expired Pending read
 uses the winning persisted decision and current action, not a second resolution.
+Creation also returns an existing exact approval binding after execution starts
+or completes, without renewing the decision or relaxing its owner binding.
+Observation-only recovery shares the proposal gate and updates distinct-action
+failure accounting only after journaling. A known recovered outcome clears
+only its own write uncertainty; other actions' uncertainty and unsuccessful
+observation/journaling remain blocked.
 `IToolDispatcher.ReleaseTurn` releases only ephemeral failure accounting once
 all turn callbacks have stopped; durable action identity remains authoritative.
 T03 supports status-only replay, not replay of the original result JSON/reason.

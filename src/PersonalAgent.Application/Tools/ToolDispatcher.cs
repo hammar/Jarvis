@@ -144,7 +144,7 @@ public sealed class ToolDispatcher : IToolDispatcher
                 if (action.Status == "Executing")
                 {
                     return await ReconcileInterruptedExecutionAsync(
-                        action, preparation.Arguments!, registration, draft,
+                        action, preparation.Arguments!, registration, draft, request,
                         authorization.Allowed && authorization.EffectiveRisk != ToolRiskClass.Unsupported,
                         cancellationToken);
                 }
@@ -170,6 +170,7 @@ public sealed class ToolDispatcher : IToolDispatcher
                 preparation.Arguments!,
                 registration,
                 draft,
+                request,
                 authorization.Allowed && authorization.EffectiveRisk != ToolRiskClass.Unsupported,
                 cancellationToken);
         }
@@ -369,20 +370,11 @@ public sealed class ToolDispatcher : IToolDispatcher
 
         try
         {
-            var proposalKey = HashText(JsonSerializer.Serialize(new
-            {
-                request.OwnerId,
-                request.ToolName,
-                draft.ActionType,
-                draft.Operation,
-                draft.ResolvedEntityId,
-                Arguments = CanonicalizeObjectJson(draft.CanonicalArguments)
-            }));
-            var budget = failureBudgets.GetOrAdd((request.TurnId, proposalKey), _ => new FailureBudget());
+            var budget = GetFailureBudget(request, draft);
             await budget.Gate.WaitAsync(cancellationToken);
             try
             {
-                if (budget.UncertainWrite)
+                if (budget.UncertainWriteAction is not null)
                 {
                     action = await TransitionAsync(action, "Rejected", cancellationToken);
                     return new(action.Status, null, "equivalent_write_outcome_unknown", action.Id);
@@ -407,12 +399,12 @@ public sealed class ToolDispatcher : IToolDispatcher
                     throw;
                 }
 
-                budget.UncertainWrite = mayWrite && result.Status == "Unknown";
-                if (result.Status is "Failed" or "Unknown")
+                if (mayWrite && result.Status == "Unknown")
                 {
-                    budget.FailedActions.Add(action.Id);
+                    budget.UncertainWriteAction ??= action.Id;
                 }
 
+                RecordBudgetOutcome(budget, action.Id, result.Status);
                 return result;
             }
             finally
@@ -487,7 +479,7 @@ public sealed class ToolDispatcher : IToolDispatcher
         }
 
         // Keep equivalent writes blocked if sending, verification, or terminal journaling throws.
-        budget.UncertainWrite = mayWrite;
+        budget.UncertainWriteAction = mayWrite ? action.Id : null;
         ToolExecutionOutcome execution;
         try
         {
@@ -619,6 +611,7 @@ public sealed class ToolDispatcher : IToolDispatcher
         object arguments,
         IRuntimeToolRegistration registration,
         ToolActionDraft draft,
+        ToolDispatchRequest request,
         bool observationAllowed,
         CancellationToken cancellationToken)
     {
@@ -631,93 +624,153 @@ public sealed class ToolDispatcher : IToolDispatcher
 
         try
         {
-            if (!observationAllowed)
-            {
-                return await CompleteUnknownAsync(action, null, "interrupted_execution_observation_not_permitted");
-            }
-
-            ToolVerificationOutcome verification;
-            using (var verificationCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
-            {
-                verificationCancellation.CancelAfter(verificationTimeout);
-                try
-                {
-                    verification = await registration.VerifyAsync(
-                        arguments,
-                        draft,
-                        new ToolExecutionOutcome(ToolExecutionStatus.Unknown, null, "execution_interrupted"),
-                        verificationCancellation.Token);
-                }
-                catch (OperationCanceledException)
-                {
-                    return await CompleteUnknownAsync(action, null, "interrupted_execution_observation_interrupted");
-                }
-                catch (Exception verificationException)
-                {
-                    try
-                    {
-                        await journal.UpdateStatusAsync(
-                            action.Id,
-                            "Unknown",
-                            action.Version,
-                            clock.UtcNow.ToUniversalTime(),
-                            CancellationToken.None);
-                    }
-                    catch (Exception journalException)
-                    {
-                        throw new AggregateException(
-                            "Interrupted action verification failed and its uncertain outcome could not be journaled.",
-                            verificationException,
-                            journalException);
-                    }
-
-                    throw;
-                }
-            }
-
-            if (!Enum.IsDefined(verification.Status))
-            {
-                await JournalUnknownBeforeThrowAsync(
-                    action.Id,
-                    action.Version,
-                    "Interrupted action verification returned an unknown status, so its outcome remains uncertain.");
-                throw new InvalidOperationException("A tool registration returned an unknown verification status.");
-            }
-
-            var finalStatus = verification.Status switch
-            {
-                ToolVerificationStatus.Verified => "Succeeded",
-                ToolVerificationStatus.NotApplied => "Failed",
-                _ => "Unknown"
-            };
-            var reasonCode = finalStatus switch
-            {
-                "Succeeded" => null,
-                "Failed" => "interrupted_execution_not_applied",
-                _ => verification.ReasonCode ?? "interrupted_execution_outcome_unknown"
-            };
-            ActionJournalEntry completed;
+            var budget = GetFailureBudget(request, draft);
+            await budget.Gate.WaitAsync(cancellationToken);
             try
             {
-                completed = await journal.UpdateStatusAsync(
-                    action.Id,
-                    finalStatus,
-                    action.Version,
-                    clock.UtcNow.ToUniversalTime(),
-                    CancellationToken.None);
+                var result = await ObserveInterruptedExecutionAsync(
+                    action, arguments, registration, draft, observationAllowed, cancellationToken);
+                RecordBudgetOutcome(budget, action.Id, result.Status);
+                return result;
             }
-            catch (PersistenceConcurrencyException)
+            catch
             {
-                completed = await journal.GetAsync(action.Id, cancellationToken)
-                    ?? throw new InvalidOperationException("The action disappeared during interrupted-execution recovery.");
-                return Recorded(completed);
+                budget.FailedActions.Add(action.Id);
+                throw;
             }
-
-            return new(finalStatus, null, reasonCode, completed.Id);
+            finally
+            {
+                budget.Gate.Release();
+            }
         }
         finally
         {
             activeExecutions.TryRemove(action.Id, out _);
+        }
+    }
+
+    private async ValueTask<ToolDispatchResult> ObserveInterruptedExecutionAsync(
+        ActionJournalEntry action,
+        object arguments,
+        IRuntimeToolRegistration registration,
+        ToolActionDraft draft,
+        bool observationAllowed,
+        CancellationToken cancellationToken)
+    {
+        if (!observationAllowed)
+        {
+            return await CompleteUnknownAsync(action, null, "interrupted_execution_observation_not_permitted");
+        }
+
+        ToolVerificationOutcome verification;
+        using (var verificationCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+        {
+            verificationCancellation.CancelAfter(verificationTimeout);
+            try
+            {
+                verification = await registration.VerifyAsync(
+                    arguments,
+                    draft,
+                    new ToolExecutionOutcome(ToolExecutionStatus.Unknown, null, "execution_interrupted"),
+                    verificationCancellation.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                return await CompleteUnknownAsync(action, null, "interrupted_execution_observation_interrupted");
+            }
+            catch (Exception verificationException)
+            {
+                try
+                {
+                    await journal.UpdateStatusAsync(
+                        action.Id,
+                        "Unknown",
+                        action.Version,
+                        clock.UtcNow.ToUniversalTime(),
+                        CancellationToken.None);
+                }
+                catch (Exception journalException)
+                {
+                    throw new AggregateException(
+                        "Interrupted action verification failed and its uncertain outcome could not be journaled.",
+                        verificationException,
+                        journalException);
+                }
+
+                throw;
+            }
+        }
+
+        if (!Enum.IsDefined(verification.Status))
+        {
+            await JournalUnknownBeforeThrowAsync(
+                action.Id,
+                action.Version,
+                "Interrupted action verification returned an unknown status, so its outcome remains uncertain.");
+            throw new InvalidOperationException("A tool registration returned an unknown verification status.");
+        }
+
+        var finalStatus = verification.Status switch
+        {
+            ToolVerificationStatus.Verified => "Succeeded",
+            ToolVerificationStatus.NotApplied => "Failed",
+            _ => "Unknown"
+        };
+        var reasonCode = finalStatus switch
+        {
+            "Succeeded" => null,
+            "Failed" => "interrupted_execution_not_applied",
+            _ => verification.ReasonCode ?? "interrupted_execution_outcome_unknown"
+        };
+        ActionJournalEntry completed;
+        try
+        {
+            completed = await journal.UpdateStatusAsync(
+                action.Id,
+                finalStatus,
+                action.Version,
+                clock.UtcNow.ToUniversalTime(),
+                CancellationToken.None);
+        }
+        catch (PersistenceConcurrencyException)
+        {
+            completed = await journal.GetAsync(action.Id, cancellationToken)
+                ?? throw new InvalidOperationException("The action disappeared during interrupted-execution recovery.");
+            return Recorded(completed);
+        }
+
+        return new(finalStatus, null, reasonCode, completed.Id);
+    }
+
+    private FailureBudget GetFailureBudget(ToolDispatchRequest request, ToolActionDraft draft)
+    {
+        var proposalKey = HashText(JsonSerializer.Serialize(new
+        {
+            request.OwnerId,
+            request.ToolName,
+            draft.ActionType,
+            draft.Operation,
+            draft.ResolvedEntityId,
+            Arguments = CanonicalizeObjectJson(draft.CanonicalArguments)
+        }));
+        return failureBudgets.GetOrAdd((request.TurnId, proposalKey), _ => new FailureBudget());
+    }
+
+    // Called only under the proposal gate, after its outcome has been durably recorded.
+    private static void RecordBudgetOutcome(FailureBudget budget, ActionId actionId, string status)
+    {
+        if (status == "Succeeded")
+        {
+            budget.FailedActions.Remove(actionId);
+        }
+        else if (status is "Failed" or "Unknown")
+        {
+            budget.FailedActions.Add(actionId);
+        }
+
+        if (status is "Succeeded" or "Failed" && budget.UncertainWriteAction == actionId)
+        {
+            budget.UncertainWriteAction = null;
         }
     }
 
@@ -946,6 +999,6 @@ public sealed class ToolDispatcher : IToolDispatcher
     {
         public SemaphoreSlim Gate { get; } = new(1, 1);
         public HashSet<ActionId> FailedActions { get; } = [];
-        public bool UncertainWrite { get; set; }
+        public ActionId? UncertainWriteAction { get; set; }
     }
 }

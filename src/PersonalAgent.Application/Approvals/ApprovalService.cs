@@ -30,17 +30,17 @@ public sealed class ApprovalService : IApprovalService
         ValidateOwner(ownerId);
         var action = await actions.GetAsync(actionId, cancellationToken)
             ?? throw new KeyNotFoundException("The approval action does not exist.");
-        if (!string.Equals(action.Status, "AwaitingApproval", StringComparison.Ordinal))
-        {
-            throw new InvalidOperationException("Only an action awaiting approval can receive an approval request.");
-        }
-
         var approvalId = new ApprovalId(actionId.Value);
         var existing = await approvals.GetAsync(approvalId, cancellationToken);
         if (existing is not null)
         {
             EnsureSameBinding(existing, actionId, ownerId);
             return ToRequest(existing);
+        }
+
+        if (!string.Equals(action.Status, "AwaitingApproval", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("Only an action awaiting approval can receive an approval request.");
         }
 
         var createdAtUtc = clock.UtcNow.ToUniversalTime();
