@@ -31,8 +31,11 @@ Acceptance scenarios include:
   verified failure.
 - Required typed arguments cannot be omitted, and policy/approval expiry are
   rechecked after the durable execution claim before sending.
-- Equivalent failed or uncertain proposals stop after two attempts in one
+- Equivalent failed reads and known failed writes stop after two attempts in
+  one turn. An uncertain write blocks any further equivalent send in the same
   turn, including concurrent attempts, fresh call IDs, and normalized aliases.
+- A stale approval expiry transition cannot misreport an action that another
+  dispatch already claimed or completed.
 
 ## Scope
 
@@ -137,8 +140,9 @@ PR [#45](https://github.com/hammar/Jarvis/pull/45) contains the original
 implementation at `3840d03508882d4daa623967b5641de5b89cab5c`. The initial
 independent working-tree review found R1; GitHub Copilot's independent review
 of `3840d03` found R2-R6. The table is cumulative; no findings are dropped.
-The follow-up commit containing this record addresses R2-R5; its exact hash
-and validation evidence are recorded in the PR body and thread replies.
+Commit `aefba04` addresses R2-R5. The next review against `c8d62dd` also raised
+R7/R8, both labelled "Previously missed"; both are retained below. The current
+follow-up fixes R7/R8; its exact hash is recorded in the PR body/thread replies.
 
 | Reference | Severity | Finding | Disposition and evidence |
 | --- | --- | --- | --- |
@@ -147,14 +151,19 @@ and validation evidence are recorded in the PR body and thread replies.
 | M2-01-R3 | High | Approval expiry or policy could change while awaiting the durable execution claim. | Fixed in the review follow-up: recheck expiry and policy immediately after the claim. `AuthorizationIsRecheckedAfterDurableClaimBeforeSending` and `AutomaticActionCannotExecuteWhenPolicyChangesWhileClaimingIt` assert terminal rejection/expiry and zero sends. |
 | M2-01-R4 | Medium | Fresh call IDs bypassed the two-equivalent-failure limit. | Fixed in the review follow-up: canonical turn-scoped failure accounting serializes equivalent attempts; `TwoEquivalentFailuresStopFreshCallIdsButNotLaterTurns` and `ConcurrentEquivalentFailuresCannotRacePastTheTwoAttemptLimit` cover errors, aliases/property order, fresh call IDs, and concurrency. SDK contracts assert turn accounting cleanup. |
 | M2-01-R5 | Medium | Changed policy prevented recovery of an orphaned `Executing` action. | Fixed in the review follow-up: permit observation-only recovery when current policy allows; otherwise journal `Unknown` without observing or sending. `RestartedExecutionHandlesChangedPolicyWithoutReplayingIt` and `PolicyChangeDoesNotMistakeActiveExecutionForRestartRecovery` cover both restart permissions and active-call arbitration against real SQLite. |
-| M2-01-R6 | Medium | Duplicate/restarted dispatch loses the original result JSON and detailed reason. | Open, owner decision required. The retained T03 journal persists intent/status/version only. Documentation now explicitly describes status-only replay, but that does not fix full response replay. No migration or persistence-contract expansion is authorized by the earlier unchanged-T03 decision, and no new acceptance of this specific limitation has been obtained. |
+| M2-01-R6 | Medium | Duplicate/restarted dispatch loses the original result JSON and detailed reason. | Deferred outside the authorized unchanged-T03 persistence scope, not fixed or owner-accepted. The journal persists intent/status/version only; API/docs explicitly disclose status-only replay. The review thread is handled as a scope deferral, not as proof that the acceptance gap is fixed. |
+| M2-01-R7 (Previously missed) | Medium | A stale approval read could falsely report expiry after another dispatch began or completed execution. | Fixed in the current follow-up: report `Expired` only when the transition actually produced that status; otherwise return the recorded action outcome. `StaleApprovalReadCannotReportExpiryAfterExecutionBegins` exercises both `Executing` and `Succeeded` across the expiry boundary. |
+| M2-01-R8 (Previously missed) | High | A fresh equivalent call ID could resend after an uncertain write. | Fixed in the current follow-up: serialize equivalent proposals and keep their write gate closed from the send boundary until a known outcome is durably recorded. `UncertainWritesBlockEquivalentFreshIdsIncludingQueuedAttempts` and `EquivalentUncertainWritesCannotResendWithFreshIds` cover sequential/concurrent fresh IDs, unknown results, cancellation, handler/verification exceptions, and terminal-journal failure. Known failed writes retain two attempts; later owner turns remain independent. |
 
 For R6, the concrete alternatives are explicit owner acceptance of status-only
 replay for M2-01 or authorization to extend durable terminal-result persistence
 with duplicate/restart payload-equality tests and a reviewed privacy/retention
-contract. The owner was unavailable when asked during the check-in. The R6
-thread remains unresolved; passing automation does not dispose of this finding
-or make the PR ready for owner acceptance.
+contract. The owner was unavailable when asked during the check-in. Resolving
+the R6 discussion records the deferral without authorizing storage work,
+claiming full response replay, or accepting the limitation on the owner's
+behalf. The unresolved product acceptance impact remains explicit: passing
+automation or resolving GitHub conversations does not dispose of this gap
+under the repository's owner-acceptance procedure.
 
 ### Exact-commit independent review
 
@@ -170,11 +179,31 @@ binding; a second attempt to obtain a concrete R6 decision also found the
 owner unavailable. An unattended instruction to continue autonomously is not
 treated as permission to override that specific scope constraint.
 
-## Completion evidence
+## R7/R8 regression evidence
+
+- Before the production fix, the targeted R7/R8 unit regressions failed in all
+  14 cases. After the fix, the dispatcher unit subset passed (50/50), then an
+  additional unsent-claim-conflict regression was added and passed in the full
+  unit gate.
+- `tools/validate.sh build`, `unit`, `integration`, and `coverage` passed on
+  the new follow-up tree: 182 unit tests, 248 integration tests, and verified
+  discovery. The dispatcher SQLite integration subset passed (28/28).
+- Coverage inputs:
+  `artifacts/coverage/unit/20261014T162827Z-27623` and
+  `artifacts/coverage/integration/20261014T162914Z-27789`. All configured gates
+  passed; changed executable lines were 98.7% (834/845), Application lines
+  98.3% (1765/1796), and branches 93.9% (758/807).
+- Dedicated SDK/Aspire/browser gates below describe `aefba04`, not execution
+  against this follow-up. The integration gate includes SDK-contract sources;
+  current-head CI must still establish all required checks after pushing.
+- No storage contracts, schema, SDK integration, process launch, or production
+  feature registrations changed for R7/R8.
+
+## Earlier full-gate evidence
 
 The following checks ran on native macOS against the review-fix tree based on
 `3840d03`; the PR identifies the resulting commit. This is validation evidence,
-not a completion claim while R6 remains open.
+not a completion claim for the deferred R6 acceptance gap.
 
 - **Release build/format:** `tools/validate.sh build` passed; zero warnings and
   errors.
@@ -213,6 +242,6 @@ not a completion claim while R6 remains open.
   registration contract and is covered by controlled tests, not a live
   provider/device integration.
 - The exact runtime follow-up commit `aefba04` received the independent review
-  recorded above. R6 remains unresolved and blocks claiming the complete
+  recorded above. R6 remains deferred and blocks claiming the complete
   acceptance/disposition basis. The later documentation-only commit records
   that review without changing the reviewed runtime, tests, or contracts.

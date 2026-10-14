@@ -76,6 +76,9 @@ SQLite lock wait. Approval expiry at that point records `Expired`; a changed
 policy records `Rejected`, without sending. Production composition currently has an empty tool
 registry and empty allowlist: no feature tool is exposed until its owning
 feature task registers a real handler.
+If a concurrent dispatch already claimed or completed the action, a stale
+approval expiry attempt returns that recorded state instead of falsely claiming
+that expiry stopped execution.
 
 The action state machine persists `Prepared` before any external execution;
 approval-required actions move to `AwaitingApproval`, then `Executing` only
@@ -96,7 +99,13 @@ Equivalent proposals within one host turn share a two-failure budget independent
 of call ID, argument property order, or resolved aliases. Equivalent executions
 are serialized so concurrent failures cannot overrun the limit. Failed and
 uncertain outcomes, including execution exceptions, consume the budget;
-successful operations do not. The engine releases ephemeral accounting only
+successful operations do not. An uncertain write is stricter: crossing the
+send boundary blocks all further equivalent writes in that turn until a known
+outcome is recorded. `Unknown`, handler/verification exceptions, and failure to
+journal the terminal outcome leave this block in place, including for queued
+attempts and fresh call IDs. Known failed writes and failed reads still have the
+two-attempt limit; distinct later owner turns remain independent.
+The engine releases ephemeral accounting only
 after the turn's callbacks stop. Restart interrupts turns rather than resuming
 their inference, so these counters are not a durable retry mechanism.
 

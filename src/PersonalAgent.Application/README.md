@@ -42,9 +42,12 @@ it does not call the execution handler again. The current Web composition
 registers no tools or allowlist entries until their feature implementation
 arrives.
 
-The dispatcher rechecks policy/approval expiry after claiming execution, rejects
-equivalent proposals after two failed or uncertain attempts in one turn, and
-serializes equivalent attempts to enforce that limit under concurrency.
+The dispatcher rechecks policy/approval expiry after claiming execution and
+reports the recorded action state when a concurrent execution defeats a stale
+expiry transition. Equivalent reads and known failed writes have a two-failure
+limit per turn. An uncertain write blocks any further equivalent send in that
+turn, including fresh call IDs, queued attempts, and exceptions after dispatch.
+Equivalent attempts serialize to enforce these limits under concurrency.
 `IToolDispatcher.ReleaseTurn` releases only ephemeral failure accounting once
 all turn callbacks have stopped; durable action identity remains authoritative.
 T03 supports status-only replay, not replay of the original result JSON/reason.

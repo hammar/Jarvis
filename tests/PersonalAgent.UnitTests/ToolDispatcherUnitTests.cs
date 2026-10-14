@@ -141,12 +141,13 @@ public sealed class ToolDispatcherUnitTests
     }
 
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
+    [InlineData(ToolRiskClass.ReadOnly, false)]
+    [InlineData(ToolRiskClass.ReadOnly, true)]
+    [InlineData(ToolRiskClass.LowRiskWrite, false)]
     [Trait("Category", "Unit")]
-    public async Task TwoEquivalentFailuresStopFreshCallIdsButNotLaterTurns(bool throws)
+    public async Task TwoEquivalentFailuresStopFreshCallIdsButNotLaterTurns(ToolRiskClass riskClass, bool throws)
     {
-        using var fixture = new Fixture(ToolRiskClass.ReadOnly);
+        using var fixture = new Fixture(riskClass);
         fixture.Execution = (_, _, _) => throws
             ? throw new InvalidOperationException("controlled failed execution")
             : ValueTask.FromResult(new ToolExecutionOutcome(ToolExecutionStatus.Failed, null, "known_failure"));
@@ -212,6 +213,156 @@ public sealed class ToolDispatcherUnitTests
         Assert.Equal(2, results.Count(result => result.Status == "Failed"));
         Assert.Single(results, result => result.ReasonCode == "equivalent_failure_limit");
         Assert.Equal(2, fixture.ExecutionCount);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("Category", "Unit")]
+    public async Task StaleApprovalReadCannotReportExpiryAfterExecutionBegins(bool completed)
+    {
+        using var fixture = new Fixture(ToolRiskClass.ApprovalRequired);
+        var pending = await fixture.Dispatcher.DispatchAsync(Request, CancellationToken.None);
+        await fixture.Approvals.ResolveAsync(pending.ApprovalId!.Value, "owner", 1, true, CancellationToken.None);
+        var reading = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseRead = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var executing = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseExecution = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var reads = 0;
+        fixture.ApprovalStore.BeforeRead = async token =>
+        {
+            if (Interlocked.Increment(ref reads) == 1)
+            {
+                reading.SetResult();
+                await releaseRead.Task.WaitAsync(TimeSpan.FromSeconds(5), token);
+            }
+        };
+        fixture.Execution = async (_, _, token) =>
+        {
+            fixture.Clock.Advance(TimeSpan.FromMinutes(5));
+            executing.SetResult();
+            await releaseExecution.Task.WaitAsync(TimeSpan.FromSeconds(5), token);
+            return new ToolExecutionOutcome(ToolExecutionStatus.Completed, null, null);
+        };
+
+        var stale = fixture.Dispatcher.DispatchAsync(Request, CancellationToken.None).AsTask();
+        await reading.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        var first = fixture.Dispatcher.DispatchAsync(Request, CancellationToken.None).AsTask();
+        await executing.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        try
+        {
+            if (completed)
+            {
+                releaseExecution.SetResult();
+                Assert.Equal("Succeeded", (await first).Status);
+            }
+
+            releaseRead.SetResult();
+            var duplicate = await stale.WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.Equal(completed ? "Succeeded" : "Executing", duplicate.Status);
+            Assert.Equal("recorded_action_outcome", duplicate.ReasonCode);
+            Assert.Equal(pending.ActionId, duplicate.ActionId);
+            Assert.Equal(duplicate.Status, fixture.Journal.Entries.Single().Status);
+            Assert.Equal(1, fixture.ExecutionCount);
+        }
+        finally
+        {
+            releaseRead.TrySetResult();
+            releaseExecution.TrySetResult();
+            await first;
+        }
+    }
+
+    [Theory]
+    [InlineData(false, "unknown")]
+    [InlineData(true, "unknown")]
+    [InlineData(false, "execution-error")]
+    [InlineData(true, "execution-error")]
+    [InlineData(false, "execution-cancelled")]
+    [InlineData(true, "execution-cancelled")]
+    [InlineData(false, "verification-error")]
+    [InlineData(true, "verification-error")]
+    [InlineData(false, "verification-cancelled")]
+    [InlineData(true, "verification-cancelled")]
+    [InlineData(false, "journal-error")]
+    [InlineData(true, "journal-error")]
+    [Trait("Category", "Unit")]
+    public async Task UncertainWritesBlockEquivalentFreshIdsIncludingQueuedAttempts(bool concurrent, string outcome)
+    {
+        using var fixture = new Fixture();
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.Execution = async (_, _, token) =>
+        {
+            entered.TrySetResult();
+            await release.Task.WaitAsync(TimeSpan.FromSeconds(5), token);
+            return outcome switch
+            {
+                "execution-error" => throw new InvalidOperationException("controlled execution failure"),
+                "execution-cancelled" => throw new OperationCanceledException(),
+                _ => new ToolExecutionOutcome(ToolExecutionStatus.Unknown, null, "delivery_uncertain")
+            };
+        };
+        fixture.Verification = (_, _, _, _) => outcome switch
+        {
+            "verification-error" => throw new InvalidOperationException("controlled verification failure"),
+            "verification-cancelled" => throw new OperationCanceledException(),
+            _ => ValueTask.FromResult(new ToolVerificationOutcome(ToolVerificationStatus.Unknown, "unconfirmed"))
+        };
+        fixture.Journal.FailUnknownUpdate = outcome == "journal-error";
+
+        var first = fixture.Dispatcher.DispatchAsync(Request, CancellationToken.None).AsTask();
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        var nextRequest = Request with { CallId = "fresh-id", ArgumentsJson = """{"On":true,"Entity":"porch-lamp"}""" };
+        var next = concurrent
+            ? fixture.Dispatcher.DispatchAsync(nextRequest, CancellationToken.None).AsTask()
+            : null;
+        release.SetResult();
+        if (outcome is "execution-error" or "verification-error")
+        {
+            await Assert.ThrowsAsync<InvalidOperationException>(() => first);
+        }
+        else if (outcome == "journal-error")
+        {
+            await Assert.ThrowsAsync<PersistenceConcurrencyException>(() => first);
+        }
+        else
+        {
+            Assert.Equal("Unknown", (await first).Status);
+        }
+
+        var rejected = await (next ?? fixture.Dispatcher.DispatchAsync(nextRequest, CancellationToken.None).AsTask());
+        Assert.Equal("Rejected", rejected.Status);
+        Assert.Equal("equivalent_write_outcome_unknown", rejected.ReasonCode);
+        Assert.Equal(1, fixture.ExecutionCount);
+        Assert.Equal("Rejected", (await fixture.Journal.GetAsync(rejected.ActionId!.Value, CancellationToken.None))!.Status);
+        Assert.Equal(outcome == "journal-error" ? "Executing" : "Unknown",
+            fixture.Journal.Entries.Single(entry => entry.Id != rejected.ActionId).Status);
+
+        fixture.Journal.FailUnknownUpdate = false;
+        fixture.Execution = (_, _, _) =>
+            ValueTask.FromResult(new ToolExecutionOutcome(ToolExecutionStatus.Completed, null, null));
+        fixture.Verification = (_, _, _, _) =>
+            ValueTask.FromResult(new ToolVerificationOutcome(ToolVerificationStatus.Verified, null));
+        var later = await fixture.Dispatcher.DispatchAsync(
+            Request with { TurnId = TurnId.New() }, CancellationToken.None);
+        Assert.Equal("Succeeded", later.Status);
+        Assert.Equal(2, fixture.ExecutionCount);
+    }
+
+    [Fact]
+    [Trait("Category", "Unit")]
+    public async Task ExecutionClaimConflictDoesNotMarkAnUnsentWriteUncertain()
+    {
+        using var fixture = new Fixture();
+        fixture.Journal.FailNextExecutingUpdate = true;
+        Assert.Equal("Prepared", (await fixture.Dispatcher.DispatchAsync(Request, CancellationToken.None)).Status);
+        Assert.Equal(0, fixture.ExecutionCount);
+
+        var next = await fixture.Dispatcher.DispatchAsync(
+            Request with { CallId = "after-claim-conflict" }, CancellationToken.None);
+        Assert.Equal("Succeeded", next.Status);
+        Assert.Equal(1, fixture.ExecutionCount);
     }
 
     [Fact]
@@ -1167,6 +1318,8 @@ public sealed class ToolDispatcherUnitTests
         private readonly Dictionary<ApprovalId, ApprovalStorageRecord> entries = [];
         private readonly object gate = new();
 
+        public Func<CancellationToken, Task>? BeforeRead { get; set; }
+
         public IReadOnlyCollection<ApprovalStorageRecord> Entries
         {
             get
@@ -1201,13 +1354,18 @@ public sealed class ToolDispatcherUnitTests
             }
         }
 
-        public ValueTask<ApprovalStorageRecord?> GetAsync(ApprovalId id, CancellationToken cancellationToken)
+        public async ValueTask<ApprovalStorageRecord?> GetAsync(ApprovalId id, CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            if (BeforeRead is { } beforeRead)
+            {
+                await beforeRead(cancellationToken);
+            }
+
             lock (gate)
             {
                 entries.TryGetValue(id, out var entry);
-                return ValueTask.FromResult(entry);
+                return entry;
             }
         }
 

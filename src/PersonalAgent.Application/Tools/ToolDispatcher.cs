@@ -211,6 +211,7 @@ public sealed class ToolDispatcher : IToolDispatcher
             draft,
             request,
             authorization.PolicyVersion,
+            effectiveRisk != ToolRiskClass.ReadOnly,
             null,
             cancellationToken);
     }
@@ -315,11 +316,13 @@ public sealed class ToolDispatcher : IToolDispatcher
         if (clock.UtcNow.ToUniversalTime() >= approval.ExpiresAtUtc)
         {
             action = await TransitionAsync(action, "Expired", cancellationToken);
-            return new("Expired", null, "approval_expired_before_execution", action.Id, approvalId);
+            return action.Status == "Expired"
+                ? new("Expired", null, "approval_expired_before_execution", action.Id, approvalId)
+                : Recorded(action);
         }
 
         return await ExecuteOnceAsync(
-            action, arguments, registration, draft, request, policyVersion, approval.ExpiresAtUtc, cancellationToken);
+            action, arguments, registration, draft, request, policyVersion, true, approval.ExpiresAtUtc, cancellationToken);
     }
 
     private async ValueTask<ToolDispatchResult> ExecuteOnceAsync(
@@ -329,6 +332,7 @@ public sealed class ToolDispatcher : IToolDispatcher
         ToolActionDraft draft,
         ToolDispatchRequest request,
         string policyVersion,
+        bool mayWrite,
         DateTimeOffset? approvalExpiresAtUtc,
         CancellationToken cancellationToken)
     {
@@ -359,6 +363,12 @@ public sealed class ToolDispatcher : IToolDispatcher
             await budget.Gate.WaitAsync(cancellationToken);
             try
             {
+                if (budget.UncertainWrite)
+                {
+                    action = await TransitionAsync(action, "Rejected", cancellationToken);
+                    return new(action.Status, null, "equivalent_write_outcome_unknown", action.Id);
+                }
+
                 if (budget.Failures >= 2)
                 {
                     action = await TransitionAsync(action, "Rejected", cancellationToken);
@@ -369,7 +379,8 @@ public sealed class ToolDispatcher : IToolDispatcher
                 try
                 {
                     result = await ExecuteClaimedOnceAsync(
-                        action, arguments, registration, draft, request, policyVersion, approvalExpiresAtUtc, cancellationToken);
+                        action, arguments, registration, draft, request, policyVersion, mayWrite,
+                        approvalExpiresAtUtc, budget, cancellationToken);
                 }
                 catch
                 {
@@ -377,6 +388,7 @@ public sealed class ToolDispatcher : IToolDispatcher
                     throw;
                 }
 
+                budget.UncertainWrite = mayWrite && result.Status == "Unknown";
                 if (result.Status is "Failed" or "Unknown")
                 {
                     budget.Failures++;
@@ -402,7 +414,9 @@ public sealed class ToolDispatcher : IToolDispatcher
         ToolActionDraft draft,
         ToolDispatchRequest request,
         string policyVersion,
+        bool mayWrite,
         DateTimeOffset? approvalExpiresAtUtc,
+        FailureBudget budget,
         CancellationToken cancellationToken)
     {
         try
@@ -453,6 +467,8 @@ public sealed class ToolDispatcher : IToolDispatcher
             return new(rejected.Status, null, "policy_changed_before_execution", rejected.Id);
         }
 
+        // Keep equivalent writes blocked if sending, verification, or terminal journaling throws.
+        budget.UncertainWrite = mayWrite;
         ToolExecutionOutcome execution;
         try
         {
@@ -911,5 +927,6 @@ public sealed class ToolDispatcher : IToolDispatcher
     {
         public SemaphoreSlim Gate { get; } = new(1, 1);
         public int Failures { get; set; }
+        public bool UncertainWrite { get; set; }
     }
 }

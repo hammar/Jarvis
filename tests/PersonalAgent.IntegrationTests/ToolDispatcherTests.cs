@@ -90,6 +90,58 @@ public sealed class ToolDispatcherTests
         Assert.Equal(1, fixture.ExecutionCount);
     }
 
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    [Trait("Category", "Integration")]
+    public async Task EquivalentUncertainWritesCannotResendWithFreshIds(bool concurrent, bool throws)
+    {
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var fixture = await Fixture.CreateAsync(execution: async (_, _, token) =>
+        {
+            entered.TrySetResult();
+            await release.Task.WaitAsync(TimeSpan.FromSeconds(5), token);
+            return throws
+                ? throw new InvalidOperationException("controlled uncertain send")
+                : new ToolExecutionOutcome(ToolExecutionStatus.Unknown, null, "delivery_uncertain");
+        }, verification: (_, _, _, _) =>
+            ValueTask.FromResult(new ToolVerificationOutcome(ToolVerificationStatus.Unknown, "unconfirmed")));
+        var first = fixture.Dispatcher.DispatchAsync(PorchRequest, CancellationToken.None).AsTask();
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        var nextRequest = PorchRequest with { CallId = "fresh-id" };
+        var queued = concurrent
+            ? fixture.Dispatcher.DispatchAsync(nextRequest, CancellationToken.None).AsTask()
+            : null;
+        release.SetResult();
+        if (throws)
+        {
+            await Assert.ThrowsAsync<InvalidOperationException>(() => first);
+        }
+        else
+        {
+            Assert.Equal("Unknown", (await first).Status);
+        }
+
+        var rejected = await (queued ?? fixture.Dispatcher.DispatchAsync(nextRequest, CancellationToken.None).AsTask());
+        Assert.Equal("Rejected", rejected.Status);
+        Assert.Equal("equivalent_write_outcome_unknown", rejected.ReasonCode);
+        Assert.Equal(1, fixture.ExecutionCount);
+        Assert.Equal("Unknown", (await fixture.Journal.GetAsync(fixture.ActionId(PorchRequest), CancellationToken.None))!.Status);
+        Assert.Equal("Rejected", (await fixture.Journal.GetAsync(rejected.ActionId!.Value, CancellationToken.None))!.Status);
+
+        fixture.SetExecution((_, _, _) =>
+            ValueTask.FromResult(new ToolExecutionOutcome(ToolExecutionStatus.Completed, null, null)));
+        fixture.SetVerification((_, _, _, _) =>
+            ValueTask.FromResult(new ToolVerificationOutcome(ToolVerificationStatus.Verified, null)));
+        var later = await fixture.Dispatcher.DispatchAsync(
+            PorchRequest with { TurnId = TurnId.New() }, CancellationToken.None);
+        Assert.Equal("Succeeded", later.Status);
+        Assert.Equal(2, fixture.ExecutionCount);
+    }
+
     [Fact]
     [Trait("Category", "Integration")]
     public async Task ExactApprovalMustBeResolvedBeforeActionExecutesAndIsSingleUse()
