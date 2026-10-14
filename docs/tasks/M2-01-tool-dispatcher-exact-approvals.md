@@ -358,6 +358,18 @@ durable record. This was source-only review: no checks independently rerun,
 current-head CI inspected, or live/cross-process behavior established.
 Earlier dispositions remain intact; R6 remains deferred and unaccepted.
 
+The bounded independent review of exact commit
+`5466cd31295fdf5336b7fe043d62bcfa8994d0ad` against `5773e76` supported
+R23 with no new significant findings. It checked strict original-envelope
+classification shared with Executing recovery, pre-wait registration,
+unchanged synchronized admission, cancellation/read-failure preservation,
+action-owned reconciliation, all new unit/SQLite cases and documentation
+against the complete R1-R23 ledger and relevant spec/ADRs. It found no
+current-risk downgrade or additional persistence/await/callback under the
+admission lock. This was source-only review: no checks independently rerun,
+CI inspected, or live/device/cross-process behavior established. All earlier
+dispositions and R6's deferred, unfixed, unaccepted status remain unchanged.
+
 ## R7/R8 regression evidence
 
 - Before the production fix, the targeted R7/R8 unit regressions failed in all
