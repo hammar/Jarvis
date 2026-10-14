@@ -623,7 +623,8 @@ public sealed record ToolDispatchRequest(
 
 /// <summary>Reports the host's dispatch outcome, including uncertain physical results.</summary>
 /// <param name="Status">Stable outcome such as Succeeded, Rejected, Failed, or Unknown.</param>
-/// <param name="ResultJson">Optional typed tool result serialized for the engine.</param>
+/// <param name="ResultJson">Optional typed tool result serialized for the engine on live execution.
+/// The T03 status-only journal cannot replay this payload after duplicate dispatch or restart.</param>
 /// <param name="ReasonCode">Stable reason code for denial or failure.</param>
 /// <param name="ActionId">Durable host action identity, when the proposal was registered.</param>
 /// <param name="ApprovalId">Exact approval request identity when owner review is required.</param>
@@ -639,6 +640,11 @@ public sealed record ToolDispatchResult(
 /// <summary>Validates, authorizes, journals, executes, and verifies registered tool calls.</summary>
 public interface IToolDispatcher
 {
+    /// <summary>Releases ephemeral equivalent-failure accounting after all callbacks for a turn have stopped.</summary>
+    /// <param name="turnId">Completed or interrupted host turn whose callbacks can no longer dispatch.</param>
+    /// <remarks>Does not delete durable actions or permit replay of an existing action identity.</remarks>
+    void ReleaseTurn(TurnId turnId);
+
     /// <summary>Dispatches one untrusted proposal through host-side policy checks.</summary>
     /// <param name="request">Model-proposed call; its arguments are never trusted as authorization.</param>
     /// <param name="cancellationToken">Token that cancels work before an external side effect is sent.</param>

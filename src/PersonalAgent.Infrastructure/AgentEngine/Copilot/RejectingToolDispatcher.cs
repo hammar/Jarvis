@@ -1,10 +1,16 @@
 using PersonalAgent.Application;
+using PersonalAgent.Domain;
 
 namespace PersonalAgent.Infrastructure.AgentEngine.Copilot;
 
 /// <summary>Explicitly denies every tool proposal in M1, where no tools are registered.</summary>
 public sealed class RejectingToolDispatcher : IToolDispatcher
 {
+    /// <inheritdoc />
+    public void ReleaseTurn(TurnId turnId)
+    {
+    }
+
     /// <inheritdoc />
     public ValueTask<ToolDispatchResult> DispatchAsync(
         ToolDispatchRequest request,

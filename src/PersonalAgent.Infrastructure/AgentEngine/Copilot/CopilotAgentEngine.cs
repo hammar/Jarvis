@@ -158,6 +158,7 @@ public sealed class CopilotAgentEngine : IAgentEngine, IEngineStateMaintenance
             }
             finally
             {
+                dispatcher.ReleaseTurn(request.TurnId);
                 activeTurns.TryRemove(new KeyValuePair<TurnId, CopilotActiveTurn>(request.TurnId, active));
                 activeConversations.TryRemove(
                     new KeyValuePair<ConversationId, TurnId>(request.ConversationId, request.TurnId));

@@ -19,6 +19,7 @@ public sealed class ToolDispatcher : IToolDispatcher
     private readonly IClock clock;
     private readonly TimeSpan verificationTimeout;
     private readonly ConcurrentDictionary<ActionId, byte> activeExecutions = new();
+    private readonly ConcurrentDictionary<(TurnId Turn, string Proposal), FailureBudget> failureBudgets = new();
 
     /// <summary>Creates the host tool dispatcher.</summary>
     /// <param name="registry">Immutable host-registered tools.</param>
@@ -46,6 +47,15 @@ public sealed class ToolDispatcher : IToolDispatcher
         }
 
         this.verificationTimeout = verificationTimeout;
+    }
+
+    /// <inheritdoc />
+    public void ReleaseTurn(TurnId turnId)
+    {
+        foreach (var key in failureBudgets.Keys.Where(key => key.Turn == turnId))
+        {
+            failureBudgets.TryRemove(key, out _);
+        }
     }
 
     /// <inheritdoc />
@@ -124,9 +134,20 @@ public sealed class ToolDispatcher : IToolDispatcher
 
         if (!string.Equals(action.RequestHash, requestHash, StringComparison.Ordinal))
         {
-            if (IsTerminal(action.Status) && SameProposalIgnoringPolicy(action.CanonicalArguments, envelope))
+            if (SameProposalIgnoringPolicy(action.CanonicalArguments, envelope))
             {
-                return Recorded(action);
+                if (IsTerminal(action.Status))
+                {
+                    return Recorded(action);
+                }
+
+                if (action.Status == "Executing")
+                {
+                    return await ReconcileInterruptedExecutionAsync(
+                        action, preparation.Arguments!, registration, draft,
+                        authorization.Allowed && authorization.EffectiveRisk != ToolRiskClass.Unsupported,
+                        cancellationToken);
+                }
             }
 
             if (action.Status is "Prepared" or "AwaitingApproval")
@@ -149,6 +170,7 @@ public sealed class ToolDispatcher : IToolDispatcher
                 preparation.Arguments!,
                 registration,
                 draft,
+                authorization.Allowed && authorization.EffectiveRisk != ToolRiskClass.Unsupported,
                 cancellationToken);
         }
 
@@ -172,6 +194,7 @@ public sealed class ToolDispatcher : IToolDispatcher
                 preparation.Arguments!,
                 registration,
                 draft,
+                authorization.PolicyVersion,
                 cancellationToken);
         }
 
@@ -186,6 +209,9 @@ public sealed class ToolDispatcher : IToolDispatcher
             preparation.Arguments!,
             registration,
             draft,
+            request,
+            authorization.PolicyVersion,
+            null,
             cancellationToken);
     }
 
@@ -223,6 +249,7 @@ public sealed class ToolDispatcher : IToolDispatcher
         object arguments,
         IRuntimeToolRegistration registration,
         ToolActionDraft draft,
+        string policyVersion,
         CancellationToken cancellationToken)
     {
         if (action.Status == "Prepared")
@@ -291,7 +318,8 @@ public sealed class ToolDispatcher : IToolDispatcher
             return new("Expired", null, "approval_expired_before_execution", action.Id, approvalId);
         }
 
-        return await ExecuteOnceAsync(action, arguments, registration, draft, cancellationToken);
+        return await ExecuteOnceAsync(
+            action, arguments, registration, draft, request, policyVersion, approval.ExpiresAtUtc, cancellationToken);
     }
 
     private async ValueTask<ToolDispatchResult> ExecuteOnceAsync(
@@ -299,6 +327,9 @@ public sealed class ToolDispatcher : IToolDispatcher
         object arguments,
         IRuntimeToolRegistration registration,
         ToolActionDraft draft,
+        ToolDispatchRequest request,
+        string policyVersion,
+        DateTimeOffset? approvalExpiresAtUtc,
         CancellationToken cancellationToken)
     {
         if (action.Status is not ("Prepared" or "AwaitingApproval"))
@@ -315,7 +346,48 @@ public sealed class ToolDispatcher : IToolDispatcher
 
         try
         {
-            return await ExecuteClaimedOnceAsync(action, arguments, registration, draft, cancellationToken);
+            var proposalKey = HashText(JsonSerializer.Serialize(new
+            {
+                request.OwnerId,
+                request.ToolName,
+                draft.ActionType,
+                draft.Operation,
+                draft.ResolvedEntityId,
+                Arguments = CanonicalizeObjectJson(draft.CanonicalArguments)
+            }));
+            var budget = failureBudgets.GetOrAdd((request.TurnId, proposalKey), _ => new FailureBudget());
+            await budget.Gate.WaitAsync(cancellationToken);
+            try
+            {
+                if (budget.Failures >= 2)
+                {
+                    action = await TransitionAsync(action, "Rejected", cancellationToken);
+                    return new(action.Status, null, "equivalent_failure_limit", action.Id);
+                }
+
+                ToolDispatchResult result;
+                try
+                {
+                    result = await ExecuteClaimedOnceAsync(
+                        action, arguments, registration, draft, request, policyVersion, approvalExpiresAtUtc, cancellationToken);
+                }
+                catch
+                {
+                    budget.Failures++;
+                    throw;
+                }
+
+                if (result.Status is "Failed" or "Unknown")
+                {
+                    budget.Failures++;
+                }
+
+                return result;
+            }
+            finally
+            {
+                budget.Gate.Release();
+            }
         }
         finally
         {
@@ -328,6 +400,9 @@ public sealed class ToolDispatcher : IToolDispatcher
         object arguments,
         IRuntimeToolRegistration registration,
         ToolActionDraft draft,
+        ToolDispatchRequest request,
+        string policyVersion,
+        DateTimeOffset? approvalExpiresAtUtc,
         CancellationToken cancellationToken)
     {
         try
@@ -361,6 +436,21 @@ public sealed class ToolDispatcher : IToolDispatcher
                 clock.UtcNow.ToUniversalTime(),
                 CancellationToken.None);
             return new("Failed", null, "cancelled_before_send", cancelledBeforeSend.Id);
+        }
+
+        if (approvalExpiresAtUtc is { } expiry && clock.UtcNow.ToUniversalTime() >= expiry)
+        {
+            var expired = await TransitionAsync(action, "Expired", CancellationToken.None);
+            return new(expired.Status, null, "approval_expired_before_execution", expired.Id);
+        }
+
+        var authorization = policy.Evaluate(request.ToolName, draft, registration.RiskClass);
+        if (!authorization.Allowed
+            || authorization.EffectiveRisk == ToolRiskClass.Unsupported
+            || authorization.PolicyVersion != policyVersion)
+        {
+            var rejected = await TransitionAsync(action, "Rejected", CancellationToken.None);
+            return new(rejected.Status, null, "policy_changed_before_execution", rejected.Id);
         }
 
         ToolExecutionOutcome execution;
@@ -494,6 +584,7 @@ public sealed class ToolDispatcher : IToolDispatcher
         object arguments,
         IRuntimeToolRegistration registration,
         ToolActionDraft draft,
+        bool observationAllowed,
         CancellationToken cancellationToken)
     {
         if (!activeExecutions.TryAdd(action.Id, 0))
@@ -505,6 +596,11 @@ public sealed class ToolDispatcher : IToolDispatcher
 
         try
         {
+            if (!observationAllowed)
+            {
+                return await CompleteUnknownAsync(action, null, "interrupted_execution_observation_not_permitted");
+            }
+
             ToolVerificationOutcome verification;
             using (var verificationCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
             {
@@ -810,4 +906,10 @@ public sealed class ToolDispatcher : IToolDispatcher
         ToolRiskClass RiskClass,
         string CurrentRequestHash,
         string CanonicalArguments);
+
+    private sealed class FailureBudget
+    {
+        public SemaphoreSlim Gate { get; } = new(1, 1);
+        public int Failures { get; set; }
+    }
 }

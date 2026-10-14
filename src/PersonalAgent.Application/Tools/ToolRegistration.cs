@@ -141,6 +141,7 @@ public sealed class ToolRegistration<TArguments> : IToolRegistration, IRuntimeTo
     private readonly JsonSerializerOptions serializerOptions = new()
     {
         MaxDepth = 32,
+        RespectRequiredConstructorParameters = true,
         PropertyNameCaseInsensitive = false,
         UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow
     };

@@ -42,6 +42,13 @@ it does not call the execution handler again. The current Web composition
 registers no tools or allowlist entries until their feature implementation
 arrives.
 
+The dispatcher rechecks policy/approval expiry after claiming execution, rejects
+equivalent proposals after two failed or uncertain attempts in one turn, and
+serializes equivalent attempts to enforce that limit under concurrency.
+`IToolDispatcher.ReleaseTurn` releases only ephemeral failure accounting once
+all turn callbacks have stopped; durable action identity remains authoritative.
+T03 supports status-only replay, not replay of the original result JSON/reason.
+
 `Context/LocalChatPrompt` supplies shared host chat instructions and formats
 the current task plainly after quoted, role-labelled history. Packet provenance
 and privacy metadata stay application-owned. The estimate counts the same

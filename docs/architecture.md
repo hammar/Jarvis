@@ -71,7 +71,9 @@ copied into the action journal). Reusing an ID for changed content is rejected.
 Approval records bind one action ID to one owner, expire after five minutes,
 and resolve once using optimistic concurrency. Execution rechecks the exact
 canonical envelope and current policy immediately before crossing the
-side-effect boundary. Production composition currently has an empty tool
+side-effect boundary, after the durable execution claim has completed any
+SQLite lock wait. Approval expiry at that point records `Expired`; a changed
+policy records `Rejected`, without sending. Production composition currently has an empty tool
 registry and empty allowlist: no feature tool is exposed until its owning
 feature task registers a real handler.
 
@@ -89,6 +91,27 @@ dispatcher return the in-progress journal state rather than mistaking it for a
 restart. SQLite cannot transact with Home Assistant, so `Succeeded` means the
 intended state was verified, not exactly-once physical execution. Approval UI
 and real Home Assistant handlers remain M2-04 and M2-02 respectively.
+
+Equivalent proposals within one host turn share a two-failure budget independent
+of call ID, argument property order, or resolved aliases. Equivalent executions
+are serialized so concurrent failures cannot overrun the limit. Failed and
+uncertain outcomes, including execution exceptions, consume the budget;
+successful operations do not. The engine releases ephemeral accounting only
+after the turn's callbacks stop. Restart interrupts turns rather than resuming
+their inference, so these counters are not a durable retry mechanism.
+
+A policy-only change does not strand an interrupted `Executing` action.
+Redispatch observes it only if the current policy still permits the capability;
+otherwise it records `Unknown` without observation. Active execution arbitration
+still applies, including when policy changes while a handler is running.
+
+**Status-only replay limitation:** the frozen T03 journal retains canonical
+intent, status and version, not result JSON or the original reason code.
+Duplicate/restarted dispatch therefore returns the durable status with
+`recorded_action_outcome` and no result payload. This is not full response
+replay. Adding durable terminal payloads requires a separately reviewed storage
+contract/schema change; do not overload the immutable canonical request or audit
+log as an unofficial result store.
 
 M1 registers `LocalOnlyModelRouter` and `ConversationContextBuilder` as
 Application services. The router returns typed Local, Clarify, or Unsupported

@@ -7,7 +7,7 @@ flow for issue #5 / M2-01. Model-proposed calls remain untrusted. Host policy
 must validate, authorize, journal before execution, and report uncertain
 physical outcomes without blind retries. SQLite remains authoritative.
 
-**Specification:** §§5, 7, 14, 15, and 20. **Dependencies:** completed M1
+**Specification:** §§5, 7, 13, 14, 15, and 20. **Dependencies:** completed M1
 (T02/T03/T04 and M1-01–M1-06). **Issue:** #5.
 
 Acceptance scenarios include:
@@ -16,7 +16,9 @@ Acceptance scenarios include:
 - An ambiguous entity alias requires clarification and does not select a target.
 - Re-dispatch with the same action identity returns the recorded outcome and
   never repeats execution; a distinct later request with identical arguments
-  remains a distinct action.
+  remains a distinct action. The current T03 contract records status only,
+  not the original result JSON or reason; full outcome replay remains an
+  unresolved acceptance gap under M2-01-R6 below.
 - A process restart that finds a persisted `Executing` action performs bounded
   observation only, records the observed outcome or `Unknown`, and never
   replays the execution handler; a concurrent duplicate on the active
@@ -27,6 +29,10 @@ Acceptance scenarios include:
   cannot execute.
 - Cancellation after a side effect was sent does not claim rollback or
   verified failure.
+- Required typed arguments cannot be omitted, and policy/approval expiry are
+  rechecked after the durable execution claim before sending.
+- Equivalent failed or uncertain proposals stop after two attempts in one
+  turn, including concurrent attempts, fresh call IDs, and normalized aliases.
 
 ## Scope
 
@@ -127,27 +133,45 @@ Acceptance scenarios include:
 
 ## Independent review follow-up
 
-- **M2-01-R1 — Fixed:** a process restart could leave an action in `Executing`
-  indefinitely because redispatch returned that status without observation.
-  The dispatcher now distinguishes active in-process execution from orphaned
-  persisted execution and performs bounded verification only for the latter.
-  Unit and real-SQLite regression scenarios verify recovery without a second
-  execution; a same-dispatcher concurrent duplicate remains `Executing`.
-- The change is validated against the current working tree; no commit or PR
-  review revision exists yet.
+PR [#45](https://github.com/hammar/Jarvis/pull/45) contains the original
+implementation at `3840d03508882d4daa623967b5641de5b89cab5c`. The initial
+independent working-tree review found R1; GitHub Copilot's independent review
+of `3840d03` found R2-R6. The table is cumulative; no findings are dropped.
+The follow-up commit containing this record addresses R2-R5; its exact hash
+and validation evidence are recorded in the PR body and thread replies.
+
+| Reference | Severity | Finding | Disposition and evidence |
+| --- | --- | --- | --- |
+| M2-01-R1 | Medium | Restarted actions could remain `Executing` without observation. | Fixed in `3840d03`: bounded observation-only recovery, active-execution arbitration, and unit/SQLite regressions. |
+| M2-01-R2 | High | Missing non-optional constructor arguments could synthesize defaults and alter a proposed action. | Fixed in the review follow-up: enforce required constructor parameters. `MissingRequiredArgumentsAreRejectedBeforePreparationOrJournalWrites` rejects omitted target/operation arguments and an empty object before preparation, journaling, or execution. |
+| M2-01-R3 | High | Approval expiry or policy could change while awaiting the durable execution claim. | Fixed in the review follow-up: recheck expiry and policy immediately after the claim. `AuthorizationIsRecheckedAfterDurableClaimBeforeSending` and `AutomaticActionCannotExecuteWhenPolicyChangesWhileClaimingIt` assert terminal rejection/expiry and zero sends. |
+| M2-01-R4 | Medium | Fresh call IDs bypassed the two-equivalent-failure limit. | Fixed in the review follow-up: canonical turn-scoped failure accounting serializes equivalent attempts; `TwoEquivalentFailuresStopFreshCallIdsButNotLaterTurns` and `ConcurrentEquivalentFailuresCannotRacePastTheTwoAttemptLimit` cover errors, aliases/property order, fresh call IDs, and concurrency. SDK contracts assert turn accounting cleanup. |
+| M2-01-R5 | Medium | Changed policy prevented recovery of an orphaned `Executing` action. | Fixed in the review follow-up: permit observation-only recovery when current policy allows; otherwise journal `Unknown` without observing or sending. `RestartedExecutionHandlesChangedPolicyWithoutReplayingIt` and `PolicyChangeDoesNotMistakeActiveExecutionForRestartRecovery` cover both restart permissions and active-call arbitration against real SQLite. |
+| M2-01-R6 | Medium | Duplicate/restarted dispatch loses the original result JSON and detailed reason. | Open, owner decision required. The retained T03 journal persists intent/status/version only. Documentation now explicitly describes status-only replay, but that does not fix full response replay. No migration or persistence-contract expansion is authorized by the earlier unchanged-T03 decision, and no new acceptance of this specific limitation has been obtained. |
+
+For R6, the concrete alternatives are explicit owner acceptance of status-only
+replay for M2-01 or authorization to extend durable terminal-result persistence
+with duplicate/restart payload-equality tests and a reviewed privacy/retention
+contract. The owner was unavailable when asked during the check-in. The R6
+thread remains unresolved; passing automation does not dispose of this finding
+or make the PR ready for owner acceptance.
 
 ## Completion evidence
 
+The following checks ran on native macOS against the review-fix tree based on
+`3840d03`; the PR identifies the resulting commit. This is validation evidence,
+not a completion claim while R6 remains open.
+
 - **Release build/format:** `tools/validate.sh build` passed; zero warnings and
   errors.
-- **Unit and integration:** `tools/validate.sh unit` passed (159/159);
-  `tools/validate.sh integration` passed (241/241), with test discovery
-  verified for both reports.
-- **Coverage:** `tools/validate.sh coverage
-  artifacts/coverage/unit/20261014T063608Z-10995
-  artifacts/coverage/integration/20261014T063354Z-9940` passed. Changed
-  executable lines measured 98.3% (770/783); Application coverage measured
-  98.3% lines and 93.8% branches. All critical-module thresholds passed.
+- **Unit and integration:** `tools/validate.sh unit` passed (166/166);
+  `tools/validate.sh integration` passed (244/244), with discovery verified.
+  The targeted dispatcher integration filter also passed (24/24).
+- **Coverage:** `tools/validate.sh coverage` passed using unit report
+  `artifacts/coverage/unit/20261014T151020Z-18758` and integration report
+  `artifacts/coverage/integration/20261014T151048Z-18968`. Changed executable
+  lines measured 98.4% (823/836); Application coverage measured 98.2% lines
+  (1754/1787) and 93.7% branches (743/793). All critical-module thresholds passed.
 - **Other gates:** `tools/validate.sh architecture` passed (6/6);
   `tools/validate.sh docs` passed; `tools/validate.sh sdk-contracts` passed
   (55/55); `tools/validate.sh aspire-e2e` passed (7/7);
@@ -157,6 +181,14 @@ Acceptance scenarios include:
   immediate interruption was false. SDK validation still passed, but bounded
   send-deadline behavior is the observed cancellation limit, not a claim of
   immediate interruption.
+- **CI investigation:** run `38583579637` initially failed during disposal of
+  the pre-existing SDK automatic-compaction cancellation fixture with an HTTP
+  listener broken pipe. No unrelated fixture change was made. One failed-job
+  rerun completed successfully, including integration and coverage; all jobs
+  passed on attempt 2 against the original `3840d03` head. New-head Linux CI
+  must run again after pushing the review fixes.
+- `origin/main` was fetched during the check-in; the branch was zero commits
+  behind, so no base integration or conflict resolution was needed.
 - Exercised behavior: controlled typed handlers, in-memory and real SQLite
   journals, restart recovery, exact approval lifecycle, SDK contract and
   required Aspire/browser E2E scenarios.
@@ -166,6 +198,7 @@ Acceptance scenarios include:
   a bounded observer that never issues the action again; this is part of the
   registration contract and is covered by controlled tests, not a live
   provider/device integration.
-- Review disposition is against the current working tree; no commit or PR
-  review revision exists because this change has not been committed or opened
-  as a pull request.
+- The exact follow-up commit has not received a new independent review.
+  R2-R5 are implementer fixes backed by the named regressions; the existing
+  independent review was against `3840d03`. R6 remains unresolved and blocks
+  claiming the complete acceptance/disposition basis.

@@ -68,6 +68,154 @@ public sealed class ToolDispatcherUnitTests
 
     [Fact]
     [Trait("Category", "Unit")]
+    public async Task MissingRequiredArgumentsAreRejectedBeforePreparationOrJournalWrites()
+    {
+        using var fixture = new Fixture();
+        fixture.PrepareOverride = (_, _) =>
+            throw new InvalidOperationException("Malformed arguments must not reach preparation.");
+
+        foreach (var json in new[] { """{"Entity":"light.porch"}""", """{"On":true}""", "{}" })
+        {
+            var result = await fixture.Dispatcher.DispatchAsync(
+                Request with { ArgumentsJson = json }, CancellationToken.None);
+            Assert.Equal("Rejected", result.Status);
+            Assert.Equal("invalid_tool_arguments", result.ReasonCode);
+        }
+
+        Assert.Empty(fixture.Journal.Entries);
+        Assert.Equal(0, fixture.ExecutionCount);
+        Assert.Equal(0, fixture.VerificationCount);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    [Trait("Category", "Unit")]
+    public async Task AuthorizationIsRecheckedAfterDurableClaimBeforeSending(bool expire)
+    {
+        using var fixture = new Fixture(ToolRiskClass.ApprovalRequired);
+        var pending = await fixture.Dispatcher.DispatchAsync(Request, CancellationToken.None);
+        await fixture.Approvals.ResolveAsync(pending.ApprovalId!.Value, "owner", 1, true, CancellationToken.None);
+        fixture.Journal.StatusUpdated = status =>
+        {
+            if (status == "Executing")
+            {
+                if (expire)
+                {
+                    fixture.Clock.Advance(TimeSpan.FromMinutes(5));
+                }
+                else
+                {
+                    fixture.Policy.Replace("policy-v2");
+                }
+            }
+        };
+
+        var result = await fixture.Dispatcher.DispatchAsync(Request, CancellationToken.None);
+
+        Assert.Equal(expire ? "Expired" : "Rejected", result.Status);
+        Assert.Equal(expire ? "approval_expired_before_execution" : "policy_changed_before_execution", result.ReasonCode);
+        Assert.Equal(result.Status, fixture.Journal.Entries.Single().Status);
+        Assert.Equal(0, fixture.ExecutionCount);
+        Assert.Equal(0, fixture.VerificationCount);
+    }
+
+    [Fact]
+    [Trait("Category", "Unit")]
+    public async Task AutomaticActionCannotExecuteWhenPolicyChangesWhileClaimingIt()
+    {
+        using var fixture = new Fixture(ToolRiskClass.ReadOnly);
+        fixture.Journal.StatusUpdated = status =>
+        {
+            if (status == "Executing")
+            {
+                fixture.Policy.Replace("policy-v2");
+            }
+        };
+
+        var result = await fixture.Dispatcher.DispatchAsync(Request, CancellationToken.None);
+
+        Assert.Equal("Rejected", result.Status);
+        Assert.Equal("policy_changed_before_execution", result.ReasonCode);
+        Assert.Equal(0, fixture.ExecutionCount);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("Category", "Unit")]
+    public async Task TwoEquivalentFailuresStopFreshCallIdsButNotLaterTurns(bool throws)
+    {
+        using var fixture = new Fixture(ToolRiskClass.ReadOnly);
+        fixture.Execution = (_, _, _) => throws
+            ? throw new InvalidOperationException("controlled failed execution")
+            : ValueTask.FromResult(new ToolExecutionOutcome(ToolExecutionStatus.Failed, null, "known_failure"));
+        for (var attempt = 0; attempt < 2; attempt++)
+        {
+            var request = Request with { CallId = $"failed-{attempt}" };
+            if (throws)
+            {
+                await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+                    await fixture.Dispatcher.DispatchAsync(request, CancellationToken.None));
+            }
+            else
+            {
+                Assert.Equal("Failed", (await fixture.Dispatcher.DispatchAsync(request, CancellationToken.None)).Status);
+            }
+        }
+
+        var rejected = await fixture.Dispatcher.DispatchAsync(
+            Request with
+            {
+                CallId = "failed-3",
+                ArgumentsJson = """{"On":true,"Entity":"porch-lamp"}"""
+            }, CancellationToken.None);
+        Assert.Equal("Rejected", rejected.Status);
+        Assert.Equal("equivalent_failure_limit", rejected.ReasonCode);
+        Assert.Equal(2, fixture.ExecutionCount);
+        fixture.Dispatcher.ReleaseTurn(TurnId.New());
+        fixture.Dispatcher.ReleaseTurn(Request.TurnId);
+        var duplicate = await fixture.Dispatcher.DispatchAsync(
+            Request with { CallId = "failed-0" }, CancellationToken.None);
+        Assert.Equal(throws ? "Unknown" : "Failed", duplicate.Status);
+        Assert.Equal(2, fixture.ExecutionCount);
+
+        fixture.Execution = (_, _, _) => ValueTask.FromResult(new ToolExecutionOutcome(ToolExecutionStatus.Failed, null, null));
+        var later = await fixture.Dispatcher.DispatchAsync(
+            Request with { TurnId = TurnId.New() }, CancellationToken.None);
+        Assert.Equal("Failed", later.Status);
+        Assert.Equal(3, fixture.ExecutionCount);
+    }
+
+    [Fact]
+    [Trait("Category", "Unit")]
+    public async Task ConcurrentEquivalentFailuresCannotRacePastTheTwoAttemptLimit()
+    {
+        using var fixture = new Fixture(ToolRiskClass.ReadOnly);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.Execution = async (_, _, token) =>
+        {
+            entered.TrySetResult();
+            await release.Task.WaitAsync(token);
+            return new ToolExecutionOutcome(ToolExecutionStatus.Failed, null, "known_failure");
+        };
+        var first = fixture.Dispatcher.DispatchAsync(Request, CancellationToken.None).AsTask();
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        var second = fixture.Dispatcher.DispatchAsync(
+            Request with { CallId = "concurrent-2" }, CancellationToken.None).AsTask();
+        var third = fixture.Dispatcher.DispatchAsync(
+            Request with { CallId = "concurrent-3" }, CancellationToken.None).AsTask();
+        release.SetResult();
+        var results = await Task.WhenAll(first, second, third).WaitAsync(TimeSpan.FromSeconds(2));
+
+        Assert.Equal(2, results.Count(result => result.Status == "Failed"));
+        Assert.Single(results, result => result.ReasonCode == "equivalent_failure_limit");
+        Assert.Equal(2, fixture.ExecutionCount);
+    }
+
+    [Fact]
+    [Trait("Category", "Unit")]
     public void DispatcherRejectsUnsupportedVerificationTimeouts()
     {
         using var fixture = new Fixture();

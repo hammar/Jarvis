@@ -858,6 +858,7 @@ public sealed class CopilotAgentEngineContractTests(ITestOutputHelper output)
             $"Expected one tool dispatch; got {dispatcher.Calls}. Exposed tools: {string.Join("|", provider.Requests.SelectMany(item => item.ToolNames))}. Events: {string.Join("|", events.Select(item => item.GetType().Name))}");
         Assert.Equal("owner", dispatcher.LastOwnerId);
         Assert.Equal("tool contract", dispatcher.LastUserRequest);
+        Assert.Equal(turnId, dispatcher.ReleasedTurn);
         Assert.Single(events.OfType<ToolProposed>());
         Assert.Single(events.OfType<ToolCompleted>());
         Assert.Single(events.OfType<TurnCompleted>());
@@ -2475,6 +2476,9 @@ public sealed class CopilotAgentEngineContractTests(ITestOutputHelper output)
         public string? LastArguments { get; private set; }
         public string? LastOwnerId { get; private set; }
         public string? LastUserRequest { get; private set; }
+        public TurnId? ReleasedTurn { get; private set; }
+
+        public void ReleaseTurn(TurnId turnId) => ReleasedTurn = turnId;
 
         public ValueTask<ToolDispatchResult> DispatchAsync(
             ToolDispatchRequest request,
@@ -2491,6 +2495,10 @@ public sealed class CopilotAgentEngineContractTests(ITestOutputHelper output)
 
     private sealed class BlockingDispatcher : IToolDispatcher
     {
+        public void ReleaseTurn(TurnId turnId)
+        {
+        }
+
         public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource Cancelled { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 

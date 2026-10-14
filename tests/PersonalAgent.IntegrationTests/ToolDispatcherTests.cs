@@ -407,6 +407,52 @@ public sealed class ToolDispatcherTests
         Assert.Equal("Succeeded", (await fixture.Journal.GetAsync(completed.ActionId.Value, CancellationToken.None))!.Status);
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    [Trait("Category", "Integration")]
+    public async Task RestartedExecutionHandlesChangedPolicyWithoutReplayingIt(bool allowed)
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var completed = await fixture.Dispatcher.DispatchAsync(PorchRequest, CancellationToken.None);
+        var persisted = await fixture.Journal.GetAsync(completed.ActionId!.Value, CancellationToken.None);
+        await fixture.Journal.UpdateStatusAsync(
+            persisted!.Id, "Executing", persisted.Version, fixture.Clock.UtcNow, CancellationToken.None);
+        fixture.Policy.Replace("policy-v2",
+            allowed ? fixture.AllowedPermission : fixture.AllowedPermission with { EntityId = "light.other" });
+
+        var recovered = await fixture.CreateRestartedDispatcher().DispatchAsync(PorchRequest, CancellationToken.None);
+
+        Assert.Equal(allowed ? "Succeeded" : "Unknown", recovered.Status);
+        Assert.Equal(1, fixture.ExecutionCount);
+        Assert.Equal(allowed ? 2 : 1, fixture.VerificationCount);
+        Assert.Equal(recovered.Status, (await fixture.Journal.GetAsync(persisted.Id, CancellationToken.None))!.Status);
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task PolicyChangeDoesNotMistakeActiveExecutionForRestartRecovery()
+    {
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var fixture = await Fixture.CreateAsync(execution: async (_, _, token) =>
+        {
+            entered.TrySetResult();
+            await release.Task.WaitAsync(token);
+            return new ToolExecutionOutcome(ToolExecutionStatus.Completed, null, null);
+        });
+        var first = fixture.Dispatcher.DispatchAsync(PorchRequest, CancellationToken.None).AsTask();
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        fixture.Policy.Replace("policy-v2", fixture.AllowedPermission);
+        var duplicate = await fixture.Dispatcher.DispatchAsync(PorchRequest, CancellationToken.None);
+        Assert.Equal("Executing", duplicate.Status);
+        Assert.Equal(0, fixture.VerificationCount);
+        release.SetResult();
+        Assert.Equal("Succeeded", (await first).Status);
+        Assert.Equal(1, fixture.ExecutionCount);
+        Assert.Equal(1, fixture.VerificationCount);
+    }
+
     [Fact]
     [Trait("Category", "Integration")]
     public async Task RestartedDispatcherDoesNotOverwriteAConcurrentJournalOutcome()
