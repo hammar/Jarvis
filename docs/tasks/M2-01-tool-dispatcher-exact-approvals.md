@@ -52,6 +52,10 @@ Acceptance scenarios include:
 - Recovery rechecks current permission after awaiting its proposal gate and
   before observation; revoked/Unsupported permission records Unknown without
   observing, while an allowed policy-version change can still be observed.
+- Fresh-dispatcher recovery seeds every unresolved write's original persisted
+  risk before observation. Inconclusive/error/unjournaled outcomes remain
+  blocked; reconciling one orphan cannot discard another. Original read-only
+  actions are not overblocked, and unreadable risk metadata fails closed.
 
 ## Scope
 
@@ -178,6 +182,7 @@ R7/R8, both labelled "Previously missed"; both are retained below. Commit
 | M2-01-R14 | Medium | A nonexpired stale Pending snapshot could ask for another approval after rejection, approval, or active/completed execution had already won. | Fixed in the follow-up after `461e81c`: refresh both approval and action before reporting Pending; retain owner binding, expiry, policy, and execution arbitration. `NonexpiredPendingSnapshotReturnsTheWinningDecisionWithoutRequestingAnotherApproval` covers four no-clock-advance winners; the expired-resolution regression now pauses the action snapshot immediately before resolution to preserve its actual CAS-conflict coverage. |
 | M2-01-R15 | Medium | Definitive NotApplied verification after Unknown execution was still classified Unknown, blocking the safe remaining attempt. | Fixed in the follow-up after `8dafbab`: use the verifier's existing definitive-non-application contract consistently with recovery. Unit/SQLite regressions assert Failed persistence, duplicate replay, a permitted second attempt, and a blocked third. XML clarifies that an unchanged snapshot with possible late application is insufficient. |
 | M2-01-R16 | Medium | Recovery used authorization sampled before awaiting the equivalent-proposal gate, allowing observation after permission was revoked. | Fixed in the follow-up after `8dafbab`: evaluate current policy after acquiring the gate, immediately before observation. `QueuedRecoveryRechecksCurrentAuthorizationBeforeObserving` queues behind an equivalent call and verifies revoked/Unsupported permissions cause Unknown without observing, while an allowed version change still permits observation. |
+| M2-01-R17 | High | A fresh dispatcher did not seed an orphaned write's uncertainty, permitting an equivalent fresh send after inconclusive/error/unjournaled recovery. | Fixed in the follow-up after `5d60757`: seed uncertainty before observing from strictly parsed original persisted risk; track all unresolved action IDs, not one nullable owner. Sequential/queued unit/SQLite regressions assert no extra send; additional controls cover multiple orphans, changed current risk, read-only failure limits and malformed/missing/null metadata. Known durable outcomes remove only their own uncertainty. |
 
 R9 uniquely identifies review comment `4273196189`, which reused the R7 label
 already assigned to the distinct approval-expiry race. Its review was against
@@ -198,6 +203,9 @@ summary-only findings. Prior dispositions, including R6, remain unchanged.
 R15 maps to comment `4274033158`; R16 maps to `4274033257` in the subsequent
 full review against `461e81c`. It repeated R14, already fixed by `8dafbab`, and
 contained no additional summary-only findings. R6 remains deferred/unaccepted.
+R17 maps to comment `4274173142` in the subsequent full review against
+`8dafbab`. It repeated R15/R16, fixed by `5d60757`, and its summary retained
+R6's unaccepted gap; no additional summary-only finding was omitted.
 
 For R6, the concrete alternatives are explicit owner acceptance of status-only
 replay for M2-01 or authorization to extend durable terminal-result persistence
@@ -247,6 +255,13 @@ The bounded independent review of exact commit
 R14 and found no new significant findings within that follow-up. It examined
 the complete R1-R14 ledger and retained all earlier dispositions, including
 deferred/unaccepted R6. It did not rerun validation or exercise live devices.
+
+The bounded independent review of exact commit
+`5d60757591efbb381c2cb8cd672adf2a6e2966cb` against `8dafbab` supported
+R15/R16 and found no new significant findings within that follow-up. It
+examined the full R1-R16 ledger, relevant specification/ADRs and changed
+runtime/tests/docs, retained deferred/unaccepted R6, and did not rerun checks
+or exercise live devices.
 
 ## R7/R8 regression evidence
 
@@ -388,6 +403,40 @@ deferred/unaccepted R6. It did not rerun validation or exercise live devices.
   verifier is registered in M2-01, and controlled evidence is not live proof.
 - No schema, storage contracts, dependencies, SDK/process-launch changes, or
   automatic retry were added. R6 remains deferred and unaccepted.
+
+## R17 regression evidence
+
+- The targeted pre-fix 16-case unit run had 15 failures proving fresh equivalent
+  sends, erased original write risk, lost orphan ownership and unreadable
+  metadata handling. The original-read negative control already passed.
+  After fixing the shared uncertainty set and adding missing/null metadata
+  cases, the complete dispatcher unit subset passed (108/108).
+- The four real-SQLite regressions cover sequential/queued fresh IDs after
+  inconclusive or throwing observation, asserting the orphan remains Unknown,
+  the fresh action is Rejected, and no additional handler execution occurs.
+- With `UseArtifactsOutput=true` and
+  `ArtifactsPath="$PWD/artifacts/isolated-validation-r15-r16"`, the unchanged
+  `tools/validate.sh build`, `unit` (239/239), `integration` (253/253),
+  `coverage`, `architecture` (6/6), and `docs` passed on this runtime/test tree.
+  Discovery was verified; Release/format completed with zero warnings/errors.
+  This reuses the isolated output described above, without deleting caches,
+  changing coverage filters, or claiming the aborted default run passed.
+- Coverage inputs:
+  `artifacts/coverage/unit/20261014T181651Z-50286` and
+  `artifacts/coverage/integration/20261014T181717Z-50374`. All configured gates
+  passed: changed executable lines 99.1% (883/891), Application lines 98.5%
+  (1814/1842), and branches 94.0% (781/831).
+- Dedicated SDK/Aspire/browser local evidence below remains historical;
+  required checks must establish current-head CI evidence after pushing.
+- Recovery first marks the persisted execution conservatively uncertain under
+  its proposal gate, then strictly reads its original canonical risk. Only a
+  validated ReadOnly classification removes that marker without observation.
+  Unknown/error/unjournaled outcomes keep it; a known durably recorded outcome
+  removes only that action ID, preserving other unresolved orphans.
+- This is defensive dispatcher behavior, not resumption of interrupted turns
+  or a durable multi-host retry mechanism. No schema, storage API, dependencies,
+  actual feature tools or SDK/process-launch behavior changed. R6 remains
+  deferred and unaccepted.
 
 ## Earlier full-gate evidence
 

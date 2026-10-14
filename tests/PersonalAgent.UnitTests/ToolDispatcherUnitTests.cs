@@ -826,6 +826,166 @@ public sealed class ToolDispatcherUnitTests
         Assert.Equal(result.Status, fixture.Journal.Entries.Single(entry => entry.Id == result.ActionId).Status);
     }
 
+    [Theory]
+    [InlineData(false, "unknown")]
+    [InlineData(true, "unknown")]
+    [InlineData(false, "observation-error")]
+    [InlineData(true, "observation-error")]
+    [InlineData(false, "observation-cancelled")]
+    [InlineData(true, "observation-cancelled")]
+    [InlineData(false, "unknown-journal-error")]
+    [InlineData(true, "unknown-journal-error")]
+    [InlineData(false, "completion-journal-error")]
+    [InlineData(true, "completion-journal-error")]
+    [InlineData(false, "observation-and-journal-error")]
+    [InlineData(true, "observation-and-journal-error")]
+    [Trait("Category", "Unit")]
+    public async Task FreshDispatcherRecoveryBlocksUnresolvedEquivalentWrites(bool queued, string outcome)
+    {
+        using var fixture = new Fixture();
+        var orphan = await fixture.MarkExecutingAsync(Request);
+        var restarted = fixture.CreateRestartedDispatcher();
+        var observing = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseObservation = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.Journal.FailUnknownUpdate = outcome is "unknown-journal-error" or "observation-and-journal-error";
+        fixture.Journal.FailCompletionUpdate = outcome == "completion-journal-error";
+        fixture.Verification = async (_, _, _, token) =>
+        {
+            observing.SetResult();
+            await releaseObservation.Task.WaitAsync(TimeSpan.FromSeconds(5), token);
+            return outcome switch
+            {
+                "observation-error" or "observation-and-journal-error" =>
+                    throw new InvalidOperationException("controlled orphan observation error"),
+                "observation-cancelled" => throw new OperationCanceledException(),
+                "completion-journal-error" => new ToolVerificationOutcome(ToolVerificationStatus.Verified, null),
+                _ => new ToolVerificationOutcome(ToolVerificationStatus.Unknown, "unconfirmed")
+            };
+        };
+        fixture.Execution = (_, _, _) =>
+            ValueTask.FromResult(new ToolExecutionOutcome(ToolExecutionStatus.Failed, null, "unexpected_fresh_send"));
+        var recovery = restarted.DispatchAsync(Request, CancellationToken.None).AsTask();
+        await observing.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        var freshRequest = Request with { CallId = "fresh-after-orphan", ArgumentsJson = """{"On":true,"Entity":"porch-lamp"}""" };
+        var fresh = queued ? restarted.DispatchAsync(freshRequest, CancellationToken.None).AsTask() : null;
+        releaseObservation.SetResult();
+        if (outcome == "observation-and-journal-error")
+        {
+            await Assert.ThrowsAsync<AggregateException>(() => recovery);
+        }
+        else if (outcome is "observation-error" or "completion-journal-error")
+        {
+            await Assert.ThrowsAsync<InvalidOperationException>(() => recovery);
+        }
+        else
+        {
+            Assert.Equal(outcome == "unknown-journal-error" ? "Executing" : "Unknown", (await recovery).Status);
+        }
+
+        var stopped = await (fresh ?? restarted.DispatchAsync(freshRequest, CancellationToken.None).AsTask());
+        Assert.Equal("Rejected", stopped.Status);
+        Assert.Equal("equivalent_write_outcome_unknown", stopped.ReasonCode);
+        Assert.Equal(1, fixture.ExecutionCount);
+        var persisted = (await fixture.Journal.GetAsync(orphan.Id, CancellationToken.None))!;
+        Assert.Equal(outcome.Contains("journal-error", StringComparison.Ordinal) ? "Executing" : "Unknown", persisted.Status);
+    }
+
+    [Fact]
+    [Trait("Category", "Unit")]
+    public async Task RecoveryUsesPersistedWriteRiskEvenWhenCurrentPolicyWouldAllowReads()
+    {
+        using var fixture = new Fixture(ToolRiskClass.ReadOnly);
+        fixture.Policy.RequireApproval();
+        var pending = await fixture.Dispatcher.DispatchAsync(Request, CancellationToken.None);
+        await fixture.Approvals.ResolveAsync(pending.ApprovalId!.Value, "owner", 1, true, CancellationToken.None);
+        await fixture.MarkExecutingAsync(Request);
+        fixture.Policy.Replace("read-only-policy");
+        fixture.Verification = (_, _, _, _) =>
+            ValueTask.FromResult(new ToolVerificationOutcome(ToolVerificationStatus.Unknown, "unconfirmed"));
+        var restarted = fixture.CreateRestartedDispatcher();
+
+        Assert.Equal("Unknown", (await restarted.DispatchAsync(Request, CancellationToken.None)).Status);
+        var stopped = await restarted.DispatchAsync(
+            Request with { CallId = "read-classification-cannot-clear-original-risk" }, CancellationToken.None);
+        Assert.Equal("Rejected", stopped.Status);
+        Assert.Equal("equivalent_write_outcome_unknown", stopped.ReasonCode);
+        Assert.Equal(1, fixture.ExecutionCount);
+    }
+
+    [Fact]
+    [Trait("Category", "Unit")]
+    public async Task RecoveringOneKnownOrphanCannotDiscardAnotherUnresolvedOrphan()
+    {
+        using var fixture = new Fixture();
+        await fixture.MarkExecutingAsync(Request);
+        var restarted = fixture.CreateRestartedDispatcher();
+        var secondRequest = Request with { CallId = "second-orphan" };
+        fixture.Journal.FailCompletionUpdate = true;
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await restarted.DispatchAsync(secondRequest, CancellationToken.None));
+        fixture.Journal.FailCompletionUpdate = false;
+        fixture.Verification = (_, _, _, _) =>
+            ValueTask.FromResult(new ToolVerificationOutcome(ToolVerificationStatus.Unknown, "unconfirmed"));
+        Assert.Equal("Unknown", (await restarted.DispatchAsync(Request, CancellationToken.None)).Status);
+        fixture.Verification = (_, _, _, _) =>
+            ValueTask.FromResult(new ToolVerificationOutcome(ToolVerificationStatus.Verified, null));
+        Assert.Equal("Succeeded", (await restarted.DispatchAsync(secondRequest, CancellationToken.None)).Status);
+
+        var stopped = await restarted.DispatchAsync(
+            Request with { CallId = "after-two-orphans" }, CancellationToken.None);
+        Assert.Equal("Rejected", stopped.Status);
+        Assert.Equal("equivalent_write_outcome_unknown", stopped.ReasonCode);
+        Assert.Equal(2, fixture.ExecutionCount);
+    }
+
+    [Fact]
+    [Trait("Category", "Unit")]
+    public async Task FreshReadRecoveryDoesNotInventWriteUncertainty()
+    {
+        using var fixture = new Fixture(ToolRiskClass.ReadOnly);
+        await fixture.MarkExecutingAsync(Request);
+        fixture.Verification = (_, _, _, _) =>
+            ValueTask.FromResult(new ToolVerificationOutcome(ToolVerificationStatus.Unknown, "unconfirmed"));
+        var restarted = fixture.CreateRestartedDispatcher();
+        Assert.Equal("Unknown", (await restarted.DispatchAsync(Request, CancellationToken.None)).Status);
+        fixture.Execution = (_, _, _) =>
+            ValueTask.FromResult(new ToolExecutionOutcome(ToolExecutionStatus.Failed, null, "known_failure"));
+        Assert.Equal("Failed", (await restarted.DispatchAsync(
+            Request with { CallId = "second-read" }, CancellationToken.None)).Status);
+        var stopped = await restarted.DispatchAsync(Request with { CallId = "third-read" }, CancellationToken.None);
+        Assert.Equal("equivalent_failure_limit", stopped.ReasonCode);
+        Assert.Equal(2, fixture.ExecutionCount);
+    }
+
+    [Theory]
+    [InlineData("invalid-json")]
+    [InlineData("missing-risk")]
+    [InlineData("null")]
+    [Trait("Category", "Unit")]
+    public async Task UnreadablePersistedRiskSurfacesAndKeepsEquivalentCallsBlocked(string malformed)
+    {
+        using var fixture = new Fixture();
+        var orphan = await fixture.MarkExecutingAsync(Request);
+        fixture.Journal.Corrupt(orphan.Id, preserveHash: true,
+            canonicalEnvelope: malformed == "missing-risk" ? """{"FormatVersion":1}""" : malformed);
+        var restarted = fixture.CreateRestartedDispatcher();
+        if (malformed == "null")
+        {
+            await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+                await restarted.DispatchAsync(Request, CancellationToken.None));
+        }
+        else
+        {
+            await Assert.ThrowsAsync<JsonException>(async () =>
+                await restarted.DispatchAsync(Request, CancellationToken.None));
+        }
+        var stopped = await restarted.DispatchAsync(
+            Request with { CallId = "after-unreadable-risk" }, CancellationToken.None);
+        Assert.Equal("Rejected", stopped.Status);
+        Assert.Equal("equivalent_write_outcome_unknown", stopped.ReasonCode);
+        Assert.Equal(1, fixture.ExecutionCount);
+    }
+
     [Fact]
     [Trait("Category", "Unit")]
     public async Task ExpiredPendingApprovalConflictRemainsVisibleWhenNoDecisionWasRecorded()
@@ -1803,6 +1963,7 @@ public sealed class ToolDispatcherUnitTests
 
         public void Replace(string newVersion) => current = Create(newVersion);
         public void RevokePermissions() => current = new ToolAllowlistPolicy("revoked", []);
+        public void RequireApproval() => current = Create("approval-policy", ToolRiskClass.ApprovalRequired);
 
         public ToolAuthorizationDecision Evaluate(
             string toolName,
@@ -1812,11 +1973,11 @@ public sealed class ToolDispatcherUnitTests
                 ? new(true, "test_allow_unsupported", current.PolicyVersion, ToolRiskClass.Unsupported)
                 : current.Evaluate(toolName, action, declaredRisk);
 
-        private static ToolAllowlistPolicy Create(string version) =>
+        private static ToolAllowlistPolicy Create(string version, ToolRiskClass minimumRisk = ToolRiskClass.ReadOnly) =>
             new(version,
             [
-                new ToolPermission("home.set_light", "home.set_light", "turn_on", "light.porch", ToolRiskClass.ReadOnly),
-                new ToolPermission("home.set_light", "home.set_light", "turn_off", "light.porch", ToolRiskClass.ReadOnly)
+                new ToolPermission("home.set_light", "home.set_light", "turn_on", "light.porch", minimumRisk),
+                new ToolPermission("home.set_light", "home.set_light", "turn_off", "light.porch", minimumRisk)
             ]);
 
         public bool AllowUnsupported { get; set; }
@@ -1847,14 +2008,14 @@ public sealed class ToolDispatcherUnitTests
             }
         }
 
-        public void Corrupt(ActionId id)
+        public void Corrupt(ActionId id, bool preserveHash = false, string canonicalEnvelope = "invalid-envelope")
         {
             lock (gate)
             {
                 entries[id] = entries[id] with
                 {
-                    CanonicalArguments = "invalid-envelope",
-                    RequestHash = "changed-hash"
+                    CanonicalArguments = canonicalEnvelope,
+                    RequestHash = preserveHash ? entries[id].RequestHash : "changed-hash"
                 };
             }
         }

@@ -59,6 +59,11 @@ Observation-only recovery shares the proposal gate and updates distinct-action
 failure accounting only after journaling. A known recovered outcome clears
 only its own write uncertainty; other actions' uncertainty and unsuccessful
 observation/journaling remain blocked.
+Fresh-dispatcher recovery seeds uncertainty from the persisted original risk
+before observation and tracks every unresolved write by action ID. Reconciling
+one orphan cannot discard another, current read classification cannot erase
+original write risk, and unreadable risk metadata fails closed. Original reads
+remain subject to their failure budget without inventing write uncertainty.
 Recovery rechecks authorization after any proposal-gate wait, before observing.
 Definitive `NotApplied` means known failure even after uncertain delivery and
 retains only the remaining bounded attempt; an unchanged snapshot with possible

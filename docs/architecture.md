@@ -133,6 +133,12 @@ and only for the action that owns that uncertainty. Verified success removes
 that action's provisional failure slot; confirmed failure consumes one slot,
 deduplicated by action ID. Unknown outcomes and failed observation or journaling
 retain the write block. Recovery of another action cannot clear it.
+On a fresh dispatcher, recovery seeds uncertainty from the persisted action's
+original risk before observing, not from the new policy/registration risk.
+Unresolved writes are tracked by action ID as a set so reconciling one orphan
+cannot discard another. Persisted read-only actions do not acquire write
+uncertainty; unreadable/incomplete risk metadata surfaces an error and keeps
+equivalent sends blocked conservatively.
 The engine releases ephemeral accounting only
 after the turn's callbacks stop. Restart interrupts turns rather than resuming
 their inference, so these counters are not a durable retry mechanism.

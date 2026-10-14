@@ -325,6 +325,55 @@ public sealed class ToolDispatcherTests
         Assert.Equal("""{"accepted":true}""", result.ResultJson);
     }
 
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    [Trait("Category", "Integration")]
+    public async Task FreshDispatcherKeepsOrphanedWritesUncertainAcrossEquivalentFreshIds(bool queued, bool throws)
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var completed = await fixture.Dispatcher.DispatchAsync(PorchRequest, CancellationToken.None);
+        var action = (await fixture.Journal.GetAsync(completed.ActionId!.Value, CancellationToken.None))!;
+        await fixture.Journal.UpdateStatusAsync(
+            action.Id, "Executing", action.Version, fixture.Clock.UtcNow, CancellationToken.None);
+        var observing = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseObservation = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.SetVerification(async (_, _, outcome, token) =>
+        {
+            Assert.Equal(ToolExecutionStatus.Unknown, outcome.Status);
+            observing.SetResult();
+            await releaseObservation.Task.WaitAsync(TimeSpan.FromSeconds(5), token);
+            if (throws)
+            {
+                throw new InvalidOperationException("controlled orphan observation failure");
+            }
+            return new ToolVerificationOutcome(ToolVerificationStatus.Unknown, "unconfirmed");
+        });
+        var restarted = fixture.CreateRestartedDispatcher();
+        var recovery = restarted.DispatchAsync(PorchRequest, CancellationToken.None).AsTask();
+        await observing.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        var freshRequest = PorchRequest with { CallId = "fresh-after-orphan" };
+        var fresh = queued ? restarted.DispatchAsync(freshRequest, CancellationToken.None).AsTask() : null;
+        releaseObservation.SetResult();
+        if (throws)
+        {
+            await Assert.ThrowsAsync<InvalidOperationException>(() => recovery);
+        }
+        else
+        {
+            Assert.Equal("Unknown", (await recovery).Status);
+        }
+
+        var stopped = await (fresh ?? restarted.DispatchAsync(freshRequest, CancellationToken.None).AsTask());
+        Assert.Equal("Rejected", stopped.Status);
+        Assert.Equal("equivalent_write_outcome_unknown", stopped.ReasonCode);
+        Assert.Equal(1, fixture.ExecutionCount);
+        Assert.Equal("Unknown", (await fixture.Journal.GetAsync(action.Id, CancellationToken.None))!.Status);
+        Assert.Equal("Rejected", (await fixture.Journal.GetAsync(stopped.ActionId!.Value, CancellationToken.None))!.Status);
+    }
+
     [Fact]
     [Trait("Category", "Integration")]
     public async Task DefinitiveNonApplicationAfterUnknownDeliveryAllowsOnlyOneFreshRetry()
