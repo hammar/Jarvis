@@ -99,7 +99,9 @@ Equivalent proposals within one host turn share a two-failure budget independent
 of call ID, argument property order, or resolved aliases. Equivalent executions
 are serialized so concurrent failures cannot overrun the limit. Failed and
 uncertain outcomes, including execution exceptions, consume the budget;
-successful operations do not. An uncertain write is stricter: crossing the
+successful operations do not. Failure accounting is deduplicated by action ID:
+a delayed duplicate returning a recorded failure cannot consume another slot
+for the same attempt. An uncertain write is stricter: crossing the
 send boundary blocks all further equivalent writes in that turn until a known
 outcome is recorded. `Unknown`, handler/verification exceptions, and failure to
 journal the terminal outcome leave this block in place, including for queued

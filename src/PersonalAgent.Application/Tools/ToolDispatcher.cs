@@ -369,7 +369,7 @@ public sealed class ToolDispatcher : IToolDispatcher
                     return new(action.Status, null, "equivalent_write_outcome_unknown", action.Id);
                 }
 
-                if (budget.Failures >= 2)
+                if (budget.FailedActions.Count >= 2)
                 {
                     action = await TransitionAsync(action, "Rejected", cancellationToken);
                     return new(action.Status, null, "equivalent_failure_limit", action.Id);
@@ -384,14 +384,14 @@ public sealed class ToolDispatcher : IToolDispatcher
                 }
                 catch
                 {
-                    budget.Failures++;
+                    budget.FailedActions.Add(action.Id);
                     throw;
                 }
 
                 budget.UncertainWrite = mayWrite && result.Status == "Unknown";
                 if (result.Status is "Failed" or "Unknown")
                 {
-                    budget.Failures++;
+                    budget.FailedActions.Add(action.Id);
                 }
 
                 return result;
@@ -926,7 +926,7 @@ public sealed class ToolDispatcher : IToolDispatcher
     private sealed class FailureBudget
     {
         public SemaphoreSlim Gate { get; } = new(1, 1);
-        public int Failures { get; set; }
+        public HashSet<ActionId> FailedActions { get; } = [];
         public bool UncertainWrite { get; set; }
     }
 }

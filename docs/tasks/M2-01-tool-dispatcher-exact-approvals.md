@@ -154,6 +154,13 @@ R7/R8, both labelled "Previously missed"; both are retained below. Commit
 | M2-01-R6 | Medium | Duplicate/restarted dispatch loses the original result JSON and detailed reason. | Deferred outside the authorized unchanged-T03 persistence scope, not fixed or owner-accepted. The journal persists intent/status/version only; API/docs explicitly disclose status-only replay. The review thread is handled as a scope deferral, not as proof that the acceptance gap is fixed. |
 | M2-01-R7 (Previously missed) | Medium | A stale approval read could falsely report expiry after another dispatch began or completed execution. | Fixed in `c5f3d63`: report `Expired` only when the transition actually produced that status; otherwise return the recorded action outcome. `StaleApprovalReadCannotReportExpiryAfterExecutionBegins` exercises both `Executing` and `Succeeded` across the expiry boundary. |
 | M2-01-R8 (Previously missed) | High | A fresh equivalent call ID could resend after an uncertain write. | Fixed in `c5f3d63`: serialize equivalent proposals and keep their write gate closed from the send boundary until a known outcome is durably recorded. `UncertainWritesBlockEquivalentFreshIdsIncludingQueuedAttempts` and `EquivalentUncertainWritesCannotResendWithFreshIds` cover sequential/concurrent fresh IDs, unknown results, cancellation, handler/verification exceptions, and terminal-journal failure. Known failed writes retain two attempts; later owner turns remain independent. |
+| M2-01-R9 (review label R7; Previously missed) | Medium | A delayed duplicate returning a recorded failure could consume the second failure slot without executing. | Fixed in the follow-up after `b54e558`: deduplicate failed-attempt accounting by action ID on both returned-outcome and exception paths. `DelayedDuplicateDoesNotConsumeASecondFailureSlot` pauses a duplicate's `Prepared` snapshot until the first attempt fails; the next fresh call still executes, and a third distinct attempt is rejected only after two failures. |
+
+R9 uniquely identifies review comment `4273196189`, which reused the R7 label
+already assigned to the distinct approval-expiry race. Its review was against
+`c8d62dd`; the comment remains tracked separately so neither finding is erased.
+The complete top-level review contained R6-R9 and no additional summary-only
+findings; R6's deferral and R7/R8 fixes above remain unchanged.
 
 For R6, the concrete alternatives are explicit owner acceptance of status-only
 replay for M2-01 or authorization to extend durable terminal-result persistence
@@ -208,6 +215,23 @@ tests or exercised live/cross-process device behavior.
   current-head CI must still establish all required checks after pushing.
 - No storage contracts, schema, SDK integration, process launch, or production
   feature registrations changed for R7/R8.
+
+## R9 regression evidence
+
+- All three targeted delayed-duplicate regressions failed before the accounting
+  fix: known failed writes, failed reads, and exceptional/unknown reads. After
+  replacing the raw counter with an action-ID set, `tools/validate.sh build`,
+  `unit` (185/185), `integration` (248/248), `coverage`, and `docs` passed.
+- Latest coverage inputs:
+  `artifacts/coverage/unit/20261014T163747Z-30074` and
+  `artifacts/coverage/integration/20261014T163853Z-30370`. All configured gates
+  passed: changed executable lines 98.7% (834/845), Application lines 98.3%
+  (1766/1796), and branches 93.8% (757/807).
+- The uncertainty-write gate remains stricter than the two-failure count.
+  Accounting and uncertainty state are still accessed under the same
+  per-proposal semaphore and released only after the turn's callbacks stop.
+- This small internal accounting fix changes neither storage nor public
+  contracts. Full required current-head CI remains a separate gate.
 
 ## Earlier full-gate evidence
 
