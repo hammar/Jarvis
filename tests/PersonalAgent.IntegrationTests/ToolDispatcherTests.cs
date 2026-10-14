@@ -91,6 +91,111 @@ public sealed class ToolDispatcherTests
     }
 
     [Theory]
+    [InlineData("write", false)]
+    [InlineData("write", true)]
+    [InlineData("lowered-risk", false)]
+    [InlineData("lowered-risk", true)]
+    [InlineData("read", false)]
+    [InlineData("read", true)]
+    [Trait("Category", "Integration")]
+    public async Task PersistedSqliteUnknownReplayPreservesOriginalRiskAcrossCancelledWaits(
+        string originalRisk, bool cancelReplay)
+    {
+        using var fixture = await Fixture.CreateAsync(
+            originalRisk == "write" ? ToolRiskClass.LowRiskWrite : ToolRiskClass.ReadOnly);
+        if (originalRisk == "lowered-risk")
+        {
+            fixture.Policy.Replace("approval-policy", fixture.AllowedPermission with
+            {
+                MinimumRisk = ToolRiskClass.ApprovalRequired
+            });
+            var pending = await fixture.Dispatcher.DispatchAsync(PorchRequest, CancellationToken.None);
+            await fixture.Approvals.ResolveAsync(pending.ApprovalId!.Value, "owner", 1, true, CancellationToken.None);
+        }
+        fixture.SetExecution((_, _, _) =>
+            ValueTask.FromResult(new ToolExecutionOutcome(ToolExecutionStatus.Unknown, null, "unconfirmed")));
+        fixture.SetVerification((_, _, _, _) =>
+            ValueTask.FromResult(new ToolVerificationOutcome(ToolVerificationStatus.Unknown, "unconfirmed")));
+        var unknown = await fixture.Dispatcher.DispatchAsync(PorchRequest, CancellationToken.None);
+        Assert.Equal("Unknown", unknown.Status);
+        var persisted = (await fixture.Journal.GetAsync(unknown.ActionId!.Value, CancellationToken.None))!;
+        if (originalRisk == "lowered-risk")
+        {
+            fixture.Policy.Replace("read-only-policy", fixture.AllowedPermission);
+        }
+        fixture.SetVerification((_, _, _, _) =>
+            ValueTask.FromResult(new ToolVerificationOutcome(ToolVerificationStatus.Verified, null)));
+        var restarted = fixture.CreateRestartedDispatcher();
+        if (cancelReplay)
+        {
+            var executing = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            fixture.SetExecution(async (_, _, token) =>
+            {
+                executing.SetResult();
+                await release.Task.WaitAsync(TimeSpan.FromSeconds(5), token);
+                return new ToolExecutionOutcome(ToolExecutionStatus.Completed, null, null);
+            });
+            var holder = restarted.DispatchAsync(
+                PorchRequest with { CallId = "holding-sqlite-unknown-replay" }, CancellationToken.None).AsTask();
+            await executing.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            using var cancellation = new CancellationTokenSource();
+            var replay = restarted.DispatchAsync(PorchRequest, cancellation.Token).AsTask();
+            Assert.False(replay.IsCompleted);
+            cancellation.Cancel();
+            try
+            {
+                await Assert.ThrowsAnyAsync<OperationCanceledException>(() => replay);
+            }
+            finally
+            {
+                release.SetResult();
+                Assert.Equal("Succeeded", (await holder).Status);
+            }
+        }
+        var sends = fixture.ExecutionCount;
+        var observations = fixture.VerificationCount;
+        var read = originalRisk == "read";
+        if (cancelReplay)
+        {
+            fixture.SetExecution((_, _, _) =>
+                ValueTask.FromResult(new ToolExecutionOutcome(ToolExecutionStatus.Completed, null, null)));
+            var afterCancellation = await restarted.DispatchAsync(
+                PorchRequest with { CallId = "after-cancelled-sqlite-unknown-replay" }, CancellationToken.None);
+            Assert.Equal(read ? "Succeeded" : "Rejected", afterCancellation.Status);
+            if (!read)
+            {
+                Assert.Equal("equivalent_write_outcome_unknown", afterCancellation.ReasonCode);
+            }
+            Assert.Equal(sends + (read ? 1 : 0), fixture.ExecutionCount);
+            Assert.Equal(observations + (read ? 1 : 0), fixture.VerificationCount);
+            observations = fixture.VerificationCount;
+        }
+        for (var duplicate = 0; duplicate < 2; duplicate++)
+        {
+            var replay = await restarted.DispatchAsync(PorchRequest, CancellationToken.None);
+            Assert.Equal("Unknown", replay.Status);
+            Assert.Equal("recorded_action_outcome", replay.ReasonCode);
+        }
+        Assert.Equal(persisted, await fixture.Journal.GetAsync(persisted.Id, CancellationToken.None));
+        Assert.Equal(observations, fixture.VerificationCount);
+        fixture.SetExecution((_, _, _) =>
+            ValueTask.FromResult(new ToolExecutionOutcome(ToolExecutionStatus.Failed, null, "known_failure")));
+        var fresh = await restarted.DispatchAsync(PorchRequest with
+        {
+            CallId = "fresh-after-sqlite-unknown-replay",
+            ArgumentsJson = """{"On":true,"Entity":"porch-lamp"}"""
+        }, CancellationToken.None);
+        Assert.Equal(read ? "Failed" : "Rejected", fresh.Status);
+        Assert.Equal(read ? "known_failure" : "equivalent_write_outcome_unknown", fresh.ReasonCode);
+        var stopped = await restarted.DispatchAsync(
+            PorchRequest with { CallId = "past-sqlite-unknown-budget" }, CancellationToken.None);
+        Assert.Equal(read ? "equivalent_failure_limit" : "equivalent_write_outcome_unknown", stopped.ReasonCode);
+        var additionalReadSends = cancelReplay ? 2 : 1;
+        Assert.Equal(sends + (read ? additionalReadSends : 0), fixture.ExecutionCount);
+    }
+
+    [Theory]
     [InlineData(false, false, false)]
     [InlineData(true, true, false)]
     [InlineData(false, true, true)]

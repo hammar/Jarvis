@@ -1393,6 +1393,124 @@ public sealed class ToolDispatcherUnitTests
         Assert.Equal(2, fixture.ExecutionCount);
     }
 
+    [Theory]
+    [InlineData("write", "none")]
+    [InlineData("write", "cancel")]
+    [InlineData("write", "read-error")]
+    [InlineData("lowered-risk", "none")]
+    [InlineData("lowered-risk", "cancel")]
+    [InlineData("lowered-risk", "read-error")]
+    [InlineData("read", "none")]
+    [InlineData("read", "cancel")]
+    [InlineData("read", "read-error")]
+    [Trait("Category", "Unit")]
+    public async Task PersistedUnknownReplayRetainsOriginalRiskBeforeCancellableRefresh(
+        string originalRisk, string replayFailure)
+    {
+        using var fixture = new Fixture(
+            originalRisk == "write" ? ToolRiskClass.LowRiskWrite : ToolRiskClass.ReadOnly);
+        if (originalRisk == "lowered-risk")
+        {
+            fixture.Policy.RequireApproval();
+            var pending = await fixture.Dispatcher.DispatchAsync(Request, CancellationToken.None);
+            await fixture.Approvals.ResolveAsync(pending.ApprovalId!.Value, "owner", 1, true, CancellationToken.None);
+        }
+        fixture.Execution = (_, _, _) =>
+            ValueTask.FromResult(new ToolExecutionOutcome(ToolExecutionStatus.Unknown, null, "unconfirmed"));
+        fixture.Verification = (_, _, _, _) =>
+            ValueTask.FromResult(new ToolVerificationOutcome(ToolVerificationStatus.Unknown, "unconfirmed"));
+        var unknown = await fixture.Dispatcher.DispatchAsync(Request, CancellationToken.None);
+        Assert.Equal("Unknown", unknown.Status);
+        var persisted = (await fixture.Journal.GetAsync(unknown.ActionId!.Value, CancellationToken.None))!;
+        if (originalRisk == "lowered-risk")
+        {
+            fixture.Policy.Replace("read-only-policy");
+        }
+        fixture.Verification = (_, _, _, _) =>
+            ValueTask.FromResult(new ToolVerificationOutcome(ToolVerificationStatus.Verified, null));
+        var restarted = fixture.CreateRestartedDispatcher();
+        if (replayFailure == "cancel")
+        {
+            var executing = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            fixture.Execution = async (_, _, token) =>
+            {
+                executing.SetResult();
+                await release.Task.WaitAsync(TimeSpan.FromSeconds(5), token);
+                return new ToolExecutionOutcome(ToolExecutionStatus.Completed, null, null);
+            };
+            var holder = restarted.DispatchAsync(
+                Request with { CallId = "holding-unknown-replay-gate" }, CancellationToken.None).AsTask();
+            await executing.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            using var cancellation = new CancellationTokenSource();
+            var replay = restarted.DispatchAsync(Request, cancellation.Token).AsTask();
+            Assert.False(replay.IsCompleted);
+            cancellation.Cancel();
+            try
+            {
+                await Assert.ThrowsAnyAsync<OperationCanceledException>(() => replay);
+            }
+            finally
+            {
+                release.SetResult();
+                Assert.Equal("Succeeded", (await holder).Status);
+            }
+        }
+        else if (replayFailure == "read-error")
+        {
+            var reads = 0;
+            fixture.Journal.AfterRead = (entry, _) =>
+            {
+                if (entry?.Id == unknown.ActionId && Interlocked.Increment(ref reads) == 2)
+                {
+                    throw new InvalidOperationException("controlled Unknown refresh error");
+                }
+                return Task.CompletedTask;
+            };
+            await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+                await restarted.DispatchAsync(Request, CancellationToken.None));
+            fixture.Journal.AfterRead = null;
+        }
+        var sends = fixture.ExecutionCount;
+        var observations = fixture.VerificationCount;
+        var read = originalRisk == "read";
+        if (replayFailure != "none")
+        {
+            fixture.Execution = (_, _, _) =>
+                ValueTask.FromResult(new ToolExecutionOutcome(ToolExecutionStatus.Completed, null, null));
+            var afterError = await restarted.DispatchAsync(
+                Request with { CallId = "fresh-after-interrupted-unknown-replay" }, CancellationToken.None);
+            Assert.Equal(read ? "Succeeded" : "Rejected", afterError.Status);
+            if (!read)
+            {
+                Assert.Equal("equivalent_write_outcome_unknown", afterError.ReasonCode);
+            }
+            Assert.Equal(sends + (read ? 1 : 0), fixture.ExecutionCount);
+            Assert.Equal(observations + (read ? 1 : 0), fixture.VerificationCount);
+            observations = fixture.VerificationCount;
+        }
+        for (var duplicate = 0; duplicate < 2; duplicate++)
+        {
+            var replay = await restarted.DispatchAsync(Request, CancellationToken.None);
+            Assert.Equal("Unknown", replay.Status);
+            Assert.Equal("recorded_action_outcome", replay.ReasonCode);
+        }
+        Assert.Equal(persisted, await fixture.Journal.GetAsync(persisted.Id, CancellationToken.None));
+        Assert.Equal(observations, fixture.VerificationCount);
+        fixture.Execution = (_, _, _) =>
+            ValueTask.FromResult(new ToolExecutionOutcome(ToolExecutionStatus.Failed, null, "known_failure"));
+        var fresh = await restarted.DispatchAsync(
+            Request with { CallId = "fresh-after-persisted-unknown", ArgumentsJson = """{"On":true,"Entity":"porch-lamp"}""" },
+            CancellationToken.None);
+        Assert.Equal(read ? "Failed" : "Rejected", fresh.Status);
+        Assert.Equal(read ? "known_failure" : "equivalent_write_outcome_unknown", fresh.ReasonCode);
+        var stopped = await restarted.DispatchAsync(
+            Request with { CallId = "past-persisted-unknown-budget" }, CancellationToken.None);
+        Assert.Equal(read ? "equivalent_failure_limit" : "equivalent_write_outcome_unknown", stopped.ReasonCode);
+        var additionalReadSends = replayFailure == "none" ? 1 : 2;
+        Assert.Equal(sends + (read ? additionalReadSends : 0), fixture.ExecutionCount);
+    }
+
     [Fact]
     [Trait("Category", "Unit")]
     public async Task FreshReadRecoveryDoesNotInventWriteUncertainty()
@@ -1413,14 +1531,22 @@ public sealed class ToolDispatcherUnitTests
     }
 
     [Theory]
-    [InlineData("invalid-json")]
-    [InlineData("missing-risk")]
-    [InlineData("null")]
+    [InlineData("invalid-json", false)]
+    [InlineData("missing-risk", false)]
+    [InlineData("null", false)]
+    [InlineData("invalid-json", true)]
+    [InlineData("missing-risk", true)]
+    [InlineData("null", true)]
     [Trait("Category", "Unit")]
-    public async Task UnreadablePersistedRiskSurfacesAndKeepsEquivalentCallsBlocked(string malformed)
+    public async Task UnreadablePersistedRiskSurfacesAndKeepsEquivalentCallsBlocked(string malformed, bool terminal)
     {
         using var fixture = new Fixture();
         var orphan = await fixture.MarkExecutingAsync(Request);
+        if (terminal)
+        {
+            await fixture.Journal.UpdateStatusAsync(
+                orphan.Id, "Unknown", orphan.Version, fixture.Clock.UtcNow, CancellationToken.None);
+        }
         fixture.Journal.Corrupt(orphan.Id, preserveHash: true,
             canonicalEnvelope: malformed == "missing-risk" ? """{"FormatVersion":1}""" : malformed);
         var restarted = fixture.CreateRestartedDispatcher();

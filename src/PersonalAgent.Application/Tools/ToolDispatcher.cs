@@ -650,24 +650,7 @@ public sealed class ToolDispatcher : IToolDispatcher
         try
         {
             var budget = GetFailureBudget(request, draft);
-            ToolRiskClass originalRisk;
-            try
-            {
-                originalRisk = JsonSerializer.Deserialize<CanonicalActionEnvelope>(
-                    action.CanonicalArguments, EnvelopeJsonOptions)?.RiskClass
-                    ?? throw new InvalidOperationException("The interrupted action has no canonical envelope.");
-            }
-            catch (Exception exception) when (exception is JsonException or InvalidOperationException)
-            {
-                budget.RegisterUncertainWrite(action.Id);
-                throw;
-            }
-
-            // Register original write risk before cancellable gate acquisition; valid reads never add a marker.
-            if (originalRisk != ToolRiskClass.ReadOnly)
-            {
-                budget.RegisterUncertainWrite(action.Id);
-            }
+            RegisterPersistedWriteUncertainty(budget, action);
             await budget.Gate.WaitAsync(cancellationToken);
             try
             {
@@ -808,6 +791,10 @@ public sealed class ToolDispatcher : IToolDispatcher
         }
 
         var budget = GetFailureBudget(request, draft);
+        if (action.Status == "Unknown")
+        {
+            RegisterPersistedWriteUncertainty(budget, action);
+        }
         await budget.Gate.WaitAsync(cancellationToken);
         try
         {
@@ -819,6 +806,28 @@ public sealed class ToolDispatcher : IToolDispatcher
         finally
         {
             budget.Gate.Release();
+        }
+    }
+
+    // Seed original risk before cancellable gate waits; changed authorization cannot downgrade an unresolved write.
+    private static void RegisterPersistedWriteUncertainty(FailureBudget budget, ActionJournalEntry action)
+    {
+        ToolRiskClass originalRisk;
+        try
+        {
+            originalRisk = JsonSerializer.Deserialize<CanonicalActionEnvelope>(
+                action.CanonicalArguments, EnvelopeJsonOptions)?.RiskClass
+                ?? throw new InvalidOperationException("The persisted action has no canonical envelope.");
+        }
+        catch (Exception exception) when (exception is JsonException or InvalidOperationException)
+        {
+            budget.RegisterUncertainWrite(action.Id);
+            throw;
+        }
+
+        if (originalRisk != ToolRiskClass.ReadOnly)
+        {
+            budget.RegisterUncertainWrite(action.Id);
         }
     }
 

@@ -79,6 +79,11 @@ Terminal replay refreshes the journal under the proposal gate and reconciles
 only its own accounting, including stale uncertainty left by cancelled recovery
 after completion. Failed refreshes and cancellation preserve markers; another
 orphan's uncertainty cannot be cleared. Replay never executes or observes.
+Persisted Unknown replay shares Executing recovery's strict original-risk
+classification and registers unresolved write risk before cancellable waits.
+A fresh dispatcher, lowered current risk, cancellation or refresh error cannot
+permit an equivalent resend. Original reads do not add write markers; malformed
+risk metadata marks conservatively then surfaces the error.
 Recovery rechecks authorization after any proposal-gate wait, before observing.
 Definitive `NotApplied` means known failure even after uncertain delivery and
 retains only the remaining bounded attempt; an unchanged snapshot with possible

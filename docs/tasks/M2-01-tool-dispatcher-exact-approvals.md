@@ -197,6 +197,7 @@ R7/R8, both labelled "Previously missed"; both are retained below. Commit
 | M2-01-R20 (Previously missed) | High | Cancelling fresh-dispatcher orphan recovery while it waited for the proposal gate lost original write uncertainty; the successful holder then allowed a fresh equivalent send. | Fixed in the follow-up after `95b7575`: strict original-risk classification and concurrent action-ID registration precede the cancellable wait. Existing reads never add markers, malformed metadata marks then throws, and cancellation releases the active claim without removing the marker. Unit/SQLite controls prove a holder's success cannot clear the orphan, lower current risk cannot erase it, and later known recovery permits a fresh attempt. |
 | M2-01-R21 (Previously missed) | High | An equivalent call passed its early uncertainty check then awaited its claim; orphan registration could win while queued recovery was cancelled, yet the fresh handler still sent. | Fixed in the follow-up after `3f2f4e0`: final synchronous admission after the durable claim/policy/expiry checks shares a short lock with every registration. A winning marker durably rejects the unsent action without clearing the orphan. Unit/SQLite paused-claim regressions prove zero fresh sends/observations, original-read/lowered-risk behavior and a permitted fresh send after known recovery. |
 | M2-01-R22 (Previously missed) | Medium | A delayed Executing snapshot re-registered uncertainty after completion, then cancelled behind another holder; terminal replay never reconciled the stale marker and blocked the rest of the turn. | Fixed in the follow-up after `e0962dc`: terminal replay refreshes under the canonical proposal gate and reconciles only that action's accounting. Unit/SQLite races cover same/policy-changed success/failure, another unresolved orphan, bounded remaining attempts and no replay send/observation; cancelled waits and failed refreshes preserve uncertainty. |
+| M2-01-R23 (Previously missed) | High | Replaying persisted Unknown on a fresh dispatcher counted a failure without seeding original write uncertainty, allowing an equivalent fresh-ID resend despite unresolved effects. | Fixed in the follow-up after `5773e76`: share strict original-envelope classification with Executing recovery and register Unknown write risk before the cancellable replay wait. Unit/SQLite cases cover normal/lowered risk, cancellation, failed refresh, read-only failure limits, malformed risk, repeated replay, unchanged durable state and zero extra replay send/observation. |
 
 R9 uniquely identifies review comment `4273196189`, which reused the R7 label
 already assigned to the distinct approval-expiry race. Its review was against
@@ -246,6 +247,10 @@ R22 maps to `4275341606` in the full review against `e0962dc`. Its summary
 retained R6 without additional summary-only findings. R20's conservative
 registration before cancellable waits remains intact; reconciliation on
 terminal replay repairs only a durably known action's stale marker.
+R23 maps to `4275572254` in the full review against `5773e76`. Its summary
+retained R6 without additional summary-only findings. All inspected CI checks
+passed against that parent, including SDK contracts on Linux/macOS and required
+Aspire/browser suites; this is parent evidence, not validation of the R23 fix.
 
 For R6, the concrete alternatives are explicit owner acceptance of status-only
 replay for M2-01 or authorization to extend durable terminal-result persistence
@@ -660,6 +665,41 @@ Earlier dispositions remain intact; R6 remains deferred and unaccepted.
 - `origin/main` was fetched again: zero commits behind, with no integration or
   conflict resolution needed. Independent exact-commit source review follows
   the runtime/test/documentation commit; its result is recorded separately.
+
+## R23 regression evidence
+
+- Before the production fix, six write/lowered-risk replay cases and three new
+  terminal-malformed-risk cases failed. Three read-only controls and three
+  retained Executing-malformed-risk controls passed. The first harness run
+  also exposed an incorrect observation baseline for successful read probes;
+  correcting that accounting yielded the nine genuine failures above.
+- Executing recovery and persisted Unknown replay now share strict original
+  envelope classification. Both register original write uncertainty before
+  cancellable gate acquisition, using the existing admission synchronization.
+  Current risk cannot downgrade persisted risk; original reads never add a
+  marker. Invalid/missing/null risk registers conservatively then throws.
+  Known terminal replay retains R22's action-specific reconciliation.
+- Nine new replay unit cases, three terminal metadata cases and six real-SQLite
+  cases cover direct replay, changed current policy, cancelled gate waits,
+  unit refresh failure, equivalent aliases/fresh IDs, repeated replay with
+  deduplicated failure slots, unchanged terminal records/versions and no
+  replay send/observation. Successful read probes remain permitted, followed
+  by exactly one remaining failed attempt; real unresolved writes stay blocked
+  even before retrying a cancelled/failed replay.
+- Targeted dispatcher unit146/146 and SQLite53/53 passed. All controlled waits
+  have deadlines; no production test controls or sleeps were introduced.
+- No schema/storage contracts, dependencies, actual tools or SDK/process-launch
+  behavior changed. The complete R1-R23 ledger and unaccepted R6 are retained;
+  dedicated current-head SDK/Aspire/browser CI remains separate.
+- Using the same isolated MSBuild output and unchanged scripts,
+  `tools/validate.sh build`, `unit` (277/277), `integration` (273/273),
+  `coverage`, `architecture` (6/6), and `docs` passed. Discovery was verified;
+  formatting/Release completed with zero warnings/errors.
+- Coverage inputs:
+  `artifacts/coverage/unit/20261014T201500Z-64273` and
+  `artifacts/coverage/integration/20261014T201532Z-64334`. All configured gates
+  passed: changed lines 99.1% (926/934), Application lines 98.5% (1857/1885)
+  and branches 94.3% (829/879).
 
 ## Earlier full-gate evidence
 

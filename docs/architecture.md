@@ -159,6 +159,12 @@ This repairs stale uncertainty registered by a delayed Executing read whose
 gate wait was cancelled after completion. Cancellation or a failed refresh
 preserves uncertainty; replay neither sends nor observes, and never clears
 another orphan's marker.
+Persisted Unknown replay seeds original write risk before its cancellable gate
+wait, using the same strict envelope classification as Executing recovery.
+Fresh dispatcher state, a lower current risk, cancellation or a failed journal
+refresh cannot erase that unresolved effect. Valid original reads retain
+distinct-action failure limits without inventing write uncertainty; malformed
+risk metadata registers uncertainty conservatively before surfacing its error.
 The engine releases ephemeral accounting only
 after the turn's callbacks stop. Restart interrupts turns rather than resuming
 their inference, so these counters are not a durable retry mechanism.
