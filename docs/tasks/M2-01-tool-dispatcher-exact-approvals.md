@@ -280,6 +280,15 @@ four SQLite cases, retained controls and the complete R1-R17 ledger.
 This was source-only review, not independent execution or live/cross-process
 validation. R6 remains deferred and unaccepted.
 
+The bounded independent review of exact commit
+`07d5f039e1498496121f5981236cae0fe0629872` against `a1fd7de` supported
+R18/R19 and found no new significant findings. It examined permission checks,
+under-gate refresh, retained original-risk seeding/error behavior, action-owned
+accounting and all 13 new unit/seven SQLite cases against the complete R1-R19
+ledger and relevant spec/ADRs. It did not rerun checks or establish live-device,
+cross-process or current-head SDK/Aspire/browser evidence. R6 remains deferred
+and unaccepted.
+
 ## R7/R8 regression evidence
 
 - Before the production fix, the targeted R7/R8 unit regressions failed in all
