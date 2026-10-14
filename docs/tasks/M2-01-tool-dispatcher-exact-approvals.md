@@ -263,6 +263,14 @@ examined the full R1-R16 ledger, relevant specification/ADRs and changed
 runtime/tests/docs, retained deferred/unaccepted R6, and did not rerun checks
 or exercise live devices.
 
+The bounded independent review of exact commit
+`4abe28088f05569fd9357367f5fc77ffce0a9c5c` against `5d60757` supported
+R17 and found no new significant findings. It checked gate ownership,
+original-risk parsing, per-action uncertainty removal, all 18 new unit and
+four SQLite cases, retained controls and the complete R1-R17 ledger.
+This was source-only review, not independent execution or live/cross-process
+validation. R6 remains deferred and unaccepted.
+
 ## R7/R8 regression evidence
 
 - Before the production fix, the targeted R7/R8 unit regressions failed in all
