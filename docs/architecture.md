@@ -139,6 +139,11 @@ Unresolved writes are tracked by action ID as a set so reconciling one orphan
 cannot discard another. Persisted read-only actions do not acquire write
 uncertainty; unreadable/incomplete risk metadata surfaces an error and keeps
 equivalent sends blocked conservatively.
+Normal verification also rechecks current authorization after execution;
+revocation or Unsupported records Unknown without observing. Recovery rereads
+the action under the proposal gate before observing and returns a winning
+non-Executing status instead of using a stale version. Known pre-send
+Rejected/Expired winners clear only their own provisional uncertainty.
 The engine releases ephemeral accounting only
 after the turn's callbacks stop. Restart interrupts turns rather than resuming
 their inference, so these counters are not a durable retry mechanism.

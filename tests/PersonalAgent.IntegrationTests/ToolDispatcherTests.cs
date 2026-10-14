@@ -91,6 +91,90 @@ public sealed class ToolDispatcherTests
     }
 
     [Theory]
+    [InlineData(ToolExecutionStatus.Completed, false)]
+    [InlineData(ToolExecutionStatus.Unknown, false)]
+    [InlineData(ToolExecutionStatus.Completed, true)]
+    [InlineData(ToolExecutionStatus.Unknown, true)]
+    [Trait("Category", "Integration")]
+    public async Task RevocationDuringExecutionPersistsUnknownWithoutObservation(
+        ToolExecutionStatus delivery, bool unsupported)
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var executing = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.SetExecution(async (_, _, token) =>
+        {
+            executing.SetResult();
+            await release.Task.WaitAsync(TimeSpan.FromSeconds(5), token);
+            return new ToolExecutionOutcome(delivery, null, null);
+        });
+        var dispatch = fixture.Dispatcher.DispatchAsync(PorchRequest, CancellationToken.None).AsTask();
+        await executing.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        fixture.Policy.Replace("revoked", fixture.AllowedPermission with
+        {
+            EntityId = unsupported ? "light.porch" : "light.other",
+            MinimumRisk = unsupported ? ToolRiskClass.Unsupported : ToolRiskClass.ReadOnly
+        });
+        release.SetResult();
+        var result = await dispatch;
+        Assert.Equal("Unknown", result.Status);
+        Assert.Equal("execution_observation_not_permitted", result.ReasonCode);
+        Assert.Equal("Unknown", (await fixture.Journal.GetAsync(result.ActionId!.Value, CancellationToken.None))!.Status);
+        Assert.Equal(0, fixture.VerificationCount);
+        Assert.Equal(1, fixture.ExecutionCount);
+    }
+
+    [Theory]
+    [InlineData(ToolExecutionStatus.Completed)]
+    [InlineData(ToolExecutionStatus.Failed)]
+    [InlineData(ToolExecutionStatus.Unknown)]
+    [Trait("Category", "Integration")]
+    public async Task StaleExecutingSnapshotReturnsSqliteWinnerWithoutObserving(ToolExecutionStatus delivery)
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var executing = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseExecution = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.SetExecution(async (_, _, token) =>
+        {
+            executing.SetResult();
+            await releaseExecution.Task.WaitAsync(TimeSpan.FromSeconds(5), token);
+            return new ToolExecutionOutcome(delivery, null, null);
+        });
+        if (delivery == ToolExecutionStatus.Unknown)
+        {
+            fixture.SetVerification((_, _, _, _) =>
+                ValueTask.FromResult(new ToolVerificationOutcome(ToolVerificationStatus.Unknown, "unconfirmed")));
+        }
+        var reading = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseRead = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var paused = 0;
+        var journal = new PausedReadJournal(fixture.Journal, async (entry, token) =>
+        {
+            if (entry?.Status == "Executing" && Interlocked.CompareExchange(ref paused, 1, 0) == 0)
+            {
+                reading.SetResult();
+                await releaseRead.Task.WaitAsync(TimeSpan.FromSeconds(5), token);
+            }
+        });
+        var dispatcher = fixture.CreateRestartedDispatcher(journal);
+        var first = dispatcher.DispatchAsync(PorchRequest, CancellationToken.None).AsTask();
+        await executing.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        var stale = dispatcher.DispatchAsync(PorchRequest, CancellationToken.None).AsTask();
+        await reading.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        releaseExecution.SetResult();
+        var winner = await first;
+        var observations = fixture.VerificationCount;
+        fixture.Policy.Replace("revoked", fixture.AllowedPermission with { EntityId = "light.other" });
+        releaseRead.SetResult();
+        var result = await stale;
+        Assert.Equal(winner.Status, result.Status);
+        Assert.Equal("recorded_action_outcome", result.ReasonCode);
+        Assert.Equal(winner.Status, (await fixture.Journal.GetAsync(winner.ActionId!.Value, CancellationToken.None))!.Status);
+        Assert.Equal(observations, fixture.VerificationCount);
+        Assert.Equal(1, fixture.ExecutionCount);
+    }
+
+    [Theory]
     [InlineData(false, false)]
     [InlineData(false, true)]
     [InlineData(true, false)]
@@ -730,8 +814,8 @@ public sealed class ToolDispatcherTests
             Func<ToolArguments, ToolActionDraft, ToolExecutionOutcome, CancellationToken, ValueTask<ToolVerificationOutcome>> handler) =>
             verification = handler;
 
-        public ToolDispatcher CreateRestartedDispatcher() =>
-            new(registry, Policy, Journal, Approvals, Clock, TimeSpan.FromSeconds(1));
+        public ToolDispatcher CreateRestartedDispatcher(IActionJournalStore? journal = null) =>
+            new(registry, Policy, journal ?? Journal, Approvals, Clock, TimeSpan.FromSeconds(1));
 
         public void Dispose() => file.Dispose();
 
@@ -798,6 +882,25 @@ public sealed class ToolDispatcherTests
             cancellationToken.ThrowIfCancellationRequested();
             return ValueTask.FromResult(new ToolVerificationOutcome(ToolVerificationStatus.Verified, null));
         }
+    }
+
+    private sealed class PausedReadJournal(
+        IActionJournalStore inner,
+        Func<ActionJournalEntry?, CancellationToken, Task> afterRead) : IActionJournalStore
+    {
+        public ValueTask<ActionJournalEntry> CreateAsync(ActionJournalEntry entry, CancellationToken cancellationToken) =>
+            inner.CreateAsync(entry, cancellationToken);
+
+        public async ValueTask<ActionJournalEntry?> GetAsync(ActionId id, CancellationToken cancellationToken)
+        {
+            var entry = await inner.GetAsync(id, cancellationToken);
+            await afterRead(entry, cancellationToken);
+            return entry;
+        }
+
+        public ValueTask<ActionJournalEntry> UpdateStatusAsync(
+            ActionId id, string status, long expectedVersion, DateTimeOffset updatedAtUtc, CancellationToken cancellationToken) =>
+            inner.UpdateStatusAsync(id, status, expectedVersion, updatedAtUtc, cancellationToken);
     }
 
     private sealed record ToolArguments(string Entity, bool On);

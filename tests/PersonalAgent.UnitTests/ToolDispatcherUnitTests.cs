@@ -780,6 +780,188 @@ public sealed class ToolDispatcherUnitTests
     }
 
     [Theory]
+    [InlineData(ToolExecutionStatus.Completed, "denied")]
+    [InlineData(ToolExecutionStatus.Unknown, "denied")]
+    [InlineData(ToolExecutionStatus.Completed, "unsupported")]
+    [InlineData(ToolExecutionStatus.Unknown, "unsupported")]
+    [InlineData(ToolExecutionStatus.Completed, "allowed")]
+    [InlineData(ToolExecutionStatus.Unknown, "allowed")]
+    [Trait("Category", "Unit")]
+    public async Task NormalVerificationRechecksPermissionAfterExecution(
+        ToolExecutionStatus delivery, string permission)
+    {
+        using var fixture = new Fixture();
+        var executing = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseExecution = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.Execution = async (_, _, token) =>
+        {
+            executing.SetResult();
+            await releaseExecution.Task.WaitAsync(TimeSpan.FromSeconds(5), token);
+            return new ToolExecutionOutcome(delivery, null, "delivery_result");
+        };
+        var dispatch = fixture.Dispatcher.DispatchAsync(Request, CancellationToken.None).AsTask();
+        await executing.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        if (permission == "denied")
+        {
+            fixture.Policy.RevokePermissions();
+        }
+        else if (permission == "unsupported")
+        {
+            fixture.Policy.AllowUnsupported = true;
+        }
+        else
+        {
+            fixture.Policy.Replace("allowed-v2");
+        }
+        releaseExecution.SetResult();
+        var result = await dispatch;
+        Assert.Equal(permission == "allowed" ? "Succeeded" : "Unknown", result.Status);
+        Assert.Equal(permission == "allowed" ? 1 : 0, fixture.VerificationCount);
+        Assert.Equal(result.Status, fixture.Journal.Entries.Single().Status);
+        Assert.Equal(1, fixture.ExecutionCount);
+        if (permission != "allowed")
+        {
+            Assert.Equal("execution_observation_not_permitted", result.ReasonCode);
+            fixture.Policy.AllowUnsupported = false;
+            fixture.Policy.Replace("restored");
+            var stopped = await fixture.Dispatcher.DispatchAsync(
+                Request with { CallId = "after-revoked-observation" }, CancellationToken.None);
+            Assert.Equal("equivalent_write_outcome_unknown", stopped.ReasonCode);
+            Assert.Equal(1, fixture.ExecutionCount);
+        }
+    }
+
+    [Theory]
+    [InlineData(ToolExecutionStatus.Completed, "denied")]
+    [InlineData(ToolExecutionStatus.Completed, "unsupported")]
+    [InlineData(ToolExecutionStatus.Completed, "observation-cancelled")]
+    [InlineData(ToolExecutionStatus.Failed, "denied")]
+    [InlineData(ToolExecutionStatus.Unknown, "denied")]
+    [Trait("Category", "Unit")]
+    public async Task StaleExecutingReadReturnsWinningOutcomeWithoutObservingAgain(
+        ToolExecutionStatus delivery, string change)
+    {
+        using var fixture = new Fixture();
+        var executing = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseExecution = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.Execution = async (_, _, token) =>
+        {
+            executing.SetResult();
+            await releaseExecution.Task.WaitAsync(TimeSpan.FromSeconds(5), token);
+            return new ToolExecutionOutcome(delivery, null, "delivery_result");
+        };
+        if (delivery == ToolExecutionStatus.Unknown)
+        {
+            fixture.Verification = (_, _, _, _) =>
+                ValueTask.FromResult(new ToolVerificationOutcome(ToolVerificationStatus.Unknown, "unconfirmed"));
+        }
+        var first = fixture.Dispatcher.DispatchAsync(Request, CancellationToken.None).AsTask();
+        await executing.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        var reading = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseRead = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var paused = 0;
+        fixture.Journal.AfterRead = async (entry, token) =>
+        {
+            if (entry?.Status == "Executing" && Interlocked.CompareExchange(ref paused, 1, 0) == 0)
+            {
+                reading.SetResult();
+                await releaseRead.Task.WaitAsync(TimeSpan.FromSeconds(5), token);
+            }
+        };
+        var stale = fixture.Dispatcher.DispatchAsync(Request, CancellationToken.None).AsTask();
+        await reading.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        releaseExecution.SetResult();
+        var winner = await first;
+        var observations = fixture.VerificationCount;
+        if (change == "denied")
+        {
+            fixture.Policy.RevokePermissions();
+        }
+        else if (change == "unsupported")
+        {
+            fixture.Policy.AllowUnsupported = true;
+        }
+        else
+        {
+            fixture.Verification = (_, _, _, _) => throw new OperationCanceledException();
+        }
+        releaseRead.SetResult();
+        var recorded = await stale;
+        Assert.Equal(winner.Status, recorded.Status);
+        Assert.Equal(winner.ActionId, recorded.ActionId);
+        Assert.Equal("recorded_action_outcome", recorded.ReasonCode);
+        Assert.Equal(winner.Status, fixture.Journal.Entries.Single().Status);
+        Assert.Equal(observations, fixture.VerificationCount);
+        Assert.Equal(1, fixture.ExecutionCount);
+        fixture.Policy.AllowUnsupported = false;
+        fixture.Policy.Replace("restored");
+        fixture.Execution = (_, _, _) =>
+            ValueTask.FromResult(new ToolExecutionOutcome(ToolExecutionStatus.Failed, null, "known_failure"));
+        var fresh = await fixture.Dispatcher.DispatchAsync(
+            Request with { CallId = "after-recorded-winner" }, CancellationToken.None);
+        Assert.Equal(delivery == ToolExecutionStatus.Unknown ? "Rejected" : "Failed", fresh.Status);
+        if (delivery == ToolExecutionStatus.Unknown)
+        {
+            Assert.Equal("equivalent_write_outcome_unknown", fresh.ReasonCode);
+        }
+        Assert.Equal(delivery == ToolExecutionStatus.Unknown ? 1 : 2, fixture.ExecutionCount);
+    }
+
+    [Theory]
+    [InlineData("Rejected")]
+    [InlineData("Expired")]
+    [Trait("Category", "Unit")]
+    public async Task StaleClaimedReadPreservesKnownNonExecutionWithoutInventingWriteUncertainty(string winner)
+    {
+        using var fixture = new Fixture(ToolRiskClass.ApprovalRequired);
+        var pending = await fixture.Dispatcher.DispatchAsync(Request, CancellationToken.None);
+        await fixture.Approvals.ResolveAsync(pending.ApprovalId!.Value, "owner", 1, true, CancellationToken.None);
+        var reading = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseRead = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var paused = 0;
+        fixture.Journal.AfterRead = async (entry, token) =>
+        {
+            if (entry?.Status == "Executing" && Interlocked.CompareExchange(ref paused, 1, 0) == 0)
+            {
+                reading.SetResult();
+                await releaseRead.Task.WaitAsync(TimeSpan.FromSeconds(5), token);
+            }
+        };
+        Task<ToolDispatchResult>? stale = null;
+        fixture.Journal.StatusUpdated = status =>
+        {
+            if (status == "Executing")
+            {
+                stale = fixture.Dispatcher.DispatchAsync(Request, CancellationToken.None).AsTask();
+                if (winner == "Rejected")
+                {
+                    fixture.Policy.RevokePermissions();
+                }
+                else
+                {
+                    fixture.Clock.Advance(TimeSpan.FromMinutes(5));
+                }
+            }
+        };
+        var first = await fixture.Dispatcher.DispatchAsync(Request, CancellationToken.None);
+        await reading.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.Equal(winner, first.Status);
+        releaseRead.SetResult();
+        Assert.Equal(winner, (await stale!).Status);
+        Assert.Equal(0, fixture.ExecutionCount);
+        Assert.Equal(0, fixture.VerificationCount);
+
+        fixture.Journal.StatusUpdated = null;
+        fixture.Policy.Replace("restored");
+        var freshRequest = Request with { CallId = "after-known-non-execution" };
+        var fresh = await fixture.Dispatcher.DispatchAsync(freshRequest, CancellationToken.None);
+        Assert.Equal("AwaitingApproval", fresh.Status);
+        await fixture.Approvals.ResolveAsync(fresh.ApprovalId!.Value, "owner", 1, true, CancellationToken.None);
+        Assert.Equal("Succeeded", (await fixture.Dispatcher.DispatchAsync(freshRequest, CancellationToken.None)).Status);
+        Assert.Equal(1, fixture.ExecutionCount);
+    }
+
+    [Theory]
     [InlineData("denied")]
     [InlineData("unsupported")]
     [InlineData("allowed")]

@@ -64,6 +64,10 @@ before observation and tracks every unresolved write by action ID. Reconciling
 one orphan cannot discard another, current read classification cannot erase
 original write risk, and unreadable risk metadata fails closed. Original reads
 remain subject to their failure budget without inventing write uncertainty.
+Normal post-execution verification rechecks permission and records Unknown
+without observation when revoked/Unsupported. Recovery refreshes the action
+under its proposal gate and returns any winning non-Executing state without
+observing again; known pre-send rejection/expiry does not invent uncertainty.
 Recovery rechecks authorization after any proposal-gate wait, before observing.
 Definitive `NotApplied` means known failure even after uncertain delivery and
 retains only the remaining bounded attempt; an unchanged snapshot with possible

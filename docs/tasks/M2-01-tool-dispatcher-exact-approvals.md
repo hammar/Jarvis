@@ -56,6 +56,9 @@ Acceptance scenarios include:
   risk before observation. Inconclusive/error/unjournaled outcomes remain
   blocked; reconciling one orphan cannot discard another. Original read-only
   actions are not overblocked, and unreadable risk metadata fails closed.
+- Normal verification rechecks permission after delivery; recovery refreshes
+  journal state under the proposal gate before observing a still-Executing
+  action. Winning outcomes are returned without another observation.
 
 ## Scope
 
@@ -183,6 +186,8 @@ R7/R8, both labelled "Previously missed"; both are retained below. Commit
 | M2-01-R15 | Medium | Definitive NotApplied verification after Unknown execution was still classified Unknown, blocking the safe remaining attempt. | Fixed in the follow-up after `8dafbab`: use the verifier's existing definitive-non-application contract consistently with recovery. Unit/SQLite regressions assert Failed persistence, duplicate replay, a permitted second attempt, and a blocked third. XML clarifies that an unchanged snapshot with possible late application is insufficient. |
 | M2-01-R16 | Medium | Recovery used authorization sampled before awaiting the equivalent-proposal gate, allowing observation after permission was revoked. | Fixed in the follow-up after `8dafbab`: evaluate current policy after acquiring the gate, immediately before observation. `QueuedRecoveryRechecksCurrentAuthorizationBeforeObserving` queues behind an equivalent call and verifies revoked/Unsupported permissions cause Unknown without observing, while an allowed version change still permits observation. |
 | M2-01-R17 | High | A fresh dispatcher did not seed an orphaned write's uncertainty, permitting an equivalent fresh send after inconclusive/error/unjournaled recovery. | Fixed in the follow-up after `5d60757`: seed uncertainty before observing from strictly parsed original persisted risk; track all unresolved action IDs, not one nullable owner. Sequential/queued unit/SQLite regressions assert no extra send; additional controls cover multiple orphans, changed current risk, read-only failure limits and malformed/missing/null metadata. Known durable outcomes remove only their own uncertainty. |
+| M2-01-R18 (Previously missed) | Medium | Permission revoked or Unsupported during execution was not checked before normal external verification. | Fixed in the follow-up after `a1fd7de`: re-evaluate before verification; record Unknown without observing and retain equivalent-write uncertainty. Completed/Unknown paused-execution unit/SQLite regressions assert zero observations; still-allowed version changes remain observable. |
+| M2-01-R19 (Previously missed) | Medium | A stale Executing snapshot could observe after another dispatch completed, then fail its terminal CAS rather than return the winner. | Fixed in the follow-up after `a1fd7de`: reread under the proposal gate and return non-Executing state with budget reconciliation before observing. Unit/SQLite races cover Succeeded/Failed/Unknown, revoked/Unsupported policy and cancelled observation; pre-send Rejected/Expired controls preserve the winner without inventing uncertainty. |
 
 R9 uniquely identifies review comment `4273196189`, which reused the R7 label
 already assigned to the distinct approval-expiry race. Its review was against
@@ -206,6 +211,10 @@ contained no additional summary-only findings. R6 remains deferred/unaccepted.
 R17 maps to comment `4274173142` in the subsequent full review against
 `8dafbab`. It repeated R15/R16, fixed by `5d60757`, and its summary retained
 R6's unaccepted gap; no additional summary-only finding was omitted.
+R18 maps to `4274599641`; R19 maps to `4274599736`. The full subsequent
+review against `5d60757` labelled both Previously missed and repeated R17,
+already fixed by `4abe280`. It added no further summary-only findings; none
+of the earlier dispositions or R6's unaccepted gap is erased.
 
 For R6, the concrete alternatives are explicit owner acceptance of status-only
 replay for M2-01 or authorization to extend durable terminal-result persistence
@@ -445,6 +454,38 @@ validation. R6 remains deferred and unaccepted.
   or a durable multi-host retry mechanism. No schema, storage API, dependencies,
   actual feature tools or SDK/process-launch behavior changed. R6 remains
   deferred and unaccepted.
+
+## R18/R19 regression evidence
+
+- The targeted pre-fix 11-case unit run had nine failures (four post-delivery
+  permission races and five stale-Executing races) and two passing allowed
+  policy-version controls. After fixing both boundaries and adding two
+  pre-send Rejected/Expired controls, the dispatcher unit subset passed
+  (121/121); the SQLite subset passed (40/40), including seven new cases.
+- Normal observation checks current permission immediately after delivery;
+  denied/Unsupported outcomes become Unknown without a verification callback.
+  Recovery seeds original risk conservatively, refreshes journal state under
+  the same proposal gate and returns any winning non-Executing state without
+  another observation or terminal CAS. Read/journal errors remain explicit.
+- A known durable pre-send Rejected/Expired winner clears only its own
+  provisional uncertainty, just as known Succeeded/Failed does; it cannot
+  erase another orphan. Tests assert known outcomes retain a permitted fresh
+  attempt while Unknown remains blocked, with no extra execution/observation.
+- SQLite race tests use production stores behind a read-pause adapter; their
+  optimistic-version checks and winning terminal records are real SQLite,
+  not claims of live-device or cross-process crash validation.
+- With the same isolated MSBuild output and unchanged scripts described for
+  R17, `tools/validate.sh build`, `unit` (252/252), `integration` (260/260),
+  `coverage`, `architecture` (6/6), and `docs` passed. Discovery was verified;
+  format/Release completed with zero warnings/errors.
+- Coverage inputs:
+  `artifacts/coverage/unit/20261014T182846Z-52938` and
+  `artifacts/coverage/integration/20261014T182927Z-53041`. All configured gates
+  passed: changed lines 99.1% (891/899), Application lines 98.5% (1822/1850)
+  and branches 94.2% (824/875).
+- No schema/storage contracts, dependencies, functional tools, SDK integration
+  or process-launch behavior changed. Full replay R6 remains deferred and
+  unaccepted; dedicated SDK/Aspire/browser current-head CI is separate.
 
 ## Earlier full-gate evidence
 

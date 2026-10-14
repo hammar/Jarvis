@@ -555,6 +555,12 @@ public sealed class ToolDispatcher : IToolDispatcher
             return new("Failed", execution.ResultJson, execution.ReasonCode ?? "tool_execution_failed", failed.Id);
         }
 
+        var observationAuthorization = policy.Evaluate(request.ToolName, draft, registration.RiskClass);
+        if (!observationAuthorization.Allowed || observationAuthorization.EffectiveRisk == ToolRiskClass.Unsupported)
+        {
+            return await CompleteUnknownAsync(action, execution.ResultJson, "execution_observation_not_permitted");
+        }
+
         ToolVerificationOutcome verification;
         using (var verificationCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
         {
@@ -653,6 +659,14 @@ public sealed class ToolDispatcher : IToolDispatcher
                 if (original.RiskClass == ToolRiskClass.ReadOnly)
                 {
                     budget.UncertainWrites.Remove(action.Id);
+                }
+
+                action = await journal.GetAsync(action.Id, cancellationToken)
+                    ?? throw new InvalidOperationException("The action disappeared during interrupted-execution recovery.");
+                if (action.Status != "Executing")
+                {
+                    RecordBudgetOutcome(budget, action.Id, action.Status);
+                    return Recorded(action);
                 }
 
                 var authorization = policy.Evaluate(request.ToolName, draft, registration.RiskClass);
@@ -798,7 +812,7 @@ public sealed class ToolDispatcher : IToolDispatcher
             budget.FailedActions.Add(actionId);
         }
 
-        if (status is "Succeeded" or "Failed")
+        if (status is "Succeeded" or "Failed" or "Rejected" or "Expired")
         {
             budget.UncertainWrites.Remove(actionId);
         }
