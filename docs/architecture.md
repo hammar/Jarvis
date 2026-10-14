@@ -86,6 +86,10 @@ status or persistence failure still surfaces as an error. When an expired
 winning approval and current action instead of replaying the stale decision.
 A still-pending conflict propagates, and a winning approval still has to pass
 the execution-time expiry check.
+Before reporting a Pending approval, dispatch refreshes the approval and action
+even before expiry. A winning rejection or active/completed execution returns
+its recorded state; a winning approval still awaiting execution follows the
+normal claim, expiry, and policy checks rather than asking for another decision.
 Approval creation first returns an existing exact owner/action binding, even
 when another dispatch has already started or completed execution. Only new
 approval records require an action still awaiting approval; this lookup neither

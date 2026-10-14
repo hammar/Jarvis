@@ -44,6 +44,8 @@ Acceptance scenarios include:
 - Observation-only recovery shares equivalent-proposal accounting: a durable
   known outcome clears only its own write uncertainty, verified success removes
   its provisional failure, and confirmed failure consumes one distinct slot.
+- Nonexpired Pending snapshots cannot mask a winning rejection, approval, or
+  active/completed execution, or solicit another decision after resolution.
 
 ## Scope
 
@@ -167,6 +169,7 @@ R7/R8, both labelled "Previously missed"; both are retained below. Commit
 | M2-01-R11 (review label R9; Previously missed) | Medium | A stale expired `Pending` snapshot could throw after another expiry or owner decision won resolution. | Fixed in the follow-up after `1669296`: reread the winning approval and current action after a resolution conflict; retain the execution-time expiry check and propagate conflicts with no decision. `StalePendingApprovalReadUsesTheWinningDecisionWithoutSending` covers expiry/approval/rejection; the stale-read execution test also covers in-progress/completed winning actions. |
 | M2-01-R12 | Medium | A delayed duplicate that read no approval could fail creation after another dispatch obtained approval and began/completed execution. | Fixed in the follow-up after `08d061c`: validate and return an existing owner/action binding before enforcing the action status for new creation. `MissingApprovalSnapshotReturnsTheExistingDecisionAfterExecutionStarts` covers active/completed execution and retains wrong-owner rejection. |
 | M2-01-R13 | Medium | Observation-only recovery could persist a known outcome without clearing its proposal's write uncertainty or updating failure accounting. | Fixed in the follow-up after `08d061c`: share the execution proposal gate, track the uncertain action ID, and reconcile accounting only after a durable outcome. `KnownRecoveryUpdatesTheSameProposalBudgetBeforeFreshCalls` covers sequential/queued success/failure; negative controls retain uncertainty on inconclusive observation, errors, failed journaling, or another action's recovery. Read-failure and queued-cancellation tests cover accounting and cleanup. |
+| M2-01-R14 | Medium | A nonexpired stale Pending snapshot could ask for another approval after rejection, approval, or active/completed execution had already won. | Fixed in the follow-up after `461e81c`: refresh both approval and action before reporting Pending; retain owner binding, expiry, policy, and execution arbitration. `NonexpiredPendingSnapshotReturnsTheWinningDecisionWithoutRequestingAnotherApproval` covers four no-clock-advance winners; the expired-resolution regression now pauses the action snapshot immediately before resolution to preserve its actual CAS-conflict coverage. |
 
 R9 uniquely identifies review comment `4273196189`, which reused the R7 label
 already assigned to the distinct approval-expiry race. Its review was against
@@ -181,6 +184,9 @@ R12 maps to comment `4273719016`; R13 maps to `4273719101`. The subsequent full
 review against `1669296` raised these two findings and repeated R10/R11, already
 fixed in `08d061c`; its summary also retained R6's need for an owner decision.
 No additional summary-only finding was omitted.
+R14 maps to comment `4273847535` in the subsequent full review against
+`08d061c`. That review repeated R12/R13, fixed by `461e81c`, and added no other
+summary-only findings. Prior dispositions, including R6, remain unchanged.
 
 For R6, the concrete alternatives are explicit owner acceptance of status-only
 replay for M2-01 or authorization to extend durable terminal-result persistence
@@ -218,6 +224,12 @@ The bounded independent review of exact commit
 `08d061c8a5780e01e8094f55c2437d714e1ec529` against `1669296` supported
 R10/R11 and found no new significant issues within that follow-up. It retained
 R6's deferred, unaccepted acceptance gap and did not rerun tests.
+
+The bounded independent review of exact commit
+`461e81c573d3752912d19db345103af2ba6eddb5` against `08d061c` supported
+R12/R13, found no new significant findings, and retained the complete R1-R13
+ledger including deferred/unaccepted R6. It was source review only, without
+independent test reruns or live/cross-process evidence.
 
 ## R7/R8 regression evidence
 
@@ -308,6 +320,28 @@ R6's deferred, unaccepted acceptance gap and did not rerun tests.
   refused the targeted docs-job rerun while the workflow was in progress.
   Local Markdown validation passed. No link or required check was weakened;
   the subsequent pushed head must establish fresh required CI evidence.
+
+## R14 regression evidence
+
+- All four targeted cases failed before the fix, returning `AwaitingApproval`
+  instead of a recorded rejection, active/completed execution, or a newly
+  approved execution. The clock remains unchanged throughout these regressions.
+  After the fix, the complete dispatcher unit subset passed (85/85).
+- `tools/validate.sh build`, `unit` (216/216), `integration` (248/248),
+  `coverage`, `architecture` (6/6), and `docs` passed against this final
+  runtime/test tree, with discovery verified and zero build warnings/errors.
+- Coverage inputs:
+  `artifacts/coverage/unit/20261014T171735Z-40470` and
+  `artifacts/coverage/integration/20261014T172018Z-40897`. All configured gates
+  passed: changed executable lines 99.1% (871/879), Application lines 98.5%
+  (1802/1830), and branches 93.6% (800/855).
+- The existing expired-Pending regression pauses the action snapshot after
+  refreshing Pending and before resolution. Its three winning decisions still
+  exercise an actual resolution CAS conflict instead of being accidentally
+  short-circuited by the new refresh.
+- The change adds no persistence contracts/schema, dependencies, feature tools,
+  execution retries, or SDK/process-launch changes. R6 remains deferred and
+  unaccepted.
 
 ## Earlier full-gate evidence
 

@@ -491,6 +491,79 @@ public sealed class ToolDispatcherUnitTests
     }
 
     [Theory]
+    [InlineData("Rejected")]
+    [InlineData("Executing")]
+    [InlineData("Succeeded")]
+    [InlineData("Approved")]
+    [Trait("Category", "Unit")]
+    public async Task NonexpiredPendingSnapshotReturnsTheWinningDecisionWithoutRequestingAnotherApproval(string winner)
+    {
+        using var fixture = new Fixture(ToolRiskClass.ApprovalRequired);
+        var pending = await fixture.Dispatcher.DispatchAsync(Request, CancellationToken.None);
+        var reading = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseRead = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var executing = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseExecution = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var reads = 0;
+        fixture.ApprovalStore.AfterRead = async (entry, token) =>
+        {
+            if (entry?.Status == "Pending" && Interlocked.Increment(ref reads) == 1)
+            {
+                reading.SetResult();
+                await releaseRead.Task.WaitAsync(TimeSpan.FromSeconds(5), token);
+            }
+        };
+        fixture.Execution = async (_, _, token) =>
+        {
+            executing.TrySetResult();
+            await releaseExecution.Task.WaitAsync(TimeSpan.FromSeconds(5), token);
+            return new ToolExecutionOutcome(ToolExecutionStatus.Completed, null, null);
+        };
+
+        var stale = fixture.Dispatcher.DispatchAsync(Request, CancellationToken.None).AsTask();
+        await reading.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await fixture.Approvals.ResolveAsync(
+            pending.ApprovalId!.Value, "owner", 1, winner != "Rejected", CancellationToken.None);
+        Task<ToolDispatchResult>? first = null;
+        try
+        {
+            if (winner is "Executing" or "Succeeded")
+            {
+                first = fixture.Dispatcher.DispatchAsync(Request, CancellationToken.None).AsTask();
+                await executing.Task.WaitAsync(TimeSpan.FromSeconds(2));
+                if (winner == "Succeeded")
+                {
+                    releaseExecution.SetResult();
+                    Assert.Equal("Succeeded", (await first).Status);
+                }
+            }
+            else
+            {
+                releaseExecution.SetResult();
+            }
+
+            releaseRead.SetResult();
+            var result = await stale.WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.Equal(winner == "Approved" ? "Succeeded" : winner, result.Status);
+            Assert.NotEqual("owner_approval_required", result.ReasonCode);
+            Assert.Equal(pending.ActionId, result.ActionId);
+            Assert.Equal(result.Status, fixture.Journal.Entries.Single().Status);
+            Assert.Equal(winner == "Rejected" ? 0 : 1, fixture.ExecutionCount);
+            Assert.Equal(2, fixture.ApprovalStore.Entries.Single().Version);
+            Assert.Equal(Start, fixture.Clock.UtcNow);
+        }
+        finally
+        {
+            releaseRead.TrySetResult();
+            releaseExecution.TrySetResult();
+            if (first is not null)
+            {
+                await first;
+            }
+        }
+    }
+
+    [Theory]
     [InlineData(false, false)]
     [InlineData(false, true)]
     [InlineData(true, false)]
@@ -708,9 +781,9 @@ public sealed class ToolDispatcherUnitTests
         var reading = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var releaseRead = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var reads = 0;
-        fixture.ApprovalStore.AfterRead = async (entry, token) =>
+        fixture.Journal.AfterRead = async (entry, token) =>
         {
-            if (entry?.Status == "Pending" && Interlocked.Increment(ref reads) == 1)
+            if (entry?.Status == "AwaitingApproval" && Interlocked.Increment(ref reads) == 2)
             {
                 reading.SetResult();
                 await releaseRead.Task.WaitAsync(TimeSpan.FromSeconds(5), token);

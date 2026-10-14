@@ -51,6 +51,8 @@ Equivalent attempts serialize to enforce these limits under concurrency.
 Concurrent approval settlement accepts an already-matching terminal action
 status, while other conflicts/errors propagate. A stale expired Pending read
 uses the winning persisted decision and current action, not a second resolution.
+Pending snapshots are also refreshed before expiry so they cannot mask a winning
+rejection or execution or ask for another decision on an already-approved action.
 Creation also returns an existing exact approval binding after execution starts
 or completes, without renewing the decision or relaxing its owner binding.
 Observation-only recovery shares the proposal gate and updates distinct-action

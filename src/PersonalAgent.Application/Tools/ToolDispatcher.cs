@@ -267,9 +267,22 @@ public sealed class ToolDispatcher : IToolDispatcher
         var approvalId = new ApprovalId(actionId.Value);
         var approval = await approvals.GetAsync(approvalId, cancellationToken)
             ?? await approvals.CreateAsync(actionId, request.OwnerId!, cancellationToken);
+        if (approval.Status == "Pending")
+        {
+            approval = await approvals.GetAsync(approvalId, cancellationToken)
+                ?? throw new InvalidOperationException("The approval disappeared while refreshing its pending decision.");
+            action = await journal.GetAsync(actionId, cancellationToken)
+                ?? throw new InvalidOperationException("The action disappeared while refreshing its pending approval.");
+        }
+
         if (!string.Equals(approval.OwnerId, request.OwnerId, StringComparison.Ordinal))
         {
             return new("Rejected", null, "approval_owner_mismatch", actionId, approvalId);
+        }
+
+        if (action.Status != "AwaitingApproval")
+        {
+            return Recorded(action);
         }
 
         if (approval.Status == "Pending" && clock.UtcNow.ToUniversalTime() >= approval.ExpiresAtUtc)
