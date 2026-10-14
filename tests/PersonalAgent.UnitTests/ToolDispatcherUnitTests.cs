@@ -753,6 +753,72 @@ public sealed class ToolDispatcherUnitTests
     }
 
     [Theory]
+    [InlineData("write")]
+    [InlineData("read")]
+    [InlineData("lowered-risk")]
+    [Trait("Category", "Unit")]
+    public async Task CancelledQueuedRecoveryRetainsOriginalWriteRiskAfterTheGateHolderSucceeds(string originalRisk)
+    {
+        using var fixture = new Fixture(
+            originalRisk == "write" ? ToolRiskClass.LowRiskWrite : ToolRiskClass.ReadOnly);
+        if (originalRisk == "lowered-risk")
+        {
+            fixture.Policy.RequireApproval();
+            var pending = await fixture.Dispatcher.DispatchAsync(Request, CancellationToken.None);
+            await fixture.Approvals.ResolveAsync(
+                pending.ApprovalId!.Value, "owner", 1, true, CancellationToken.None);
+        }
+        var orphan = await fixture.MarkExecutingAsync(Request);
+        fixture.Policy.Replace("current-policy");
+        var executing = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseExecution = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.Execution = async (_, _, token) =>
+        {
+            executing.SetResult();
+            await releaseExecution.Task.WaitAsync(TimeSpan.FromSeconds(5), token);
+            return new ToolExecutionOutcome(ToolExecutionStatus.Completed, null, null);
+        };
+        var restarted = fixture.CreateRestartedDispatcher();
+        var first = restarted.DispatchAsync(
+            Request with { CallId = "holding-cancelled-recovery-gate" }, CancellationToken.None).AsTask();
+        await executing.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        using var cancellation = new CancellationTokenSource();
+        var cancelled = restarted.DispatchAsync(Request, cancellation.Token).AsTask();
+        cancellation.Cancel();
+        try
+        {
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => cancelled);
+        }
+        finally
+        {
+            releaseExecution.SetResult();
+            Assert.Equal("Succeeded", (await first).Status);
+        }
+        Assert.Equal("Executing", fixture.Journal.Entries.Single(entry => entry.Id == orphan.Id).Status);
+        Assert.Equal(2, fixture.ExecutionCount);
+        Assert.Equal(2, fixture.VerificationCount);
+        fixture.Execution = (_, _, _) =>
+            ValueTask.FromResult(new ToolExecutionOutcome(ToolExecutionStatus.Failed, null, "known_failure"));
+        var next = await restarted.DispatchAsync(Request with
+        {
+            CallId = "after-cancelled-recovery",
+            ArgumentsJson = """{"On":true,"Entity":"porch-lamp"}"""
+        }, CancellationToken.None);
+        Assert.Equal(originalRisk == "read" ? "Failed" : "Rejected", next.Status);
+        if (originalRisk != "read")
+        {
+            Assert.Equal("equivalent_write_outcome_unknown", next.ReasonCode);
+        }
+        Assert.Equal(originalRisk == "read" ? 3 : 2, fixture.ExecutionCount);
+
+        Assert.Equal("Succeeded", (await restarted.DispatchAsync(Request, CancellationToken.None)).Status);
+        Assert.Equal(3, fixture.VerificationCount);
+        Assert.Equal("Failed", (await restarted.DispatchAsync(
+            Request with { CallId = "after-confirmed-cancelled-recovery" }, CancellationToken.None)).Status);
+        Assert.Equal(originalRisk == "read" ? 4 : 3, fixture.ExecutionCount);
+    }
+
+    [Theory]
     [InlineData(ToolExecutionStatus.Completed)]
     [InlineData(ToolExecutionStatus.Unknown)]
     [Trait("Category", "Unit")]

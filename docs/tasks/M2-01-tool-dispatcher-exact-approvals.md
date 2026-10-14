@@ -59,6 +59,9 @@ Acceptance scenarios include:
 - Normal verification rechecks permission after delivery; recovery refreshes
   journal state under the proposal gate before observing a still-Executing
   action. Winning outcomes are returned without another observation.
+- Recovery registers original write risk thread-safely before a cancellable
+  proposal-gate wait; cancelled queued recovery cannot lose an orphan marker.
+  Original reads never add a marker, and malformed metadata fails closed.
 
 ## Scope
 
@@ -188,6 +191,7 @@ R7/R8, both labelled "Previously missed"; both are retained below. Commit
 | M2-01-R17 | High | A fresh dispatcher did not seed an orphaned write's uncertainty, permitting an equivalent fresh send after inconclusive/error/unjournaled recovery. | Fixed in the follow-up after `5d60757`: seed uncertainty before observing from strictly parsed original persisted risk; track all unresolved action IDs, not one nullable owner. Sequential/queued unit/SQLite regressions assert no extra send; additional controls cover multiple orphans, changed current risk, read-only failure limits and malformed/missing/null metadata. Known durable outcomes remove only their own uncertainty. |
 | M2-01-R18 (Previously missed) | Medium | Permission revoked or Unsupported during execution was not checked before normal external verification. | Fixed in the follow-up after `a1fd7de`: re-evaluate before verification; record Unknown without observing and retain equivalent-write uncertainty. Completed/Unknown paused-execution unit/SQLite regressions assert zero observations; still-allowed version changes remain observable. |
 | M2-01-R19 (Previously missed) | Medium | A stale Executing snapshot could observe after another dispatch completed, then fail its terminal CAS rather than return the winner. | Fixed in the follow-up after `a1fd7de`: reread under the proposal gate and return non-Executing state with budget reconciliation before observing. Unit/SQLite races cover Succeeded/Failed/Unknown, revoked/Unsupported policy and cancelled observation; pre-send Rejected/Expired controls preserve the winner without inventing uncertainty. |
+| M2-01-R20 (Previously missed) | High | Cancelling fresh-dispatcher orphan recovery while it waited for the proposal gate lost original write uncertainty; the successful holder then allowed a fresh equivalent send. | Fixed in the follow-up after `95b7575`: strict original-risk classification and concurrent action-ID registration precede the cancellable wait. Existing reads never add markers, malformed metadata marks then throws, and cancellation releases the active claim without removing the marker. Unit/SQLite controls prove a holder's success cannot clear the orphan, lower current risk cannot erase it, and later known recovery permits a fresh attempt. |
 
 R9 uniquely identifies review comment `4273196189`, which reused the R7 label
 already assigned to the distinct approval-expiry race. Its review was against
@@ -225,6 +229,10 @@ winner removes its own marker before returning. The repeated thread records
 that deliberate alternative to moving all seeding after the read.
 That review's summary retains R6's unaccepted gap, with no additional
 summary-only finding.
+R20 maps to `4274901132` in the full review against `95b7575`. Its summary
+retained the unaccepted R6 gap without additional summary-only findings.
+The intervening full review against `81bea7b` reported no open code findings
+and retained R6; neither review accepts the deferred replay limitation.
 
 For R6, the concrete alternatives are explicit owner acceptance of status-only
 replay for M2-01 or authorization to extend durable terminal-result persistence
@@ -505,6 +513,40 @@ and unaccepted.
 - No schema/storage contracts, dependencies, functional tools, SDK integration
   or process-launch behavior changed. Full replay R6 remains deferred and
   unaccepted; dedicated SDK/Aspire/browser current-head CI is separate.
+
+## R20 regression evidence
+
+- Before the fix, two targeted unit cases failed (original write and
+  policy-elevated original write now classified read-only); the original-read
+  negative control passed. The fresh equivalent handler executed despite the
+  orphan remaining Executing. After the fix, dispatcher unit124/124 and
+  SQLite42/42 passed, including two new real-SQLite cancellation cases.
+- Recovery strictly classifies original persisted risk before awaiting its
+  proposal gate. Writes register in a concurrent action-ID set; malformed or
+  missing risk registers conservatively before throwing. Valid reads never
+  acquire even a transient marker. Failed-action accounting remains under
+  the proposal semaphore; uncertainty additions no longer depend on acquiring
+  it. Known durable outcomes remove only their own concurrent marker.
+- Cancellation while queued releases the active claim but does not invent an
+  outcome or clear the unresolved write. The gate-holder can finish; its
+  success cannot erase the orphan. Tests assert no extra observation/send,
+  preserved Executing state, canonical fresh-ID/alias rejection, read-only
+  negative controls and later known recovery releasing only its own block.
+- Earlier evidence sections are revision-specific. R20 supersedes their
+  descriptions of under-gate uncertainty registration; observation, status
+  refresh and distinct-failure accounting remain under that gate.
+- Using the same isolated MSBuild output and unchanged scripts,
+  `tools/validate.sh build`, `unit` (255/255), `integration` (262/262),
+  `coverage`, `architecture` (6/6), and `docs` passed. Discovery was verified;
+  formatting/Release completed with zero warnings/errors.
+- Coverage inputs:
+  `artifacts/coverage/unit/20261014T185843Z-55831` and
+  `artifacts/coverage/integration/20261014T185912Z-55891`. All configured gates
+  passed: changed lines 99.1% (894/902), Application lines 98.5% (1825/1853)
+  and branches 94.2% (824/875).
+- No schema/storage contracts, dependencies, feature registrations or
+  SDK/process-launch behavior changed. R6 remains deferred and unaccepted;
+  dedicated current-head SDK/Aspire/browser CI is separate.
 
 ## Earlier full-gate evidence
 

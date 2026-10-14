@@ -91,6 +91,77 @@ public sealed class ToolDispatcherTests
     }
 
     [Theory]
+    [InlineData(ToolRiskClass.LowRiskWrite)]
+    [InlineData(ToolRiskClass.ReadOnly)]
+    [Trait("Category", "Integration")]
+    public async Task CancelledQueuedRecoveryPreservesSqliteOrphanRiskAfterTheGateHolderSucceeds(ToolRiskClass risk)
+    {
+        using var fixture = await Fixture.CreateAsync(risk);
+        var completed = await fixture.Dispatcher.DispatchAsync(PorchRequest, CancellationToken.None);
+        var orphan = (await fixture.Journal.GetAsync(completed.ActionId!.Value, CancellationToken.None))!;
+        await fixture.Journal.UpdateStatusAsync(
+            orphan.Id, "Executing", orphan.Version, fixture.Clock.UtcNow, CancellationToken.None);
+        var executing = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseExecution = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.SetExecution(async (_, _, token) =>
+        {
+            executing.SetResult();
+            await releaseExecution.Task.WaitAsync(TimeSpan.FromSeconds(5), token);
+            return new ToolExecutionOutcome(ToolExecutionStatus.Completed, null, null);
+        });
+        var reading = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var journal = new PausedReadJournal(fixture.Journal, (entry, _) =>
+        {
+            if (entry?.Id == orphan.Id && entry.Status == "Executing")
+            {
+                reading.TrySetResult();
+            }
+            return Task.CompletedTask;
+        });
+        var restarted = fixture.CreateRestartedDispatcher(journal);
+        var first = restarted.DispatchAsync(
+            PorchRequest with { CallId = "holding-cancelled-orphan-gate" }, CancellationToken.None).AsTask();
+        await executing.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        using var cancellation = new CancellationTokenSource();
+        var cancelled = restarted.DispatchAsync(PorchRequest, cancellation.Token).AsTask();
+        await reading.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        cancellation.Cancel();
+        try
+        {
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => cancelled);
+        }
+        finally
+        {
+            releaseExecution.SetResult();
+            Assert.Equal("Succeeded", (await first).Status);
+        }
+        Assert.Equal("Executing", (await fixture.Journal.GetAsync(orphan.Id, CancellationToken.None))!.Status);
+        Assert.Equal(2, fixture.ExecutionCount);
+        Assert.Equal(2, fixture.VerificationCount);
+        fixture.SetExecution((_, _, _) =>
+            ValueTask.FromResult(new ToolExecutionOutcome(ToolExecutionStatus.Failed, null, "known_failure")));
+        var fresh = await restarted.DispatchAsync(PorchRequest with
+        {
+            CallId = "after-cancelled-sqlite-recovery",
+            ArgumentsJson = """{"On":true,"Entity":"porch-lamp"}"""
+        }, CancellationToken.None);
+        Assert.Equal(risk == ToolRiskClass.ReadOnly ? "Failed" : "Rejected", fresh.Status);
+        if (risk != ToolRiskClass.ReadOnly)
+        {
+            Assert.Equal("equivalent_write_outcome_unknown", fresh.ReasonCode);
+        }
+        Assert.Equal(risk == ToolRiskClass.ReadOnly ? 3 : 2, fixture.ExecutionCount);
+        Assert.Equal(fresh.Status, (await fixture.Journal.GetAsync(fresh.ActionId!.Value, CancellationToken.None))!.Status);
+
+        Assert.Equal("Succeeded", (await restarted.DispatchAsync(PorchRequest, CancellationToken.None)).Status);
+        Assert.Equal(3, fixture.VerificationCount);
+        Assert.Equal("Succeeded", (await fixture.Journal.GetAsync(orphan.Id, CancellationToken.None))!.Status);
+        Assert.Equal("Failed", (await restarted.DispatchAsync(
+            PorchRequest with { CallId = "after-confirmed-sqlite-recovery" }, CancellationToken.None)).Status);
+        Assert.Equal(risk == ToolRiskClass.ReadOnly ? 4 : 3, fixture.ExecutionCount);
+    }
+
+    [Theory]
     [InlineData(ToolExecutionStatus.Completed, false)]
     [InlineData(ToolExecutionStatus.Unknown, false)]
     [InlineData(ToolExecutionStatus.Completed, true)]

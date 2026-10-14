@@ -389,7 +389,7 @@ public sealed class ToolDispatcher : IToolDispatcher
             await budget.Gate.WaitAsync(cancellationToken);
             try
             {
-                if (budget.UncertainWrites.Count != 0)
+                if (!budget.UncertainWrites.IsEmpty)
                 {
                     action = await TransitionAsync(action, "Rejected", cancellationToken);
                     return new(action.Status, null, "equivalent_write_outcome_unknown", action.Id);
@@ -416,7 +416,7 @@ public sealed class ToolDispatcher : IToolDispatcher
 
                 if (mayWrite && result.Status == "Unknown")
                 {
-                    budget.UncertainWrites.Add(action.Id);
+                    budget.UncertainWrites.TryAdd(action.Id, 0);
                 }
 
                 RecordBudgetOutcome(budget, action.Id, result.Status);
@@ -496,7 +496,7 @@ public sealed class ToolDispatcher : IToolDispatcher
         // Keep equivalent writes blocked if sending, verification, or terminal journaling throws.
         if (mayWrite)
         {
-            budget.UncertainWrites.Add(action.Id);
+            budget.UncertainWrites.TryAdd(action.Id, 0);
         }
         ToolExecutionOutcome execution;
         try
@@ -648,19 +648,27 @@ public sealed class ToolDispatcher : IToolDispatcher
         try
         {
             var budget = GetFailureBudget(request, draft);
+            ToolRiskClass originalRisk;
+            try
+            {
+                originalRisk = JsonSerializer.Deserialize<CanonicalActionEnvelope>(
+                    action.CanonicalArguments, EnvelopeJsonOptions)?.RiskClass
+                    ?? throw new InvalidOperationException("The interrupted action has no canonical envelope.");
+            }
+            catch (Exception exception) when (exception is JsonException or InvalidOperationException)
+            {
+                budget.UncertainWrites.TryAdd(action.Id, 0);
+                throw;
+            }
+
+            // Register original write risk before cancellable gate acquisition; valid reads never add a marker.
+            if (originalRisk != ToolRiskClass.ReadOnly)
+            {
+                budget.UncertainWrites.TryAdd(action.Id, 0);
+            }
             await budget.Gate.WaitAsync(cancellationToken);
             try
             {
-                // Fail closed until the persisted execution's original risk has been validated.
-                budget.UncertainWrites.Add(action.Id);
-                var original = JsonSerializer.Deserialize<CanonicalActionEnvelope>(
-                    action.CanonicalArguments, EnvelopeJsonOptions)
-                    ?? throw new InvalidOperationException("The interrupted action has no canonical envelope.");
-                if (original.RiskClass == ToolRiskClass.ReadOnly)
-                {
-                    budget.UncertainWrites.Remove(action.Id);
-                }
-
                 action = await journal.GetAsync(action.Id, cancellationToken)
                     ?? throw new InvalidOperationException("The action disappeared during interrupted-execution recovery.");
                 if (action.Status != "Executing")
@@ -814,7 +822,7 @@ public sealed class ToolDispatcher : IToolDispatcher
 
         if (status is "Succeeded" or "Failed" or "Rejected" or "Expired")
         {
-            budget.UncertainWrites.Remove(actionId);
+            budget.UncertainWrites.TryRemove(actionId, out _);
         }
     }
 
@@ -1043,6 +1051,6 @@ public sealed class ToolDispatcher : IToolDispatcher
     {
         public SemaphoreSlim Gate { get; } = new(1, 1);
         public HashSet<ActionId> FailedActions { get; } = [];
-        public HashSet<ActionId> UncertainWrites { get; } = [];
+        public ConcurrentDictionary<ActionId, byte> UncertainWrites { get; } = new();
     }
 }

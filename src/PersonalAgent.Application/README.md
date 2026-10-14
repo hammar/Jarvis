@@ -68,6 +68,9 @@ Normal post-execution verification rechecks permission and records Unknown
 without observation when revoked/Unsupported. Recovery refreshes the action
 under its proposal gate and returns any winning non-Executing state without
 observing again; known pre-send rejection/expiry does not invent uncertainty.
+Original write risk is registered thread-safely before cancellable gate waits,
+so cancelling queued recovery cannot discard an orphan's marker when another
+action completes. Valid reads do not add markers; malformed metadata does.
 Recovery rechecks authorization after any proposal-gate wait, before observing.
 Definitive `NotApplied` means known failure even after uncertain delivery and
 retains only the remaining bounded attempt; an unchanged snapshot with possible
