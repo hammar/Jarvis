@@ -141,8 +141,8 @@ implementation at `3840d03508882d4daa623967b5641de5b89cab5c`. The initial
 independent working-tree review found R1; GitHub Copilot's independent review
 of `3840d03` found R2-R6. The table is cumulative; no findings are dropped.
 Commit `aefba04` addresses R2-R5. The next review against `c8d62dd` also raised
-R7/R8, both labelled "Previously missed"; both are retained below. The current
-follow-up fixes R7/R8; its exact hash is recorded in the PR body/thread replies.
+R7/R8, both labelled "Previously missed"; both are retained below. Commit
+`c5f3d635118f732e781f1e3994e617ffc0cbfcc3` fixes R7/R8.
 
 | Reference | Severity | Finding | Disposition and evidence |
 | --- | --- | --- | --- |
@@ -152,8 +152,8 @@ follow-up fixes R7/R8; its exact hash is recorded in the PR body/thread replies.
 | M2-01-R4 | Medium | Fresh call IDs bypassed the two-equivalent-failure limit. | Fixed in the review follow-up: canonical turn-scoped failure accounting serializes equivalent attempts; `TwoEquivalentFailuresStopFreshCallIdsButNotLaterTurns` and `ConcurrentEquivalentFailuresCannotRacePastTheTwoAttemptLimit` cover errors, aliases/property order, fresh call IDs, and concurrency. SDK contracts assert turn accounting cleanup. |
 | M2-01-R5 | Medium | Changed policy prevented recovery of an orphaned `Executing` action. | Fixed in the review follow-up: permit observation-only recovery when current policy allows; otherwise journal `Unknown` without observing or sending. `RestartedExecutionHandlesChangedPolicyWithoutReplayingIt` and `PolicyChangeDoesNotMistakeActiveExecutionForRestartRecovery` cover both restart permissions and active-call arbitration against real SQLite. |
 | M2-01-R6 | Medium | Duplicate/restarted dispatch loses the original result JSON and detailed reason. | Deferred outside the authorized unchanged-T03 persistence scope, not fixed or owner-accepted. The journal persists intent/status/version only; API/docs explicitly disclose status-only replay. The review thread is handled as a scope deferral, not as proof that the acceptance gap is fixed. |
-| M2-01-R7 (Previously missed) | Medium | A stale approval read could falsely report expiry after another dispatch began or completed execution. | Fixed in the current follow-up: report `Expired` only when the transition actually produced that status; otherwise return the recorded action outcome. `StaleApprovalReadCannotReportExpiryAfterExecutionBegins` exercises both `Executing` and `Succeeded` across the expiry boundary. |
-| M2-01-R8 (Previously missed) | High | A fresh equivalent call ID could resend after an uncertain write. | Fixed in the current follow-up: serialize equivalent proposals and keep their write gate closed from the send boundary until a known outcome is durably recorded. `UncertainWritesBlockEquivalentFreshIdsIncludingQueuedAttempts` and `EquivalentUncertainWritesCannotResendWithFreshIds` cover sequential/concurrent fresh IDs, unknown results, cancellation, handler/verification exceptions, and terminal-journal failure. Known failed writes retain two attempts; later owner turns remain independent. |
+| M2-01-R7 (Previously missed) | Medium | A stale approval read could falsely report expiry after another dispatch began or completed execution. | Fixed in `c5f3d63`: report `Expired` only when the transition actually produced that status; otherwise return the recorded action outcome. `StaleApprovalReadCannotReportExpiryAfterExecutionBegins` exercises both `Executing` and `Succeeded` across the expiry boundary. |
+| M2-01-R8 (Previously missed) | High | A fresh equivalent call ID could resend after an uncertain write. | Fixed in `c5f3d63`: serialize equivalent proposals and keep their write gate closed from the send boundary until a known outcome is durably recorded. `UncertainWritesBlockEquivalentFreshIdsIncludingQueuedAttempts` and `EquivalentUncertainWritesCannotResendWithFreshIds` cover sequential/concurrent fresh IDs, unknown results, cancellation, handler/verification exceptions, and terminal-journal failure. Known failed writes retain two attempts; later owner turns remain independent. |
 
 For R6, the concrete alternatives are explicit owner acceptance of status-only
 replay for M2-01 or authorization to extend durable terminal-result persistence
@@ -179,6 +179,14 @@ binding; a second attempt to obtain a concrete R6 decision also found the
 owner unavailable. An unattended instruction to continue autonomously is not
 treated as permission to override that specific scope constraint.
 
+An independent code-review agent subsequently reviewed the bounded R7/R8
+fix at exact commit `c5f3d635118f732e781f1e3994e617ffc0cbfcc3` against parent
+`c8d62dd97e7fee5127e48f094944ff34a1bf40b3`, including the complete R1-R8
+ledger, changed dispatcher/tests/docs, and spec §§7/13/14. It found no new
+significant issues and supported the R7/R8 fixes. It retained R6 as a deferred,
+unaccepted acceptance gap. This was source review, not a claim to have rerun
+tests or exercised live/cross-process device behavior.
+
 ## R7/R8 regression evidence
 
 - Before the production fix, the targeted R7/R8 unit regressions failed in all
@@ -188,6 +196,8 @@ treated as permission to override that specific scope constraint.
 - `tools/validate.sh build`, `unit`, `integration`, and `coverage` passed on
   the new follow-up tree: 182 unit tests, 248 integration tests, and verified
   discovery. The dispatcher SQLite integration subset passed (28/28).
+- `tools/validate.sh architecture` passed (6/6); `tools/validate.sh docs`
+  passed, including the updated complete finding ledger.
 - Coverage inputs:
   `artifacts/coverage/unit/20261014T162827Z-27623` and
   `artifacts/coverage/integration/20261014T162914Z-27789`. All configured gates
