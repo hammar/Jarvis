@@ -215,6 +215,16 @@ R18 maps to `4274599641`; R19 maps to `4274599736`. The full subsequent
 review against `5d60757` labelled both Previously missed and repeated R17,
 already fixed by `4abe280`. It added no further summary-only findings; none
 of the earlier dispositions or R6's unaccepted gap is erased.
+The next full review against `a1fd7de` repeated R18/R19 and raised the same
+stale-Executing/uncertainty issue again at `4274708945`, using review label
+R18. This is a second root for existing R19, not the distinct permission
+finding R18 and not a new undisposed bug. Both R19 roots are covered by
+`07d5f03` and its paused-read/known-budget regressions. Conservative seeding
+still precedes the refreshed read so read failures remain blocked; a known
+winner removes its own marker before returning. The repeated thread records
+that deliberate alternative to moving all seeding after the read.
+That review's summary retains R6's unaccepted gap, with no additional
+summary-only finding.
 
 For R6, the concrete alternatives are explicit owner acceptance of status-only
 replay for M2-01 or authorization to extend durable terminal-result persistence
