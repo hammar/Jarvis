@@ -325,6 +325,17 @@ ledger and relevant spec/ADRs. This was source-only review, not independent
 gate execution or live/cross-process validation. R6 remains deferred and
 unaccepted.
 
+The bounded independent review of exact commit
+`0f64f99ad53dddb492f31969569d7007c6b40312` against `3f2f4e0` supported
+R21 with no new significant findings. It checked the shared registration/final
+admission lock, private marker access, post-claim checks, cancellation/error
+paths, action-owned removal/accounting and all five new cases against the
+complete R1-R21 ledger and relevant spec/ADRs. It explicitly confirmed that
+admission-first operations remain in flight even if registration precedes the
+later physical send; this is not a physical exactly-once guarantee. No checks
+were independently rerun or live/cross-process behavior established. R6 remains
+deferred and unaccepted.
+
 ## R7/R8 regression evidence
 
 - Before the production fix, the targeted R7/R8 unit regressions failed in all
