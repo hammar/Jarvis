@@ -116,8 +116,13 @@ threads; passing an automated review workflow alone is not a disposition.
 
 R6 was reported on `96642b4` in thread 4285597934. R2-R5 remained explicitly
 resolved in that review; they are not omitted or erased by this later round.
-R6's regression suite passes 29 memory SQLite cases; final full gate and
-independent exact-commit verification remain required for its revision.
+Independent R6 follow-up reviewed
+`94cde2233bd41b8b14500e8e41aa6d1d0cb8f09b` against `96642b4`, verified the
+semantic accounting/unchanged exact bindings and independently ran 29 memory
+SQLite cases, with no R7+ findings. It used existing Release binaries and did
+not independently establish binary/source correspondence or rerun broad gates.
+Conflict ordering and owner/source separation were inspected, not separately
+varied at runtime. Final runtime/CI evidence remains on PR #47.
 
 Independent follow-up review of
 `6e1ea399b3721b49900973e576000d55b09e5ee3` against the original reviewed
