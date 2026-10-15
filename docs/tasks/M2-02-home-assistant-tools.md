@@ -63,7 +63,9 @@ composition and the adapter/tool boundary cannot safely be omitted.
 
 Initial implementation: `3afa27bbecb60f1598116b9d9b79e7573db19ae4`, based on
 `f332e9e`. First independently reviewed fix revision:
-`a85e21e29820080ca80705be82fb4d800610fd7d`. R3-R5 follow-up review is pending.
+`a85e21e29820080ca80705be82fb4d800610fd7d`. Follow-up review examined
+`444068b8941b062110b48b46416938fa48dc9405`, confirming R3/R5 and retaining
+R4's body-stream classification gap. Its narrow final fix is awaiting review.
 Fetched main before publishing with
 no missing upstream commits.
 Draft PR [#46](https://github.com/hammar/Jarvis/pull/46).
@@ -78,26 +80,26 @@ Native macOS / pinned .NET `10.0.401` evidence:
 | `tools/validate.sh build` | Passed Release, formatting, analyzers and warnings-as-errors |
 | `tools/validate.sh architecture` | Passed, including explicit TestSupport/simulator edges and existing negative fixtures |
 | `tools/validate.sh unit` | Follow-up passed 315 discovered/passed |
-| `tools/validate.sh integration` | Follow-up passed 374 discovered/passed, including 80 HA cases and actual runtime regressions |
-| `tools/validate.sh coverage` | Follow-up passed: changed executable lines 98.1% (424/432); catalog/intent critical thresholds retained |
-| `tools/validate.sh sdk-contracts` | `a85e21e` passed 55 actual runtime contracts with discovery verified; R3-R5 rerun pending |
-| `tools/validate.sh aspire-e2e` | `a85e21e` passed 8 scenarios including four-tool managed HA HTTP/dispatcher approval integration, with discovery verified; R3-R5 rerun pending |
+| `tools/validate.sh integration` | Final R4 fix passed 382 discovered/passed, including 88 HA cases and actual runtime regressions |
+| `tools/validate.sh coverage` | Final R4 fix passed: changed executable lines 98.6% (428/434); catalog/intent critical thresholds retained |
+| `tools/validate.sh sdk-contracts` | `444068b` passed 55 actual runtime contracts with discovery verified |
+| `tools/validate.sh aspire-e2e` | `444068b` passed 8 scenarios including four-tool managed HA HTTP/dispatcher approval integration, with discovery verified |
 | `tools/validate.sh docs` | Passed internal Markdown links |
-| `tools/validate.sh browser-e2e` | `a85e21e` standard gate passed 29/29 and discovery; deliberately failing enforcement probe failed as required. R3-R5 rerun pending; first stopped invocation is not claimed passing |
+| `tools/validate.sh browser-e2e` | `444068b` standard gate passed 29/29 and discovery; deliberately failing enforcement probe failed as required. First stopped invocation is not claimed passing |
 | Browser diagnostic with `--blame-hang --blame-hang-timeout 3m` | 29/29 passed; final standard gate remains required |
 
 Independent follow-up confirms both findings fixed at `a85e21e`, with no new
 significant finding in those fixes/tightly coupled regressions. Automated PR
-review subsequently added R3-R5 below. Their follow-up validation/review remains
-in progress; no readiness is claimed before required final-head gates pass.
+review subsequently added R3-R5 below. Final R4 body-stream review/validation
+remains in progress; code/coverage gates pass, and no readiness is claimed before required final-head gates pass.
 
 | Reference | Severity | Finding | Disposition and evidence |
 | --- | --- | --- | --- |
 | M2-02-R1 | High | Approval configuration omitted installation endpoint and named credential reference, permitting pending consent to survive a target-installation change. | Fixed in `a85e21e`, independently confirmed: normalized connection identity plus complete catalog hash; `ChangingInstallationOrSecretReferenceInvalidatesApprovedActionWithoutSending` passes both real HTTP/SQLite restart cases with zero writes. |
 | M2-02-R2 | Medium | Known credential/cancellation/deadline failures before submission threw through the dispatcher and became false durable Unknown writes. | Fixed in `a85e21e`, independently confirmed: explicit not-submitted rejection before `SendAsync`; `KnownPreSubmissionFailuresAreDefinitiveAndDoNotLockOutTheRemainingWrite` passes missing/invalid credentials, cancellation and timeout with Failed, zero POSTs, exact replay and a permitted corrected second attempt. Possible submission remains Unknown. |
-| M2-02-R3 | Medium | Previously missed: regex `$` accepted an entity ID ending in a newline. | Fixed in working follow-up: absolute `\A`/`\z` anchors; newline/CRLF catalog rejection regressions pass. Exact-commit review pending. |
-| M2-02-R4 | Medium | Previously missed: every `HttpRequestException`, including permanent TLS failures, admitted a safe-read retry. | Fixed in working follow-up: explicit transport-error/socket allowlist; permanent and unclassified failures stop after one attempt. Typed-fault attempt-count tests plus real dropped-response regressions pass. No exception payload escapes. Exact-commit review pending. |
-| M2-02-R5 | High | Previously missed: interrupted-write recovery ignored installation identity and could observe a replacement HA installation as false success. | Fixed in working follow-up: optional persisted observation scope on host drafts/envelopes; home writes require connection/catalog scope, and mismatch records Unknown without observation or submission. Two-installation/reference regressions cover both write tools; unit tests prove legacy scopes fail closed and unscoped tools remain compatible. Code/coverage gates pass; exact-commit review and runtime/CI gates pending. |
+| M2-02-R3 | Medium | Previously missed: regex `$` accepted an entity ID ending in a newline. | Fixed in `444068b`, independently confirmed: absolute `\A`/`\z` anchors; newline/CRLF catalog rejection regressions pass. |
+| M2-02-R4 | Medium | Previously missed: every `HttpRequestException`, including permanent TLS failures, admitted a safe-read retry. Review of `444068b` retained the same finding for body I/O being rewritten to transient ResponseEnded. | Send boundary fixed in `444068b` with explicit transport-error/socket allowlist. Final working fix preserves native body-stream HTTP categories and admits unclassified I/O only via typed transient socket causes; additional body-stream attempt-count regressions cover this path. Final exact-commit review/validation pending. |
+| M2-02-R5 | High | Previously missed: interrupted-write recovery ignored installation identity and could observe a replacement HA installation as false success. | Fixed in `444068b`, independently confirmed: optional persisted observation scope on host drafts/envelopes; home writes require connection/catalog scope, and mismatch records Unknown without observation or submission. Two-installation/reference regressions cover both write tools; unit tests prove legacy scopes fail closed and unscoped tools remain compatible. Code/coverage and native runtime/browser gates pass. |
 
 Independent review examined `3afa27b` against the task/spec and full diff,
 source-traced both findings, and ran existing Release home-tool unit and
@@ -109,6 +111,12 @@ dispositions, and ran the pure connection-identity regression (one passed using
 existing Release binaries, not fresh-build provenance). It inspected rather
 than independently rerunning the reported HTTP/SQLite suite and did not certify
 unrun browser/CI/live behavior.
+Review of `444068b` independently ran 184 home/dispatcher unit cases and 80 HA
+controlled-loopback HTTP/SQLite cases using existing Release binaries, not a
+fresh reviewer rebuild. It confirmed R3/R5, retained R1/R2, and correctly kept
+R4 open for body-stream category loss. The implementer independently identified
+and disclosed that same remaining R4 path before this review completed; it is
+not erased or treated as a duplicate/new finding.
 
 Review-fix targeted command:
 `dotnet test tests/PersonalAgent.IntegrationTests -c Release --no-restore --filter FullyQualifiedName~HomeAssistantTests`

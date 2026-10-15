@@ -238,9 +238,11 @@ public sealed class HomeAssistantRestClient : IHomeAssistantClient
         {
             throw new HomeAssistantException(HomeAssistantFailure.InvalidResponse);
         }
-        catch (IOException)
+        catch (IOException error)
         {
-            throw new HttpRequestException(HttpRequestError.ResponseEnded, "Home Assistant response transport failed.");
+            throw new HttpRequestException(
+                error is HttpIOException transport ? transport.HttpRequestError : HttpRequestError.Unknown,
+                "Home Assistant response transport failed.", error);
         }
     }
 

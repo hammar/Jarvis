@@ -124,6 +124,63 @@ public sealed class HomeAssistantTests
         Assert.Equal(retry ? 1 : 0, fixture.Endpoint.ReadCount);
     }
 
+    [Theory]
+    [InlineData(HttpRequestError.ResponseEnded, true)]
+    [InlineData(HttpRequestError.InvalidResponse, false)]
+    [InlineData(HttpRequestError.HttpProtocolError, false)]
+    [InlineData(HttpRequestError.SecureConnectionError, false)]
+    [InlineData(HttpRequestError.Unknown, false)]
+    [Trait("Category", "Integration")]
+    public async Task ResponseBodyTransportFailuresRetainTheirNativeRetryClassification(HttpRequestError error, bool retry)
+    {
+        await using var fixture = await Fixture.StartAsync();
+        using var handler = new TransportFailure(error, failBody: true);
+        using var http = new HttpClient(handler) { Timeout = Timeout.InfiniteTimeSpan };
+        var client = new HomeAssistantRestClient(http, fixture.Http.BaseAddress!, new("synthetic-reference"),
+            new Secret(), HomeAssistantConfiguration.SimulatorCatalog(), fixture.Clock);
+        if (retry)
+        {
+            Assert.Equal("21.5", (await client.GetStateAsync("sensor.temperature", default)).State);
+        }
+        else
+        {
+            var failure = await Assert.ThrowsAsync<HomeAssistantException>(
+                () => client.GetStateAsync("sensor.temperature", default).AsTask());
+            Assert.Equal(HomeAssistantFailure.Transport, failure.Failure);
+            Assert.DoesNotContain("synthetic-home-token", failure.ToString(), StringComparison.Ordinal);
+        }
+        Assert.Equal(retry ? 2 : 1, handler.Attempts);
+        Assert.Equal(retry ? 1 : 0, fixture.Endpoint.ReadCount);
+    }
+
+    [Theory]
+    [InlineData(null, false)]
+    [InlineData(SocketError.ConnectionReset, true)]
+    [InlineData(SocketError.AccessDenied, false)]
+    [Trait("Category", "Integration")]
+    public async Task GenericBodyIoFailuresRequireAnExplicitTransientSocketCause(SocketError? error, bool retry)
+    {
+        await using var fixture = await Fixture.StartAsync();
+        var failure = new IOException("synthetic-home-token", error is null ? null : new SocketException((int)error.Value));
+        using var handler = new TransportFailure(HttpRequestError.Unknown, failure, failBody: true);
+        using var http = new HttpClient(handler) { Timeout = Timeout.InfiniteTimeSpan };
+        var client = new HomeAssistantRestClient(http, fixture.Http.BaseAddress!, new("synthetic-reference"),
+            new Secret(), HomeAssistantConfiguration.SimulatorCatalog(), fixture.Clock);
+        if (retry)
+        {
+            Assert.Equal("21.5", (await client.GetStateAsync("sensor.temperature", default)).State);
+        }
+        else
+        {
+            var result = await Assert.ThrowsAsync<HomeAssistantException>(
+                () => client.GetStateAsync("sensor.temperature", default).AsTask());
+            Assert.Equal(HomeAssistantFailure.Transport, result.Failure);
+            Assert.DoesNotContain("synthetic-home-token", result.ToString(), StringComparison.Ordinal);
+        }
+        Assert.Equal(retry ? 2 : 1, handler.Attempts);
+        Assert.Equal(retry ? 1 : 0, fixture.Endpoint.ReadCount);
+    }
+
     [Fact]
     [Trait("Category", "Integration")]
     public async Task ReadsDistinguishStalenessAvailabilityAndSourceTimeWithoutInventingValues()
@@ -706,17 +763,41 @@ public sealed class HomeAssistantTests
         Assert.Equal(0, fixture.Endpoint.ReadCount);
     }
 
-    private sealed class TransportFailure(HttpRequestError error, Exception? inner = null) : DelegatingHandler(new HttpClientHandler { AllowAutoRedirect = false })
+    private sealed class TransportFailure(HttpRequestError error, Exception? inner = null, bool failBody = false)
+        : DelegatingHandler(new HttpClientHandler { AllowAutoRedirect = false })
     {
         public int Attempts { get; private set; }
 
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             Attempts++;
+            if (Attempts == 1 && failBody)
+            {
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StreamContent(new FailureStream(inner ?? new HttpIOException(error, "synthetic-home-token")))
+                });
+            }
             return Attempts == 1
                 ? Task.FromException<HttpResponseMessage>(new HttpRequestException(error, "synthetic-home-token", inner))
                 : base.SendAsync(request, cancellationToken);
         }
+    }
+
+    private sealed class FailureStream(Exception failure) : Stream
+    {
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override int Read(byte[] buffer, int offset, int count) => throw failure;
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) =>
+            ValueTask.FromException<int>(failure);
+        public override void Flush() => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
 
     private sealed class ControlledSecret(Func<CancellationToken, Task<ReadOnlyMemory<char>>> resolve) : ISecretResolver
