@@ -102,6 +102,10 @@ public sealed class LiveOllamaChatTests(ITestOutputHelper output)
 
     private sealed class RejectTools : IToolDispatcher
     {
+        public void ReleaseTurn(TurnId turnId)
+        {
+        }
+
         public ValueTask<ToolDispatchResult> DispatchAsync(ToolDispatchRequest request, CancellationToken cancellationToken) =>
             throw new InvalidOperationException("The synthetic text-only diagnostic must not dispatch tools.");
     }

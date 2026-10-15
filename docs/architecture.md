@@ -49,11 +49,152 @@ IDs. Events use UTC observation times and typed outcomes. `Interrupted` is not
 success: a child process stopping or a request timing out after a side effect
 must not be described as a confirmed failure or automatically retried.
 
-Model proposals are untrusted data. A future dispatcher validates typed
-arguments, applies host policy, journals before writes, requires exact consent
-where specified, and reports uncertain physical outcomes explicitly. Cloud
-context must be a minimal inspectable packet bound to the chosen provider and
-consent; neither the Local profile nor an SDK flag is an air-gap claim.
+Model proposals are untrusted data. The M2-01 `ToolDispatcher` resolves only
+trusted registrations, strictly deserializes their typed arguments, enforces
+an exact tool/action/operation/entity allowlist, journals canonical action
+context before execution, and reports uncertain outcomes without replay.
+Unregistered tools, unsupported risk, disallowed entities, and ambiguous
+aliases cannot reach an external handler. Low-risk writes are automatically
+eligible only when trusted tool logic verifies the exact action against the
+host-supplied current user request; otherwise the dispatcher raises the action
+to approval-required. The SDK callback passes the authenticated owner and
+current request from the accepted host turn; neither is model-generated.
+Cloud context must be a minimal inspectable packet bound to the chosen
+provider and consent; neither the Local profile nor an SDK flag is an air-gap
+claim.
+
+An action ID is stable for one turn/tool-call ID, not for similar arguments in
+later requests. The persisted canonical action envelope binds validated
+arguments, resolved entity, policy content version, owner, turn/call
+provenance, and a hash of the original current request (the raw request is not
+copied into the action journal). Reusing an ID for changed content is rejected.
+Approval records bind one action ID to one owner, expire after five minutes,
+and resolve once using optimistic concurrency. Execution rechecks the exact
+canonical envelope and current policy immediately before crossing the
+side-effect boundary, after the durable execution claim has completed any
+SQLite lock wait. Approval expiry at that point records `Expired`; a changed
+policy records `Rejected`, without sending. Production composition currently has an empty tool
+registry and empty allowlist: no feature tool is exposed until its owning
+feature task registers a real handler.
+If a concurrent dispatch already claimed or completed the action, a stale
+approval expiry attempt returns that recorded state instead of falsely claiming
+that expiry stopped execution.
+Approval decisions and action settlement are separate writes. A concurrent
+matching `Rejected`/`Expired` action status satisfies settlement; a different
+status or persistence failure still surfaces as an error. When an expired
+`Pending` snapshot loses to another resolution, the dispatcher rereads both the
+winning approval and current action instead of replaying the stale decision.
+A still-pending conflict propagates, and a winning approval still has to pass
+the execution-time expiry check.
+Before reporting a Pending approval, dispatch refreshes the approval and action
+even before expiry. A winning rejection or active/completed execution returns
+its recorded state; a winning approval still awaiting execution follows the
+normal claim, expiry, and policy checks rather than asking for another decision.
+Approval creation first returns an existing exact owner/action binding, even
+when another dispatch has already started or completed execution. Only new
+approval records require an action still awaiting approval; this lookup neither
+renews a decided approval nor permits another owner to reuse it.
+
+The action state machine persists `Prepared` before any external execution;
+approval-required actions move to `AwaitingApproval`, then `Executing` only
+after an exact owner decision. A command timeout/cancellation or unexpected
+handler/verification exception after execution begins is journaled `Unknown`
+and surfaced rather than treated as success or safely failed. Tool handlers
+may reconcile through observation within the dispatcher's bounded verification
+window; observation never replays the command. If a process restarts with an
+action still `Executing`, the new dispatcher treats the operation as
+interrupted and performs only bounded verification before journaling the
+observed result or `Unknown`. Concurrent duplicate calls handled by the active
+dispatcher return the in-progress journal state rather than mistaking it for a
+restart. SQLite cannot transact with Home Assistant, so `Succeeded` means the
+intended state was verified, not exactly-once physical execution. Approval UI
+and real Home Assistant handlers remain M2-04 and M2-02 respectively.
+Definitive `NotApplied` verification records `Failed` even after an `Unknown`
+execution result, consistently with interrupted-execution recovery. It permits
+only the remaining known-failure attempt, not an automatic retry. An unchanged
+snapshot after uncertain delivery is not definitive when late application
+remains possible; the adapter must report `Unknown` in that case.
+
+Equivalent proposals within one host turn share a two-failure budget independent
+of call ID, argument property order, or resolved aliases. Equivalent executions
+are serialized so concurrent failures cannot overrun the limit. Failed and
+uncertain outcomes, including execution exceptions, consume the budget;
+successful operations do not. Failure accounting is deduplicated by action ID:
+a delayed duplicate returning a recorded failure cannot consume another slot
+for the same attempt. An uncertain write is stricter: crossing the
+send boundary blocks all further equivalent writes in that turn until a known
+outcome is recorded. `Unknown`, handler/verification exceptions, and failure to
+journal the terminal outcome leave this block in place, including for queued
+attempts and fresh call IDs. Known failed writes and failed reads still have the
+two-attempt limit; distinct later owner turns remain independent.
+Observation-only recovery uses the same proposal semaphore as execution.
+Only after a known outcome is durably recorded can recovery clear uncertainty,
+and only for the action that owns that uncertainty. Verified success removes
+that action's provisional failure slot; confirmed failure consumes one slot,
+deduplicated by action ID. Unknown outcomes and failed observation or journaling
+retain the write block. Recovery of another action cannot clear it.
+On a fresh dispatcher, recovery seeds uncertainty from the persisted action's
+original risk before observing, not from the new policy/registration risk.
+Unresolved writes are tracked by action ID as a set so reconciling one orphan
+cannot discard another. Persisted read-only actions do not acquire write
+uncertainty; unreadable/incomplete risk metadata surfaces an error and keeps
+equivalent sends blocked conservatively.
+Normal verification also rechecks current authorization after execution;
+revocation or Unsupported records Unknown without observing. Recovery rereads
+the action under the proposal gate before observing and returns a winning
+non-Executing status instead of using a stale version. Known pre-send
+Rejected/Expired winners clear only their own provisional uncertainty.
+Original write risk is registered in a concurrent action-ID set before
+cancellable proposal-gate acquisition. Cancelling queued recovery releases its
+active claim, not the unresolved write marker. Valid original reads never add
+a marker; malformed risk metadata adds one before surfacing its error.
+Fresh execution has a final synchronous admission after its durable claim and
+policy/expiry checks. Admission and orphan registration share one short lock:
+registration that wins prevents the unsent action, while already-admitted
+operations may finish. No persistence, external callback or await runs under
+that lock. Rejection clears only the unsent action's own marker, not the orphan.
+Terminal replay also acquires the proposal gate and refreshes the journal before
+reconciling distinct failures and clearing only its own known-outcome marker.
+This repairs stale uncertainty registered by a delayed Executing read whose
+gate wait was cancelled after completion. Cancellation or a failed refresh
+preserves uncertainty; replay neither sends nor observes, and never clears
+another orphan's marker.
+Persisted Unknown replay seeds original write risk before its cancellable gate
+wait, using the same strict envelope classification as Executing recovery.
+Fresh dispatcher state, a lower current risk, cancellation or a failed journal
+refresh cannot erase that unresolved effect. Valid original reads retain
+distinct-action failure limits without inventing write uncertainty; malformed
+risk metadata registers uncertainty conservatively before surfacing its error.
+The engine releases ephemeral accounting only
+after the turn's callbacks stop. Restart interrupts turns rather than resuming
+their inference, so these counters are not a durable retry mechanism.
+
+A policy-only change does not strand an interrupted `Executing` action.
+Redispatch reevaluates policy after acquiring the equivalent-proposal gate,
+immediately before observation. If the current permission is denied or
+Unsupported, it records `Unknown` without observing; an allowed policy-version
+change still permits observation. Active execution arbitration
+still applies, including when policy changes while a handler is running.
+
+Policy-only invalidation that loses a CAS returns the complete durable winner
+through existing reconciliation; changed-content reuse still receives a
+rejection. Rejected/expired approval settlement may update only an action still
+AwaitingApproval, never overwrite another terminal status/response/version.
+
+**Single-copy outcomes:** migration 006 adds the complete terminal response to
+the action journal, committed atomically with status and optimistic version.
+Duplicate/restarted dispatch returns that exact response, including result JSON,
+reason and identifiers, without executing or observing again. Completion events
+carry an optional action reference, not another result body; conversation
+messages and model-history selection are unchanged. Result JSON is bounded to
+1,000,000 characters and reasons to 256, without truncation. The owner explicitly
+authorized this storage-contract/schema extension for R6; see
+[ADR 0005](adr/0005-single-copy-tool-outcomes.md).
+Legacy entries without a response still return status/null JSON/
+`recorded_action_outcome`; missing historical data is not fabricated. Outcomes
+share the action journal's retention and backup protection, not conversation
+cleanup. Canonical requests remain immutable; audit/diagnostics are not result
+stores. Uncertain outcomes never authorize a blind resend.
 
 M1 registers `LocalOnlyModelRouter` and `ConversationContextBuilder` as
 Application services. The router returns typed Local, Clarify, or Unsupported

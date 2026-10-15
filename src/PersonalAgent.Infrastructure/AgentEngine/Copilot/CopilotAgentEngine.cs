@@ -158,6 +158,7 @@ public sealed class CopilotAgentEngine : IAgentEngine, IEngineStateMaintenance
             }
             finally
             {
+                dispatcher.ReleaseTurn(request.TurnId);
                 activeTurns.TryRemove(new KeyValuePair<TurnId, CopilotActiveTurn>(request.TurnId, active));
                 activeConversations.TryRemove(
                     new KeyValuePair<ConversationId, TurnId>(request.ConversationId, request.TurnId));
@@ -628,7 +629,15 @@ public sealed class CopilotAgentEngine : IAgentEngine, IEngineStateMaintenance
             client = CreateAndAssignClient(runtimeDirectory, workingDirectory, active);
             await client.StartAsync().WaitAsync(cancellationToken);
             var tools = request.Tools.Select(tool =>
-                new CopilotToolFunction(tool, dispatcher, request.TurnId, events, active, clock)).ToArray();
+                new CopilotToolFunction(
+                    tool,
+                    dispatcher,
+                    request.TurnId,
+                    request.OwnerId,
+                    GetCurrentRequest(request.Context.Items),
+                    events,
+                    active,
+                    clock)).ToArray();
             var hooks = new SessionHooks
             {
                 // The host owns the bounded prompt; runtime date/XML wrappers change small-model behavior.
@@ -1316,6 +1325,8 @@ public sealed class CopilotAgentEngine : IAgentEngine, IEngineStateMaintenance
         private readonly AgentToolDefinition definition;
         private readonly IToolDispatcher dispatcher;
         private readonly TurnId turnId;
+        private readonly string? ownerId;
+        private readonly string currentUserRequest;
         private readonly ChannelWriter<AgentEvent> events;
         private readonly CopilotActiveTurn active;
         private readonly IClock clock;
@@ -1325,6 +1336,8 @@ public sealed class CopilotAgentEngine : IAgentEngine, IEngineStateMaintenance
             AgentToolDefinition definition,
             IToolDispatcher dispatcher,
             TurnId turnId,
+            string? ownerId,
+            string currentUserRequest,
             ChannelWriter<AgentEvent> events,
             CopilotActiveTurn active,
             IClock clock)
@@ -1332,6 +1345,8 @@ public sealed class CopilotAgentEngine : IAgentEngine, IEngineStateMaintenance
             this.definition = definition;
             this.dispatcher = dispatcher;
             this.turnId = turnId;
+            this.ownerId = ownerId;
+            this.currentUserRequest = currentUserRequest;
             this.events = events;
             this.active = active;
             this.clock = clock;
@@ -1380,12 +1395,18 @@ public sealed class CopilotAgentEngine : IAgentEngine, IEngineStateMaintenance
 
             var serializedArguments = JsonSerializer.Serialize(arguments);
             var result = await dispatcher.DispatchAsync(
-                new ToolDispatchRequest(turnId, callId, definition.Name, serializedArguments),
+                new ToolDispatchRequest(
+                    turnId,
+                    callId,
+                    definition.Name,
+                    serializedArguments,
+                    ownerId,
+                    currentUserRequest),
                 cancellationToken);
             await WriteObservedEventAsync(
                 events,
                 active,
-                new ToolCompleted(turnId, clock.UtcNow, callId, result.Status),
+                new ToolCompleted(turnId, clock.UtcNow, callId, result.Status, result.ActionId),
                 cancellationToken);
             return JsonSerializer.Serialize(result);
         }

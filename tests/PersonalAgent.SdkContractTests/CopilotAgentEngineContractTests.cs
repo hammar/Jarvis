@@ -825,7 +825,7 @@ public sealed class CopilotAgentEngineContractTests(ITestOutputHelper output)
         using var databaseFile = IsolatedDatabaseFile.Create();
         var store = new SqliteConversationStore(await CreateDatabaseAsync(databaseFile.Path), new TestClock());
         await using var provider = await FakeOpenAiProvider.StartAsync();
-        var expectedResult = new ToolDispatchResult("Succeeded", """{"value":"host-result"}""", null);
+        var expectedResult = new ToolDispatchResult("Succeeded", """{"value":"host-result"}""", null, new ActionId(Guid.NewGuid()));
         provider.ExpectedToolResult = System.Text.Json.JsonSerializer.Serialize(expectedResult);
         var dispatcher = new RecordingDispatcher(expectedResult);
         var engine = CreateEngine(
@@ -835,8 +835,16 @@ public sealed class CopilotAgentEngineContractTests(ITestOutputHelper output)
             Path.Combine(data.Path, "runtime"),
             dispatcher);
         var turnId = await CreateTurnAsync(store);
+        var request = CreateRequest(
+            turnId,
+            ProviderKind.Local,
+            "tool contract",
+            [new AgentToolDefinition(ToolName, ToolSchema, true)]) with
+        {
+            OwnerId = "owner"
+        };
         var events = await CollectAsync(engine.RunTurnAsync(
-            CreateRequest(turnId, ProviderKind.Local, "tool contract", [new AgentToolDefinition(ToolName, ToolSchema, true)]),
+            request,
             CancellationToken.None));
         var persisted = await store.ReadTurnEventsAfterAsync(turnId, 0, 1000, CancellationToken.None);
         var disconnectedPrefix = persisted.Take(1).ToArray();
@@ -848,8 +856,18 @@ public sealed class CopilotAgentEngineContractTests(ITestOutputHelper output)
 
         Assert.True(dispatcher.Calls == 1,
             $"Expected one tool dispatch; got {dispatcher.Calls}. Exposed tools: {string.Join("|", provider.Requests.SelectMany(item => item.ToolNames))}. Events: {string.Join("|", events.Select(item => item.GetType().Name))}");
+        Assert.Equal("owner", dispatcher.LastOwnerId);
+        Assert.Equal("tool contract", dispatcher.LastUserRequest);
+        Assert.Equal(turnId, dispatcher.ReleasedTurn);
         Assert.Single(events.OfType<ToolProposed>());
-        Assert.Single(events.OfType<ToolCompleted>());
+        Assert.Equal(expectedResult.ActionId, Assert.Single(events.OfType<ToolCompleted>()).ActionId);
+        var completion = Assert.Single(persisted, item => item.EventType == nameof(ToolCompleted));
+        Assert.Equal(expectedResult.ActionId,
+            System.Text.Json.JsonSerializer.Deserialize<ToolCompleted>(completion.PayloadJson)!.ActionId);
+        Assert.DoesNotContain("host-result", completion.PayloadJson, StringComparison.Ordinal);
+        Assert.DoesNotContain("ResultJson", completion.PayloadJson, StringComparison.Ordinal);
+        Assert.DoesNotContain(await store.ReadRecentAsync(request.ConversationId, 100, CancellationToken.None),
+            message => message.Role == "tool");
         Assert.Single(events.OfType<TurnCompleted>());
         Assert.Equal(2, provider.Requests.Count);
         Assert.All(provider.Requests, request => Assert.Equal(ToolName, Assert.Single(request.ToolNames)));
@@ -888,6 +906,7 @@ public sealed class CopilotAgentEngineContractTests(ITestOutputHelper output)
         Assert.Equal(1, dispatcher.Calls);
         Assert.Equal(2, events.OfType<ToolProposed>().Count());
         Assert.Equal(2, events.OfType<ToolCompleted>().Count());
+        Assert.Null(events.OfType<ToolCompleted>().Last().ActionId);
         Assert.Equal("Rejected", events.OfType<ToolCompleted>().Last().Outcome);
         Assert.Equal("tool_budget_exceeded", Assert.Single(events.OfType<TurnFailed>()).ReasonCode);
         Assert.Equal(TurnStatus.Failed, (await store.GetTurnAsync(turnId, CancellationToken.None))?.Status);
@@ -2463,6 +2482,11 @@ public sealed class CopilotAgentEngineContractTests(ITestOutputHelper output)
 
         public int Calls => Volatile.Read(ref calls);
         public string? LastArguments { get; private set; }
+        public string? LastOwnerId { get; private set; }
+        public string? LastUserRequest { get; private set; }
+        public TurnId? ReleasedTurn { get; private set; }
+
+        public void ReleaseTurn(TurnId turnId) => ReleasedTurn = turnId;
 
         public ValueTask<ToolDispatchResult> DispatchAsync(
             ToolDispatchRequest request,
@@ -2471,12 +2495,18 @@ public sealed class CopilotAgentEngineContractTests(ITestOutputHelper output)
             cancellationToken.ThrowIfCancellationRequested();
             Interlocked.Increment(ref calls);
             LastArguments = request.ArgumentsJson;
+            LastOwnerId = request.OwnerId;
+            LastUserRequest = request.CurrentUserRequest;
             return ValueTask.FromResult(result);
         }
     }
 
     private sealed class BlockingDispatcher : IToolDispatcher
     {
+        public void ReleaseTurn(TurnId turnId)
+        {
+        }
+
         public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource Cancelled { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 

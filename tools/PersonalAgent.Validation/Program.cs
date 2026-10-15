@@ -124,6 +124,10 @@ internal static class CoverageGate
         ("M1 bounded context construction", "src/PersonalAgent.Application/Context/ConversationContextBuilder.cs", 95, 90),
         ("M1 model-facing context formatting", "src/PersonalAgent.Application/Context/LocalChatPrompt.cs", 95, 90),
         ("M1 local turn coordination, bounds, and recovery", "src/PersonalAgent.Application/TurnCoordination/LocalTurnCoordinator.cs", 95, 90),
+        ("M2-01 typed tool registration and validation", "src/PersonalAgent.Application/Tools/ToolRegistration.cs", 95, 90),
+        ("M2-01 exact tool allowlist policy", "src/PersonalAgent.Application/Tools/ToolAuthorizationPolicy.cs", 95, 90),
+        ("M2-01 action dispatch and outcome policy", "src/PersonalAgent.Application/Tools/ToolDispatcher.cs", 95, 90),
+        ("M2-01 exact approval lifecycle", "src/PersonalAgent.Application/Approvals/ApprovalService.cs", 95, 90),
         ("Approval persistence invariants", "src/PersonalAgent.Infrastructure/Persistence/SqliteApprovalStore.cs", 95, 90),
         ("Action journal idempotency", "src/PersonalAgent.Infrastructure/Persistence/SqliteActionJournalStore.cs", 95, 90)
     ];

@@ -224,6 +224,7 @@ public sealed class LocalTurnCoordinatorTests
         Assert.Equal("owner", store.LastFindOwnerId);
         Assert.Equal("owner", store.LastSubmissionOwnerId);
         await engine.Completed.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.Equal("owner", engine.LastOwnerId);
         Assert.True((await scope.Coordinator.SubmitAsync(owned, CancellationToken.None)).IsDuplicate);
 
         await Assert.ThrowsAsync<ConversationNotFoundException>(async () =>
@@ -1944,6 +1945,7 @@ public sealed class LocalTurnCoordinatorTests
         public TaskCompletionSource ContinueCancellation { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public CancellationToken EngineOwnerToken { get; private set; }
         public CancellationToken EngineDeadlineToken { get; private set; }
+        public string? LastOwnerId { get; private set; }
         private readonly ConcurrentDictionary<TurnId, TaskCompletionSource> startedTurns = new();
         private readonly ConcurrentDictionary<TurnId, TaskCompletionSource> releaseTurns = new();
         public int ExecutionCount => Volatile.Read(ref executionCount);
@@ -1965,6 +1967,7 @@ public sealed class LocalTurnCoordinatorTests
             [EnumeratorCancellation] CancellationToken cancellationToken)
         {
             var execution = Interlocked.Increment(ref executionCount);
+            LastOwnerId = request.OwnerId;
             if (execution >= 4)
             {
                 FourStarted.TrySetResult();

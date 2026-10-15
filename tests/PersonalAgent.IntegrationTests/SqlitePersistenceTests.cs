@@ -176,7 +176,7 @@ public sealed class SqlitePersistenceTests
         Assert.Equal(saved, await reopened.GetRetentionAsync(defaults, CancellationToken.None));
         Assert.True(await reopened.IsConfiguredAsync(CancellationToken.None));
         await using var connection = await new SqliteDatabase(file.Path).OpenConnectionAsync();
-        Assert.Equal(5, await UserVersionAsync(connection));
+        Assert.Equal(6, await UserVersionAsync(connection));
     }
 
     [Fact]
@@ -335,16 +335,19 @@ public sealed class SqlitePersistenceTests
         await using (var connection = new SqliteConnection($"Data Source={file.Path}"))
         {
             await connection.OpenAsync();
+            var assembly = typeof(SqliteDatabase).Assembly;
+            foreach (var name in assembly.GetManifestResourceNames()
+                .Where(name => name.Contains(".Persistence.Migrations.", StringComparison.Ordinal))
+                .Order(StringComparer.Ordinal).Take(4))
+            {
+                using var resource = assembly.GetManifestResourceStream(name)!;
+                using var reader = new StreamReader(resource);
+                await using var migration = connection.CreateCommand();
+                migration.CommandText = await reader.ReadToEndAsync();
+                await migration.ExecuteNonQueryAsync();
+            }
             await using var seed = connection.CreateCommand();
             seed.CommandText = """
-                CREATE TABLE conversations (
-                    id TEXT NOT NULL PRIMARY KEY,
-                    owner_id TEXT NOT NULL,
-                    title TEXT NOT NULL DEFAULT '',
-                    created_at_utc TEXT NOT NULL,
-                    updated_at_utc TEXT NOT NULL,
-                    version INTEGER NOT NULL DEFAULT 1
-                );
                 INSERT INTO conversations (id, owner_id, title, created_at_utc, updated_at_utc)
                 VALUES
                     ($existing, 'owner', 'Existing title', $created, $created),
@@ -367,7 +370,7 @@ public sealed class SqlitePersistenceTests
         Assert.False(existing.TitleIsManual);
         Assert.Equal(Now, existing.CreatedAtUtc);
         await using var migrated = await database.OpenConnectionAsync();
-        Assert.Equal(5, await UserVersionAsync(migrated));
+        Assert.Equal(6, await UserVersionAsync(migrated));
     }
 
     [Fact]
@@ -430,7 +433,7 @@ public sealed class SqlitePersistenceTests
         await using var foreignKeys = connection.CreateCommand();
         foreignKeys.CommandText = "PRAGMA foreign_keys;";
         Assert.Equal(1L, (long)(await foreignKeys.ExecuteScalarAsync())!);
-        Assert.Equal(5, await UserVersionAsync(connection));
+        Assert.Equal(6, await UserVersionAsync(connection));
     }
 
     [Fact]
@@ -451,7 +454,7 @@ public sealed class SqlitePersistenceTests
         Assert.Equal(messageId, messages[0].MessageId);
         Assert.Equal("before upgrade", messages[0].Content);
         await using var migrated = await database.OpenConnectionAsync();
-        Assert.Equal(5, await UserVersionAsync(migrated));
+        Assert.Equal(6, await UserVersionAsync(migrated));
         await using var table = migrated.CreateCommand();
         table.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'cloud_consents';";
         Assert.Equal(1L, (long)(await table.ExecuteScalarAsync())!);
@@ -1156,6 +1159,11 @@ public sealed class SqlitePersistenceTests
         var approval = new ApprovalStorageRecord(
             ApprovalId.New(), action.Id, "owner-1", "Pending", Now, Now.AddMinutes(5), null, 1);
         await store.CreateAsync(approval, CancellationToken.None);
+        Assert.Equal(approval, await store.CreateAsync(approval, CancellationToken.None));
+        await Assert.ThrowsAsync<PersistenceConcurrencyException>(async () =>
+            await store.CreateAsync(approval with { OwnerId = "owner-2" }, CancellationToken.None));
+        await Assert.ThrowsAsync<PersistenceConcurrencyException>(async () =>
+            await store.CreateAsync(approval with { ActionId = ActionId.New() }, CancellationToken.None));
 
         var approved = await store.ResolveAsync(
             approval.Id, "owner-1", "Approved", 1, Now.AddMinutes(1), CancellationToken.None);
@@ -1174,6 +1182,35 @@ public sealed class SqlitePersistenceTests
         await Assert.ThrowsAsync<PersistenceConcurrencyException>(
             async () => await store.ResolveAsync(
                 expired.Id, "other-owner", "Approved", 1, Now, CancellationToken.None));
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task ActionJournalReadFailureAfterUpdateRollsBackTheUnobservedTransition()
+    {
+        using var file = IsolatedDatabaseFile.Create();
+        var database = new SqliteDatabase(file.Path);
+        await database.InitializeAsync();
+        var store = new SqliteActionJournalStore(database);
+        var action = NewAction(ActionId.New(), "Prepared", Now);
+        await store.CreateAsync(action, CancellationToken.None);
+
+        await using (var connection = await database.OpenConnectionAsync())
+        await using (var command = connection.CreateCommand())
+        {
+            command.CommandText = """
+                CREATE TRIGGER delete_updated_action
+                AFTER UPDATE ON actions
+                BEGIN
+                    DELETE FROM actions WHERE id = NEW.id;
+                END;
+                """;
+            await command.ExecuteNonQueryAsync();
+        }
+
+        await Assert.ThrowsAsync<InvalidDataException>(async () =>
+            await store.UpdateStatusAsync(action.Id, "Executing", action.Version, Now.AddMinutes(1), CancellationToken.None));
+        Assert.Equal("Prepared", (await store.GetAsync(action.Id, CancellationToken.None))!.Status);
     }
 
     [Fact]
@@ -2455,7 +2492,7 @@ public sealed class SqlitePersistenceTests
                 return true;
             });
         await using var connection = await first.OpenConnectionAsync();
-        Assert.Equal(5, await UserVersionAsync(connection));
+        Assert.Equal(6, await UserVersionAsync(connection));
     }
 
     private static async Task<T[]> RunConcurrentlyAsync<T>(params Func<Task<T>>[] operations)
