@@ -825,7 +825,7 @@ public sealed class CopilotAgentEngineContractTests(ITestOutputHelper output)
         using var databaseFile = IsolatedDatabaseFile.Create();
         var store = new SqliteConversationStore(await CreateDatabaseAsync(databaseFile.Path), new TestClock());
         await using var provider = await FakeOpenAiProvider.StartAsync();
-        var expectedResult = new ToolDispatchResult("Succeeded", """{"value":"host-result"}""", null);
+        var expectedResult = new ToolDispatchResult("Succeeded", """{"value":"host-result"}""", null, new ActionId(Guid.NewGuid()));
         provider.ExpectedToolResult = System.Text.Json.JsonSerializer.Serialize(expectedResult);
         var dispatcher = new RecordingDispatcher(expectedResult);
         var engine = CreateEngine(
@@ -860,7 +860,14 @@ public sealed class CopilotAgentEngineContractTests(ITestOutputHelper output)
         Assert.Equal("tool contract", dispatcher.LastUserRequest);
         Assert.Equal(turnId, dispatcher.ReleasedTurn);
         Assert.Single(events.OfType<ToolProposed>());
-        Assert.Single(events.OfType<ToolCompleted>());
+        Assert.Equal(expectedResult.ActionId, Assert.Single(events.OfType<ToolCompleted>()).ActionId);
+        var completion = Assert.Single(persisted, item => item.EventType == nameof(ToolCompleted));
+        Assert.Equal(expectedResult.ActionId,
+            System.Text.Json.JsonSerializer.Deserialize<ToolCompleted>(completion.PayloadJson)!.ActionId);
+        Assert.DoesNotContain("host-result", completion.PayloadJson, StringComparison.Ordinal);
+        Assert.DoesNotContain("ResultJson", completion.PayloadJson, StringComparison.Ordinal);
+        Assert.DoesNotContain(await store.ReadRecentAsync(request.ConversationId, 100, CancellationToken.None),
+            message => message.Role == "tool");
         Assert.Single(events.OfType<TurnCompleted>());
         Assert.Equal(2, provider.Requests.Count);
         Assert.All(provider.Requests, request => Assert.Equal(ToolName, Assert.Single(request.ToolNames)));
@@ -899,6 +906,7 @@ public sealed class CopilotAgentEngineContractTests(ITestOutputHelper output)
         Assert.Equal(1, dispatcher.Calls);
         Assert.Equal(2, events.OfType<ToolProposed>().Count());
         Assert.Equal(2, events.OfType<ToolCompleted>().Count());
+        Assert.Null(events.OfType<ToolCompleted>().Last().ActionId);
         Assert.Equal("Rejected", events.OfType<ToolCompleted>().Last().Outcome);
         Assert.Equal("tool_budget_exceeded", Assert.Single(events.OfType<TurnFailed>()).ReasonCode);
         Assert.Equal(TurnStatus.Failed, (await store.GetTurnAsync(turnId, CancellationToken.None))?.Status);

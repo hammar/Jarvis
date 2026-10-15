@@ -1,4 +1,5 @@
 using Microsoft.Data.Sqlite;
+using System.Text.Json;
 using PersonalAgent.Application;
 using PersonalAgent.Domain;
 
@@ -28,7 +29,7 @@ public sealed class SqliteActionJournalStore : IActionJournalStore
         ArgumentException.ThrowIfNullOrWhiteSpace(entry.CanonicalArguments);
         ArgumentException.ThrowIfNullOrWhiteSpace(entry.RequestHash);
         ValidateStatus(entry.Status);
-        if (entry.Status != "Prepared" || entry.Version != 1)
+        if (entry.Status != "Prepared" || entry.Version != 1 || entry.Outcome is not null)
         {
             throw new ArgumentException("A new action journal entry must be Prepared at version 1.", nameof(entry));
         }
@@ -72,7 +73,7 @@ public sealed class SqliteActionJournalStore : IActionJournalStore
         await using var command = connection.CreateCommand();
         command.CommandText = """
             SELECT id, action_type, canonical_arguments, request_hash, status,
-                   created_at_utc, updated_at_utc, version
+                   created_at_utc, updated_at_utc, version, outcome_json
             FROM actions WHERE id = $id;
             """;
         command.Parameters.AddWithValue("$id", SqliteValue.Guid(id.Value));
@@ -86,9 +87,11 @@ public sealed class SqliteActionJournalStore : IActionJournalStore
         string status,
         long expectedVersion,
         DateTimeOffset updatedAtUtc,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        ToolDispatchResult? outcome = null)
     {
         ValidateStatus(status);
+        ValidateOutcome(id, status, outcome);
         if (expectedVersion < 1)
         {
             throw new ArgumentOutOfRangeException(nameof(expectedVersion));
@@ -99,13 +102,16 @@ public sealed class SqliteActionJournalStore : IActionJournalStore
         await using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = """
-            UPDATE actions SET status = $status, updated_at_utc = $updated, version = version + 1
+            UPDATE actions SET status = $status, updated_at_utc = $updated,
+                outcome_json = $outcome, version = version + 1
             WHERE id = $id AND version = $version;
             """;
         command.Parameters.AddWithValue("$status", status);
         command.Parameters.AddWithValue("$updated", SqliteValue.Utc(updatedAtUtc));
         command.Parameters.AddWithValue("$id", SqliteValue.Guid(id.Value));
         command.Parameters.AddWithValue("$version", expectedVersion);
+        command.Parameters.AddWithValue("$outcome",
+            outcome is null ? DBNull.Value : JsonSerializer.Serialize(outcome));
         if (await command.ExecuteNonQueryAsync(cancellationToken) != 1)
         {
             throw new PersistenceConcurrencyException("The action journal entry changed or no longer exists.");
@@ -117,7 +123,7 @@ public sealed class SqliteActionJournalStore : IActionJournalStore
             read.Transaction = transaction;
             read.CommandText = """
                 SELECT id, action_type, canonical_arguments, request_hash, status,
-                       created_at_utc, updated_at_utc, version
+                       created_at_utc, updated_at_utc, version, outcome_json
                 FROM actions WHERE id = $id;
                 """;
             read.Parameters.AddWithValue("$id", SqliteValue.Guid(id.Value));
@@ -134,15 +140,34 @@ public sealed class SqliteActionJournalStore : IActionJournalStore
         return result;
     }
 
-    private static ActionJournalEntry ReadEntry(SqliteDataReader reader) =>
-        new(new ActionId(System.Guid.Parse(reader.GetString(0))),
+    private static ActionJournalEntry ReadEntry(SqliteDataReader reader)
+    {
+        var entry = new ActionJournalEntry(new ActionId(System.Guid.Parse(reader.GetString(0))),
             reader.GetString(1),
             reader.GetString(2),
             reader.GetString(3),
             reader.GetString(4),
             SqliteValue.DateTimeOffset(reader.GetString(5)),
             SqliteValue.DateTimeOffset(reader.GetString(6)),
-            reader.GetInt64(7));
+            reader.GetInt64(7),
+            reader.IsDBNull(8) ? null : JsonSerializer.Deserialize<ToolDispatchResult>(reader.GetString(8))
+                ?? throw new InvalidDataException("The persisted action response is null."));
+        ValidateOutcome(entry.Id, entry.Status, entry.Outcome);
+        return entry;
+    }
+
+    private static void ValidateOutcome(ActionId id, string status, ToolDispatchResult? outcome)
+    {
+        if (outcome is not null
+            && (status is not ("Succeeded" or "Failed" or "Unknown" or "Rejected" or "Expired")
+                || outcome.Status != status || outcome.ActionId != id
+                || outcome.ResultJson is { Length: > 1_000_000 }
+                || outcome.ReasonCode is { Length: > 256 }))
+        {
+            throw new ArgumentException("An action response must be bounded, terminal, and match its action identity/status.",
+                nameof(outcome));
+        }
+    }
 
     private static void ValidateStatus(string status)
     {

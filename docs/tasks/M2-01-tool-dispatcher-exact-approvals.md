@@ -16,9 +16,9 @@ Acceptance scenarios include:
 - An ambiguous entity alias requires clarification and does not select a target.
 - Re-dispatch with the same action identity returns the recorded outcome and
   never repeats execution; a distinct later request with identical arguments
-  remains a distinct action. The current T03 contract records status only,
-  not the original result JSON or reason; full outcome replay remains an
-  unresolved acceptance gap under M2-01-R6 below.
+  remains a distinct action. Newly recorded terminal outcomes must replay the
+  complete response, including result JSON and reason. Older records without
+  a response remain explicitly status-only; never reconstruct by re-execution.
 - A process restart that finds a persisted `Executing` action performs bounded
   observation only, records the observed outcome or `Unknown`, and never
   replays the execution handler; a concurrent duplicate on the active
@@ -74,10 +74,12 @@ Acceptance scenarios include:
 - Add approval creation/resolution bound to one authenticated owner and one
   journaled action, with five-minute default expiry, compare-and-swap version,
   single use, and execution-time policy/freshness checks.
-- Use the existing `IActionJournalStore` and `IApprovalStore` persistence
-  contracts. Keep exact entity, policy/config version, and request provenance
-  in the canonical persisted action request envelope/hash; do not change T03
-  schema or storage contracts.
+- Extend `IActionJournalStore` and the SQLite schema narrowly for terminal
+  outcome persistence, as explicitly authorized by the owner on 2026-10-14
+  after agreeing the single-copy design. Keep `IApprovalStore` unchanged and
+  retain exact request/owner/policy binding. Store the complete outcome once
+  with action status atomically; completion events reference the action, not
+  another payload. Do not add tool conversation messages.
 - The Copilot adapter carries the authenticated owner and the current request
   from the host-selected context to the dispatcher. The original request text
   is used only in memory for a trusted handler's exact-intent check; only its
@@ -95,15 +97,15 @@ Acceptance scenarios include:
 - Reminder/scheduler tools (M3-02).
 - Arbitrary HTTP, shell, filesystem, purchase, outbound-message, or
   unsupported physical capabilities.
-- New SQLite schema migration, data retention changes, or automatic retry of
-  an uncertain side effect.
+- Automatic retry of an uncertain side effect, tool-history UI, event sourcing,
+  and feeding raw tool history into future model context.
 
 ## Owned files
 
 - `src/PersonalAgent.Application/Contracts.cs` and application `Tools/` and
   `Approvals/` components.
-- `src/PersonalAgent.Infrastructure/` only for dispatch/approval composition
-  and existing T03 store integration; no SQLite schema changes.
+- `src/PersonalAgent.Infrastructure/` for composition, journal persistence,
+  additive migration 006 and completion-event action references.
 - `src/PersonalAgent.Web/Program.cs` for production registrations.
 - `tests/PersonalAgent.UnitTests/`,
   `tests/PersonalAgent.IntegrationTests/`, and coverage validation ownership
@@ -113,8 +115,10 @@ Acceptance scenarios include:
 
 ## Assumptions and decisions
 
-- Existing frozen Application storage contracts and T03 database schema are
-  retained. The canonical action request is an immutable envelope containing
+- The owner-authorized R6 extension supersedes the original unchanged-T03
+  contract/schema restriction. Existing data remains intact through an additive
+  migration; outcomes share their action's durable retention and are not copied
+  into events/messages. The canonical action request is an immutable envelope containing
   the tool/action type, canonical validated arguments, resolved entity,
   policy/config version, turn/tool-call provenance, and operation. Its stable
   hash binds the approval to the complete proposal.
@@ -180,7 +184,7 @@ R7/R8, both labelled "Previously missed"; both are retained below. Commit
 | M2-01-R3 | High | Approval expiry or policy could change while awaiting the durable execution claim. | Fixed in the review follow-up: recheck expiry and policy immediately after the claim. `AuthorizationIsRecheckedAfterDurableClaimBeforeSending` and `AutomaticActionCannotExecuteWhenPolicyChangesWhileClaimingIt` assert terminal rejection/expiry and zero sends. |
 | M2-01-R4 | Medium | Fresh call IDs bypassed the two-equivalent-failure limit. | Fixed in the review follow-up: canonical turn-scoped failure accounting serializes equivalent attempts; `TwoEquivalentFailuresStopFreshCallIdsButNotLaterTurns` and `ConcurrentEquivalentFailuresCannotRacePastTheTwoAttemptLimit` cover errors, aliases/property order, fresh call IDs, and concurrency. SDK contracts assert turn accounting cleanup. |
 | M2-01-R5 | Medium | Changed policy prevented recovery of an orphaned `Executing` action. | Fixed in the review follow-up: permit observation-only recovery when current policy allows; otherwise journal `Unknown` without observing or sending. `RestartedExecutionHandlesChangedPolicyWithoutReplayingIt` and `PolicyChangeDoesNotMistakeActiveExecutionForRestartRecovery` cover both restart permissions and active-call arbitration against real SQLite. |
-| M2-01-R6 | Medium | Duplicate/restarted dispatch loses the original result JSON and detailed reason. | Deferred outside the authorized unchanged-T03 persistence scope, not fixed or owner-accepted. The journal persists intent/status/version only; API/docs explicitly disclose status-only replay. The review thread is handled as a scope deferral, not as proof that the acceptance gap is fixed. |
+| M2-01-R6 | Medium | Duplicate/restarted dispatch loses the original result JSON and detailed reason. | Originally deferred outside unchanged-T03 scope, not owner-accepted. The owner subsequently authorized the single-copy journal/schema extension in ADR 0005. Implementation and exact replay/atomic persistence/migration/runtime-reference evidence are recorded in the R6 update below; historical review records retain their original scope and conclusions. |
 | M2-01-R7 (Previously missed) | Medium | A stale approval read could falsely report expiry after another dispatch began or completed execution. | Fixed in `c5f3d63`: report `Expired` only when the transition actually produced that status; otherwise return the recorded action outcome. `StaleApprovalReadCannotReportExpiryAfterExecutionBegins` exercises both `Executing` and `Succeeded` across the expiry boundary. |
 | M2-01-R8 (Previously missed) | High | A fresh equivalent call ID could resend after an uncertain write. | Fixed in `c5f3d63`: serialize equivalent proposals and keep their write gate closed from the send boundary until a known outcome is durably recorded. `UncertainWritesBlockEquivalentFreshIdsIncludingQueuedAttempts` and `EquivalentUncertainWritesCannotResendWithFreshIds` cover sequential/concurrent fresh IDs, unknown results, cancellation, handler/verification exceptions, and terminal-journal failure. Known failed writes retain two attempts; later owner turns remain independent. |
 | M2-01-R9 (review label R7; Previously missed) | Medium | A delayed duplicate returning a recorded failure could consume the second failure slot without executing. | Fixed in `1669296`: deduplicate failed-attempt accounting by action ID on both returned-outcome and exception paths. `DelayedDuplicateDoesNotConsumeASecondFailureSlot` pauses a duplicate's `Prepared` snapshot until the first attempt fails; the next fresh call still executes, and a third distinct attempt is rejected only after two failures. |
@@ -252,7 +256,7 @@ retained R6 without additional summary-only findings. All inspected CI checks
 passed against that parent, including SDK contracts on Linux/macOS and required
 Aspire/browser suites; this is parent evidence, not validation of the R23 fix.
 
-For R6, the concrete alternatives are explicit owner acceptance of status-only
+At the preceding historical check-ins, R6's alternatives were owner acceptance of status-only
 replay for M2-01 or authorization to extend durable terminal-result persistence
 with duplicate/restart payload-equality tests and a reviewed privacy/retention
 contract. The owner was unavailable when asked during the check-in. Resolving
@@ -261,6 +265,33 @@ claiming full response replay, or accepting the limitation on the owner's
 behalf. The unresolved product acceptance impact remains explicit: passing
 automation or resolving GitHub conversations does not dispose of this gap
 under the repository's owner-acceptance procedure.
+
+### Owner-authorized R6 persistence extension
+
+After discussing the missing replay data and storage locations, the owner
+explicitly agreed to the single-copy design and instructed implementation,
+including conflicting issue/spec updates. This supersedes the old T03
+schema/storage-contract exclusion, not the safety/retention constraints.
+Issue #5 and the project specification now require complete terminal responses
+in the journal. ADR 0005 records the approved design.
+
+Migration 006 adds nullable `actions.outcome_json`; `ActionJournalEntry.Outcome`
+and `IActionJournalStore.UpdateStatusAsync` carry a typed response in the same
+status/version CAS transaction. Dispatcher success/failure/uncertainty,
+pre-send terminal decisions, approval rejection/expiry and observation-only
+recovery persist responses before returning. Exceptions retain stable reasons
+without exception text. `ToolCompleted.ActionId` references the record without
+copying result JSON; no tool conversation message/context expansion is added.
+Old rows remain honest status-only fallbacks, never reconstructed by resending.
+Action retention remains independent of conversation/event cleanup, so payloads
+survive with action/idempotency/Unknown evidence and cumulative storage can grow.
+
+Targeted implementation evidence: 146 dispatcher unit cases and 68 real-SQLite
+dispatcher/outcome cases passed. Exact tests cover all five terminal statuses,
+opaque payload text, identifiers, restart without sends/observations, CAS and
+transaction abort, cancellation, bounds and genuine v5 upgrade preservation.
+Required full gates and independent exact-commit review are still pending;
+these targeted checks alone do not establish PR readiness.
 
 ### Exact-commit independent review
 

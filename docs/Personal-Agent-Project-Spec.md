@@ -206,6 +206,18 @@ Approval record binds owner, action type, canonical arguments, resolved entity, 
 
 Persist a prepared action before external execution. Record action ID, canonical request hash and status: Prepared, AwaitingApproval, Executing, Succeeded, Failed, Unknown, Rejected or Expired. Duplicate dispatch of the same action ID returns the recorded outcome; unrelated later user requests are not deduplicated just because their arguments match.
 
+Persist each complete terminal application response once in the action journal,
+atomically with status and version, including result JSON, reason and response
+identifiers. Completion events reference the action ID without copying its
+payload; no extra tool conversation message or automatic model-context inclusion
+is required. Bound result JSON to 1,000,000 characters and reasons to 256
+characters, failing explicitly rather than truncating. Preserve old status-only
+records honestly; never execute again to reconstruct missing historical results.
+Outcomes share their action's retention and backup/restore protection, not
+conversation/event cleanup. Do not emit payloads into diagnostics or telemetry.
+This owner-approved M2-01 extension supersedes the earlier unchanged-T03
+schema/storage-contract scope restriction; see [ADR 0005](adr/0005-single-copy-tool-outcomes.md).
+
 A network timeout after sending a service call is Unknown, not safely failed. If the target state can be observed, reconcile it; observation may confirm current state but does not prove which request caused it. Do not blindly retry. Home Assistant and SQLite do not form one transaction; do not promise exactly-once physical execution. Apply verification windows and bounded polling. Report “command accepted, state unconfirmed” separately from verified success.
 
 ## 8. Home Assistant integration

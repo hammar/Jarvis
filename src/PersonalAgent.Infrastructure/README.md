@@ -26,6 +26,13 @@ Migration 005 adds the manual-title provenance flag without changing existing
 titles or UTC creation instants. The first accepted user message can set a
 normalized automatic display title atomically with the turn; owner rename is
 owner-scoped and durably prevents later automatic replacement.
+Migration 006 adds nullable `actions.outcome_json`. The complete terminal
+application response is stored once with its status/version in the same CAS
+transaction. Completion events reference the action ID; no payload is copied
+into events/messages. Old rows remain explicitly status-only. Result JSON is
+bounded to 1,000,000 characters and reasons to 256 without truncation. Outcomes
+share action retention and backups, not conversation/event cleanup; see
+[ADR 0005](../../docs/adr/0005-single-copy-tool-outcomes.md).
 If only the previous AppHost `PersonalAgent` default contains a database, the
 Web host continues using that location; if both defaults contain a database,
 configure `JARVIS_DATA_DIR` explicitly.
@@ -50,6 +57,9 @@ as a retention-settings update.
 Running, approval-waiting, and interrupted turn state is retained for recovery.
 It does not delete durable facts, jobs, approval/action journals, or
 `Unknown` outcomes.
+This includes stored terminal result bodies: trimming conversation history
+does not delete action/idempotency evidence. Their cumulative storage can grow;
+there is no new automatic action-pruning or payload-logging feature.
 
 `SqliteBackupRestoreService` exposes SQLite-consistent backup, restore, and
 migration-on-copy validation. Create backups to a new file; an existing backup

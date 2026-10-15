@@ -136,7 +136,8 @@ public sealed class ApprovalService : IApprovalService
     {
         try
         {
-            await actions.UpdateStatusAsync(action.Id, status, action.Version, nowUtc, cancellationToken);
+            await actions.UpdateStatusAsync(action.Id, status, action.Version, nowUtc, cancellationToken,
+                new(status, null, $"approval_{status.ToLowerInvariant()}", action.Id, new ApprovalId(action.Id.Value)));
         }
         catch (PersistenceConcurrencyException)
         {

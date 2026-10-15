@@ -1406,7 +1406,7 @@ public sealed class CopilotAgentEngine : IAgentEngine, IEngineStateMaintenance
             await WriteObservedEventAsync(
                 events,
                 active,
-                new ToolCompleted(turnId, clock.UtcNow, callId, result.Status),
+                new ToolCompleted(turnId, clock.UtcNow, callId, result.Status, result.ActionId),
                 cancellationToken);
             return JsonSerializer.Serialize(result);
         }

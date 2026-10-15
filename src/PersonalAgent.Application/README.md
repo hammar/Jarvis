@@ -90,7 +90,11 @@ retains only the remaining bounded attempt; an unchanged snapshot with possible
 late application must remain `Unknown`, not authorize a blind retry.
 `IToolDispatcher.ReleaseTurn` releases only ephemeral failure accounting once
 all turn callbacks have stopped; durable action identity remains authoritative.
-T03 supports status-only replay, not replay of the original result JSON/reason.
+The owner-authorized R6 extension persists complete terminal responses atomically
+with action status/version for exact duplicate/restart replay. Completion events
+reference the action without copying the result; conversation messages/context
+remain unchanged. Legacy rows without a response explicitly retain status-only
+replay. Result JSON is bounded to 1,000,000 characters and reasons to 256.
 
 `Context/LocalChatPrompt` supplies shared host chat instructions and formats
 the current task plainly after quoted, role-labelled history. Packet provenance

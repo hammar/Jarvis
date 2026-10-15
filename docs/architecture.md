@@ -176,13 +176,20 @@ Unsupported, it records `Unknown` without observing; an allowed policy-version
 change still permits observation. Active execution arbitration
 still applies, including when policy changes while a handler is running.
 
-**Status-only replay limitation:** the frozen T03 journal retains canonical
-intent, status and version, not result JSON or the original reason code.
-Duplicate/restarted dispatch therefore returns the durable status with
-`recorded_action_outcome` and no result payload. This is not full response
-replay. Adding durable terminal payloads requires a separately reviewed storage
-contract/schema change; do not overload the immutable canonical request or audit
-log as an unofficial result store.
+**Single-copy outcomes:** migration 006 adds the complete terminal response to
+the action journal, committed atomically with status and optimistic version.
+Duplicate/restarted dispatch returns that exact response, including result JSON,
+reason and identifiers, without executing or observing again. Completion events
+carry an optional action reference, not another result body; conversation
+messages and model-history selection are unchanged. Result JSON is bounded to
+1,000,000 characters and reasons to 256, without truncation. The owner explicitly
+authorized this storage-contract/schema extension for R6; see
+[ADR 0005](adr/0005-single-copy-tool-outcomes.md).
+Legacy entries without a response still return status/null JSON/
+`recorded_action_outcome`; missing historical data is not fabricated. Outcomes
+share the action journal's retention and backup protection, not conversation
+cleanup. Canonical requests remain immutable; audit/diagnostics are not result
+stores. Uncertain outcomes never authorize a blind resend.
 
 M1 registers `LocalOnlyModelRouter` and `ConversationContextBuilder` as
 Application services. The router returns typed Local, Clarify, or Unsupported

@@ -59,11 +59,13 @@ public sealed class ToolDispatcherTests
 
         var first = await fixture.Dispatcher.DispatchAsync(PorchRequest, CancellationToken.None);
         var duplicate = await fixture.Dispatcher.DispatchAsync(PorchRequest, CancellationToken.None);
+        var restarted = await fixture.CreateRestartedDispatcher().DispatchAsync(PorchRequest, CancellationToken.None);
         var later = await fixture.Dispatcher.DispatchAsync(PorchRequest with { CallId = "call-2" }, CancellationToken.None);
 
         Assert.Equal("Succeeded", first.Status);
         Assert.Equal("Succeeded", duplicate.Status);
-        Assert.Equal("recorded_action_outcome", duplicate.ReasonCode);
+        Assert.Equal(first, duplicate);
+        Assert.Equal(first, restarted);
         Assert.NotEqual(first.ActionId, later.ActionId);
         Assert.Equal("Succeeded", later.Status);
         Assert.Equal(2, fixture.ExecutionCount);
@@ -88,6 +90,63 @@ public sealed class ToolDispatcherTests
         Assert.Equal("Rejected", changed.Status);
         Assert.Equal("action_identity_reused", changed.ReasonCode);
         Assert.Equal(1, fixture.ExecutionCount);
+    }
+
+    [Theory]
+    [InlineData("Succeeded")]
+    [InlineData("Failed")]
+    [InlineData("Unknown")]
+    [InlineData("Rejected")]
+    [InlineData("Expired")]
+    [Trait("Category", "Integration")]
+    public async Task TerminalOutcomeReplaysExactlyFromSqliteWithoutExecutingOrObserving(string status)
+    {
+        using var fixture = await Fixture.CreateAsync(
+            status == "Expired" ? ToolRiskClass.ApprovalRequired : ToolRiskClass.LowRiskWrite,
+            execution: (_, _, _) => ValueTask.FromResult(new ToolExecutionOutcome(
+                status == "Failed" ? ToolExecutionStatus.Failed : ToolExecutionStatus.Completed,
+                """ {"value":"\u00e5","precision":1.00} """, "execution_detail")),
+            verification: (_, _, _, _) => ValueTask.FromResult(new ToolVerificationOutcome(
+                status == "Unknown" ? ToolVerificationStatus.Unknown : ToolVerificationStatus.Verified, "observation_detail")));
+        if (status == "Rejected")
+        {
+            fixture.Policy.Replace("denied", fixture.AllowedPermission with { EntityId = "light.other" });
+        }
+        var first = await fixture.Dispatcher.DispatchAsync(PorchRequest, CancellationToken.None);
+        if (status == "Expired")
+        {
+            fixture.Clock.Advance(TimeSpan.FromMinutes(5));
+            first = await fixture.Dispatcher.DispatchAsync(PorchRequest, CancellationToken.None);
+            Assert.NotNull(first.ApprovalId);
+        }
+        Assert.Equal(status, first.Status);
+        var persisted = (await fixture.Journal.GetAsync(first.ActionId!.Value, CancellationToken.None))!;
+        Assert.Equal(first, persisted.Outcome);
+        var sends = fixture.ExecutionCount;
+        var observations = fixture.VerificationCount;
+        fixture.SetExecution((_, _, _) => throw new InvalidOperationException("Replay must not execute."));
+        fixture.SetVerification((_, _, _, _) => throw new InvalidOperationException("Replay must not observe."));
+        var replay = await fixture.CreateRestartedDispatcher().DispatchAsync(PorchRequest, CancellationToken.None);
+        Assert.Equal(System.Text.Json.JsonSerializer.Serialize(first), System.Text.Json.JsonSerializer.Serialize(replay));
+        Assert.Equal(persisted, await fixture.Journal.GetAsync(persisted.Id, CancellationToken.None));
+        Assert.Equal(sends, fixture.ExecutionCount);
+        Assert.Equal(observations, fixture.VerificationCount);
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task LegacyTerminalOutcomeRemainsExplicitlyStatusOnlyWithoutReconstructingIt()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var first = await fixture.Dispatcher.DispatchAsync(PorchRequest, CancellationToken.None);
+        var current = (await fixture.Journal.GetAsync(first.ActionId!.Value, CancellationToken.None))!;
+        await fixture.Journal.UpdateStatusAsync(current.Id, current.Status, current.Version, fixture.Clock.UtcNow, CancellationToken.None);
+        var replay = await fixture.CreateRestartedDispatcher().DispatchAsync(PorchRequest, CancellationToken.None);
+        Assert.Equal("Succeeded", replay.Status);
+        Assert.Null(replay.ResultJson);
+        Assert.Equal("recorded_action_outcome", replay.ReasonCode);
+        Assert.Equal(1, fixture.ExecutionCount);
+        Assert.Equal(1, fixture.VerificationCount);
     }
 
     [Theory]
@@ -175,7 +234,7 @@ public sealed class ToolDispatcherTests
         {
             var replay = await restarted.DispatchAsync(PorchRequest, CancellationToken.None);
             Assert.Equal("Unknown", replay.Status);
-            Assert.Equal("recorded_action_outcome", replay.ReasonCode);
+            Assert.Equal(unknown, replay);
         }
         Assert.Equal(persisted, await fixture.Journal.GetAsync(persisted.Id, CancellationToken.None));
         Assert.Equal(observations, fixture.VerificationCount);
@@ -530,7 +589,7 @@ public sealed class ToolDispatcherTests
         releaseRead.SetResult();
         var result = await stale;
         Assert.Equal(winner.Status, result.Status);
-        Assert.Equal("recorded_action_outcome", result.ReasonCode);
+        Assert.Equal(winner, result);
         Assert.Equal(winner.Status, (await fixture.Journal.GetAsync(winner.ActionId!.Value, CancellationToken.None))!.Status);
         Assert.Equal(observations, fixture.VerificationCount);
         Assert.Equal(1, fixture.ExecutionCount);
@@ -975,7 +1034,7 @@ public sealed class ToolDispatcherTests
 
         Assert.Equal("Succeeded", recovered.Status);
         Assert.Equal("Succeeded", replay.Status);
-        Assert.Equal("recorded_action_outcome", replay.ReasonCode);
+        Assert.Equal(recovered, replay);
         Assert.Equal(1, fixture.ExecutionCount);
         Assert.Equal(2, fixture.VerificationCount);
         Assert.Equal("Succeeded", (await fixture.Journal.GetAsync(completed.ActionId.Value, CancellationToken.None))!.Status);
@@ -1262,13 +1321,14 @@ public sealed class ToolDispatcherTests
         }
 
         public async ValueTask<ActionJournalEntry> UpdateStatusAsync(
-            ActionId id, string status, long expectedVersion, DateTimeOffset updatedAtUtc, CancellationToken cancellationToken)
+            ActionId id, string status, long expectedVersion, DateTimeOffset updatedAtUtc, CancellationToken cancellationToken,
+            ToolDispatchResult? outcome = null)
         {
             if (status == "Executing" && beforeExecuting is not null)
             {
                 await beforeExecuting(cancellationToken);
             }
-            return await inner.UpdateStatusAsync(id, status, expectedVersion, updatedAtUtc, cancellationToken);
+            return await inner.UpdateStatusAsync(id, status, expectedVersion, updatedAtUtc, cancellationToken, outcome);
         }
     }
 

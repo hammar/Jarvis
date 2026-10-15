@@ -623,9 +623,9 @@ public sealed record ToolDispatchRequest(
 
 /// <summary>Reports the host's dispatch outcome, including uncertain physical results.</summary>
 /// <param name="Status">Stable outcome such as Succeeded, Rejected, Failed, or Unknown.</param>
-/// <param name="ResultJson">Optional typed tool result serialized for the engine on live execution.
-/// The T03 status-only journal cannot replay this payload after duplicate dispatch or restart.</param>
-/// <param name="ReasonCode">Stable reason code for denial or failure.</param>
+/// <param name="ResultJson">Optional typed tool result, up to 1,000,000 characters.
+/// Terminal responses are journaled for exact duplicate/restart replay; legacy entries may lack a response.</param>
+/// <param name="ReasonCode">Optional stable reason code for denial or failure, up to 256 characters.</param>
 /// <param name="ActionId">Durable host action identity, when the proposal was registered.</param>
 /// <param name="ApprovalId">Exact approval request identity when owner review is required.</param>
 /// <param name="ApprovalExpiresAtUtc">UTC expiry instant for the approval request.</param>
@@ -1048,6 +1048,7 @@ public interface IJobStore
 /// <param name="CreatedAtUtc">UTC instant the action was journaled.</param>
 /// <param name="UpdatedAtUtc">UTC instant of the latest journal change.</param>
 /// <param name="Version">Positive optimistic-concurrency version.</param>
+/// <param name="Outcome">Complete terminal response committed with status; null for progress or legacy status-only records.</param>
 public sealed record ActionJournalEntry(
     ActionId Id,
     string ActionType,
@@ -1056,7 +1057,8 @@ public sealed record ActionJournalEntry(
     string Status,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset UpdatedAtUtc,
-    long Version);
+    long Version,
+    ToolDispatchResult? Outcome = null);
 
 /// <summary>Persists action intent and observed outcomes before and after external side effects.</summary>
 public interface IActionJournalStore
@@ -1073,19 +1075,23 @@ public interface IActionJournalStore
     /// <returns>The entry, or <see langword="null"/> when absent.</returns>
     ValueTask<ActionJournalEntry?> GetAsync(ActionId id, CancellationToken cancellationToken);
 
-    /// <summary>Compare-and-swaps an action outcome without replaying the external operation.</summary>
+    /// <summary>Compare-and-swaps action status and its optional complete response atomically, without external execution.</summary>
     /// <param name="id">Action identifier.</param>
     /// <param name="status">Next journal status.</param>
     /// <param name="expectedVersion">Version previously read by the caller.</param>
     /// <param name="updatedAtUtc">UTC time at which the outcome was observed.</param>
     /// <param name="cancellationToken">Token that cancels the write before commit.</param>
+    /// <param name="outcome">Terminal response matching this action ID and status, or null for progress/legacy state.
+    /// A state change replaces the previous response; null never fabricates a historical result.
+    /// Result JSON and reason bounds are enforced without truncation.</param>
     /// <returns>The entry with its incremented version.</returns>
     ValueTask<ActionJournalEntry> UpdateStatusAsync(
         ActionId id,
         string status,
         long expectedVersion,
         DateTimeOffset updatedAtUtc,
-        CancellationToken cancellationToken);
+        CancellationToken cancellationToken,
+        ToolDispatchResult? outcome = null);
 }
 
 /// <summary>Describes the durable, exact-action binding of one approval request.</summary>
@@ -1324,11 +1330,14 @@ public sealed record ApprovalRequired(TurnId TurnId, DateTimeOffset OccurredAtUt
 /// <param name="OccurredAtUtc">UTC observation instant.</param>
 /// <param name="CallId">Engine-local identifier used for event correlation.</param>
 /// <param name="Outcome">Outcome code, including Unknown for ambiguous writes.</param>
+/// <param name="ActionId">Reference to the durable action outcome, or null for a proposal rejected before journaling.
+/// The result payload is retained only in the action journal, not copied into this event.</param>
 public sealed record ToolCompleted(
     TurnId TurnId,
     DateTimeOffset OccurredAtUtc,
     string CallId,
-    string Outcome) : AgentEvent(TurnId, OccurredAtUtc);
+    string Outcome,
+    ActionId? ActionId = null) : AgentEvent(TurnId, OccurredAtUtc);
 
 /// <summary>Signals successful completion of the application-owned turn.</summary>
 /// <param name="TurnId">Application-owned turn identifier.</param>

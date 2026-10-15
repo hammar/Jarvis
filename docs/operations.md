@@ -18,6 +18,18 @@ does not automatically retry an
 interrupted inference. On startup, nonterminal turns are persisted as
 interrupted and remain available for review; they are not replayed.
 
+Migration 006 preserves existing rows and adds complete terminal tool responses
+to the action journal. Newly recorded responses replay exactly; old status-only
+rows cannot regain missing payloads/reasons. Tool-completion events reference
+the action ID, without another result copy or extra conversation message.
+Outcomes are private local application data, included in SQLite backups, not
+diagnostic/telemetry output. They follow existing durable action retention:
+conversation/event cleanup does not purge them, and cumulative storage may grow.
+Result JSON is limited to 1,000,000 characters and reason codes to 256; invalid
+or oversized persistence input fails explicitly, never truncates. A failed
+post-send commit remains uncertain and must not be blindly retried. Restore
+requires a schema-compatible binary/backup pair; no automatic downgrade.
+
 Tool-free Local SDK copies live under private
 `conversation-<ConversationId>/local/{runtime,workspace}` roots beneath the
 configured runtime directory. They are sensitive working copies, not the

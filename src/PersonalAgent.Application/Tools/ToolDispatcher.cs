@@ -155,7 +155,7 @@ public sealed class ToolDispatcher : IToolDispatcher
 
             if (action.Status is "Prepared" or "AwaitingApproval")
             {
-                action = await TransitionAsync(action, "Rejected", cancellationToken);
+                action = await TransitionAsync(action, "Rejected", cancellationToken, "action_identity_reused");
             }
 
             return new("Rejected", null, "action_identity_reused", action.Id);
@@ -181,10 +181,10 @@ public sealed class ToolDispatcher : IToolDispatcher
         {
             if (action.Status == "Prepared")
             {
-                action = await TransitionAsync(action, "Rejected", cancellationToken);
+                action = await TransitionAsync(action, "Rejected", cancellationToken, authorization.ReasonCode);
             }
 
-            return new(action.Status, null, authorization.ReasonCode, action.Id);
+            return action.Outcome ?? new(action.Status, null, authorization.ReasonCode, action.Id);
         }
 
         if (effectiveRisk == ToolRiskClass.ApprovalRequired
@@ -203,8 +203,8 @@ public sealed class ToolDispatcher : IToolDispatcher
 
         if (effectiveRisk == ToolRiskClass.Unsupported)
         {
-            action = await TransitionAsync(action, "Rejected", cancellationToken);
-            return new(action.Status, null, "unsupported_action", action.Id);
+            action = await TransitionAsync(action, "Rejected", cancellationToken, "unsupported_action");
+            return Recorded(action);
         }
 
         return await ExecuteOnceAsync(
@@ -322,7 +322,8 @@ public sealed class ToolDispatcher : IToolDispatcher
                 ?? throw new InvalidOperationException("The action disappeared while resolving its approval.");
             if (currentAction.Status != approval.Status)
             {
-                action = await TransitionAsync(currentAction, approval.Status, cancellationToken);
+                action = await TransitionAsync(currentAction, approval.Status, cancellationToken,
+                    $"approval_{approval.Status.ToLowerInvariant()}", approvalId);
             }
             else
             {
@@ -330,7 +331,7 @@ public sealed class ToolDispatcher : IToolDispatcher
             }
 
             action = await ReconcileTerminalReplayAsync(action, request, draft, cancellationToken);
-            return new(action.Status, null, $"approval_{approval.Status.ToLowerInvariant()}", action.Id, approvalId);
+            return Recorded(action);
         }
 
         if (approval.Status == "Pending")
@@ -351,11 +352,10 @@ public sealed class ToolDispatcher : IToolDispatcher
 
         if (clock.UtcNow.ToUniversalTime() >= approval.ExpiresAtUtc)
         {
-            action = await TransitionAsync(action, "Expired", cancellationToken);
+            action = await TransitionAsync(action, "Expired", cancellationToken,
+                "approval_expired_before_execution", approvalId);
             action = await ReconcileTerminalReplayAsync(action, request, draft, cancellationToken);
-            return action.Status == "Expired"
-                ? new("Expired", null, "approval_expired_before_execution", action.Id, approvalId)
-                : Recorded(action);
+            return Recorded(action);
         }
 
         return await ExecuteOnceAsync(
@@ -393,14 +393,14 @@ public sealed class ToolDispatcher : IToolDispatcher
             {
                 if (budget.HasUncertainWrites)
                 {
-                    action = await TransitionAsync(action, "Rejected", cancellationToken);
-                    return new(action.Status, null, "equivalent_write_outcome_unknown", action.Id);
+                    action = await TransitionAsync(action, "Rejected", cancellationToken, "equivalent_write_outcome_unknown");
+                    return Recorded(action);
                 }
 
                 if (budget.FailedActions.Count >= 2)
                 {
-                    action = await TransitionAsync(action, "Rejected", cancellationToken);
-                    return new(action.Status, null, "equivalent_failure_limit", action.Id);
+                    action = await TransitionAsync(action, "Rejected", cancellationToken, "equivalent_failure_limit");
+                    return Recorded(action);
                 }
 
                 ToolDispatchResult result;
@@ -471,19 +471,13 @@ public sealed class ToolDispatcher : IToolDispatcher
         var executionEntryVersion = action.Version;
         if (cancellationToken.IsCancellationRequested)
         {
-            var cancelledBeforeSend = await journal.UpdateStatusAsync(
-                action.Id,
-                "Failed",
-                executionEntryVersion,
-                clock.UtcNow.ToUniversalTime(),
-                CancellationToken.None);
-            return new("Failed", null, "cancelled_before_send", cancelledBeforeSend.Id);
+            return await PersistOutcomeAsync(action, new("Failed", null, "cancelled_before_send", action.Id));
         }
 
         if (approvalExpiresAtUtc is { } expiry && clock.UtcNow.ToUniversalTime() >= expiry)
         {
-            var expired = await TransitionAsync(action, "Expired", CancellationToken.None);
-            return new(expired.Status, null, "approval_expired_before_execution", expired.Id);
+            var expired = await TransitionAsync(action, "Expired", CancellationToken.None, "approval_expired_before_execution");
+            return Recorded(expired);
         }
 
         var authorization = policy.Evaluate(request.ToolName, draft, registration.RiskClass);
@@ -491,14 +485,14 @@ public sealed class ToolDispatcher : IToolDispatcher
             || authorization.EffectiveRisk == ToolRiskClass.Unsupported
             || authorization.PolicyVersion != policyVersion)
         {
-            var rejected = await TransitionAsync(action, "Rejected", CancellationToken.None);
-            return new(rejected.Status, null, "policy_changed_before_execution", rejected.Id);
+            var rejected = await TransitionAsync(action, "Rejected", CancellationToken.None, "policy_changed_before_execution");
+            return Recorded(rejected);
         }
 
         if (!budget.TryAdmitExecution(action.Id, mayWrite))
         {
-            var rejected = await TransitionAsync(action, "Rejected", CancellationToken.None);
-            return new(rejected.Status, null, "equivalent_write_outcome_unknown", rejected.Id);
+            var rejected = await TransitionAsync(action, "Rejected", CancellationToken.None, "equivalent_write_outcome_unknown");
+            return Recorded(rejected);
         }
         ToolExecutionOutcome execution;
         try
@@ -507,13 +501,7 @@ public sealed class ToolDispatcher : IToolDispatcher
         }
         catch (OperationCanceledException)
         {
-            var unknown = await journal.UpdateStatusAsync(
-                action.Id,
-                "Unknown",
-                executionEntryVersion,
-                clock.UtcNow.ToUniversalTime(),
-                CancellationToken.None);
-            return new("Unknown", null, "execution_cancelled_after_dispatch", unknown.Id);
+            return await CompleteUnknownAsync(action, null, "execution_cancelled_after_dispatch");
         }
         catch (Exception executionException)
         {
@@ -524,7 +512,8 @@ public sealed class ToolDispatcher : IToolDispatcher
                     "Unknown",
                     executionEntryVersion,
                     clock.UtcNow.ToUniversalTime(),
-                    CancellationToken.None);
+                    CancellationToken.None,
+                    new("Unknown", null, "tool_execution_exception", action.Id));
             }
             catch (Exception journalException)
             {
@@ -548,13 +537,8 @@ public sealed class ToolDispatcher : IToolDispatcher
 
         if (execution.Status == ToolExecutionStatus.Failed)
         {
-            var failed = await journal.UpdateStatusAsync(
-                action.Id,
-                "Failed",
-                executionEntryVersion,
-                clock.UtcNow.ToUniversalTime(),
-                CancellationToken.None);
-            return new("Failed", execution.ResultJson, execution.ReasonCode ?? "tool_execution_failed", failed.Id);
+            return await PersistOutcomeAsync(action,
+                new("Failed", execution.ResultJson, execution.ReasonCode ?? "tool_execution_failed", action.Id));
         }
 
         var observationAuthorization = policy.Evaluate(request.ToolName, draft, registration.RiskClass);
@@ -588,7 +572,8 @@ public sealed class ToolDispatcher : IToolDispatcher
                         "Unknown",
                         executionEntryVersion,
                         clock.UtcNow.ToUniversalTime(),
-                        CancellationToken.None);
+                        CancellationToken.None,
+                        new("Unknown", execution.ResultJson, "tool_verification_exception", action.Id));
                 }
                 catch (Exception journalException)
                 {
@@ -623,13 +608,7 @@ public sealed class ToolDispatcher : IToolDispatcher
             "Failed" => execution.ReasonCode ?? "action_not_applied",
             _ => verification.ReasonCode ?? execution.ReasonCode ?? "physical_outcome_uncertain"
         };
-        var completed = await journal.UpdateStatusAsync(
-            action.Id,
-            finalStatus,
-            executionEntryVersion,
-            clock.UtcNow.ToUniversalTime(),
-            CancellationToken.None);
-        return new(finalStatus, execution.ResultJson, reasonCode, completed.Id);
+        return await PersistOutcomeAsync(action, new(finalStatus, execution.ResultJson, reasonCode, action.Id));
     }
 
     private async ValueTask<ToolDispatchResult> ReconcileInterruptedExecutionAsync(
@@ -724,7 +703,8 @@ public sealed class ToolDispatcher : IToolDispatcher
                         "Unknown",
                         action.Version,
                         clock.UtcNow.ToUniversalTime(),
-                        CancellationToken.None);
+                        CancellationToken.None,
+                        new("Unknown", null, "interrupted_execution_verification_failed", action.Id));
                 }
                 catch (Exception journalException)
                 {
@@ -767,7 +747,8 @@ public sealed class ToolDispatcher : IToolDispatcher
                 finalStatus,
                 action.Version,
                 clock.UtcNow.ToUniversalTime(),
-                CancellationToken.None);
+                CancellationToken.None,
+                new(finalStatus, null, reasonCode, action.Id));
         }
         catch (PersistenceConcurrencyException)
         {
@@ -776,7 +757,7 @@ public sealed class ToolDispatcher : IToolDispatcher
             return Recorded(completed);
         }
 
-        return new(finalStatus, null, reasonCode, completed.Id);
+        return Recorded(completed);
     }
 
     private async ValueTask<ActionJournalEntry> ReconcileTerminalReplayAsync(
@@ -863,18 +844,24 @@ public sealed class ToolDispatcher : IToolDispatcher
         }
     }
 
-    private async ValueTask<ToolDispatchResult> CompleteUnknownAsync(
+    private ValueTask<ToolDispatchResult> CompleteUnknownAsync(
         ActionJournalEntry action,
         string? resultJson,
-        string reasonCode)
+        string reasonCode) =>
+        PersistOutcomeAsync(action, new("Unknown", resultJson, reasonCode, action.Id));
+
+    private async ValueTask<ToolDispatchResult> PersistOutcomeAsync(
+        ActionJournalEntry action,
+        ToolDispatchResult outcome)
     {
-        var unknown = await journal.UpdateStatusAsync(
+        var completed = await journal.UpdateStatusAsync(
             action.Id,
-            "Unknown",
+            outcome.Status,
             action.Version,
             clock.UtcNow.ToUniversalTime(),
-            CancellationToken.None);
-        return new("Unknown", resultJson, reasonCode, unknown.Id);
+            CancellationToken.None,
+            outcome);
+        return Recorded(completed);
     }
 
     private async ValueTask JournalUnknownBeforeThrowAsync(
@@ -889,7 +876,8 @@ public sealed class ToolDispatcher : IToolDispatcher
                 "Unknown",
                 expectedVersion,
                 clock.UtcNow.ToUniversalTime(),
-                CancellationToken.None);
+                CancellationToken.None,
+                new("Unknown", null, "invalid_tool_outcome", actionId));
         }
         catch (Exception exception)
         {
@@ -900,7 +888,9 @@ public sealed class ToolDispatcher : IToolDispatcher
     private async ValueTask<ActionJournalEntry> TransitionAsync(
         ActionJournalEntry action,
         string status,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? reasonCode = null,
+        ApprovalId? approvalId = null)
     {
         try
         {
@@ -909,7 +899,8 @@ public sealed class ToolDispatcher : IToolDispatcher
                 status,
                 action.Version,
                 clock.UtcNow.ToUniversalTime(),
-                cancellationToken);
+                cancellationToken,
+                IsTerminal(status) ? new(status, null, reasonCode, action.Id, approvalId) : null);
         }
         catch (PersistenceConcurrencyException)
         {
@@ -1065,7 +1056,7 @@ public sealed class ToolDispatcher : IToolDispatcher
         status is "Succeeded" or "Failed" or "Unknown" or "Rejected" or "Expired";
 
     private static ToolDispatchResult Recorded(ActionJournalEntry action) =>
-        new(action.Status, null, "recorded_action_outcome", action.Id);
+        action.Outcome ?? new(action.Status, null, "recorded_action_outcome", action.Id);
 
     private static ToolDispatchResult Rejected(string reasonCode) =>
         new("Rejected", null, reasonCode);

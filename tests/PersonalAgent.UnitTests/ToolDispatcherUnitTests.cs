@@ -271,7 +271,7 @@ public sealed class ToolDispatcherUnitTests
             releaseRead.SetResult();
             var duplicate = await stale.WaitAsync(TimeSpan.FromSeconds(2));
             Assert.Equal(completed ? "Succeeded" : "Executing", duplicate.Status);
-            Assert.Equal("recorded_action_outcome", duplicate.ReasonCode);
+            Assert.Equal(completed ? null : "recorded_action_outcome", duplicate.ReasonCode);
             Assert.Equal(pending.ActionId, duplicate.ActionId);
             Assert.Equal(duplicate.Status, fixture.Journal.Entries.Single().Status);
             Assert.Equal(1, fixture.ExecutionCount);
@@ -411,7 +411,7 @@ public sealed class ToolDispatcherUnitTests
         releaseRead.SetResult();
         var replay = await duplicate.WaitAsync(TimeSpan.FromSeconds(2));
         Assert.Equal(throws ? "Unknown" : "Failed", replay.Status);
-        Assert.Equal("recorded_action_outcome", replay.ReasonCode);
+        Assert.Equal(throws ? "tool_execution_exception" : "known_failure", replay.ReasonCode);
         Assert.Equal(1, fixture.ExecutionCount);
 
         var second = fixture.Dispatcher.DispatchAsync(
@@ -867,7 +867,7 @@ public sealed class ToolDispatcherUnitTests
         }
         var replay = await restarted.DispatchAsync(Request, CancellationToken.None);
         Assert.Equal(winner.Status, replay.Status);
-        Assert.Equal("recorded_action_outcome", replay.ReasonCode);
+        Assert.Equal(winner, replay);
         Assert.Equal(sends, fixture.ExecutionCount);
         Assert.Equal(observations, fixture.VerificationCount);
         fixture.Execution = (_, _, _) =>
@@ -1162,7 +1162,7 @@ public sealed class ToolDispatcherUnitTests
         var recorded = await stale;
         Assert.Equal(winner.Status, recorded.Status);
         Assert.Equal(winner.ActionId, recorded.ActionId);
-        Assert.Equal("recorded_action_outcome", recorded.ReasonCode);
+        Assert.Equal(winner, recorded);
         Assert.Equal(winner.Status, fixture.Journal.Entries.Single().Status);
         Assert.Equal(observations, fixture.VerificationCount);
         Assert.Equal(1, fixture.ExecutionCount);
@@ -1493,7 +1493,7 @@ public sealed class ToolDispatcherUnitTests
         {
             var replay = await restarted.DispatchAsync(Request, CancellationToken.None);
             Assert.Equal("Unknown", replay.Status);
-            Assert.Equal("recorded_action_outcome", replay.ReasonCode);
+            Assert.Equal(unknown, replay);
         }
         Assert.Equal(persisted, await fixture.Journal.GetAsync(persisted.Id, CancellationToken.None));
         Assert.Equal(observations, fixture.VerificationCount);
@@ -1857,7 +1857,7 @@ public sealed class ToolDispatcherUnitTests
 
         Assert.Equal("Succeeded", first.Status);
         Assert.Equal("Succeeded", replay.Status);
-        Assert.Equal("recorded_action_outcome", replay.ReasonCode);
+        Assert.Equal(first, replay);
         Assert.Equal(1, fixture.ExecutionCount);
         Assert.Equal(1, fixture.VerificationCount);
         Assert.Equal("Succeeded", fixture.Journal.Entries.Single().Status);
@@ -2081,7 +2081,7 @@ public sealed class ToolDispatcherUnitTests
         completed.Policy.Replace("policy-v2");
         var replay = await completed.Dispatcher.DispatchAsync(Request, CancellationToken.None);
         Assert.Equal("Succeeded", first.Status);
-        Assert.Equal("recorded_action_outcome", replay.ReasonCode);
+        Assert.Equal(first, replay);
         Assert.Equal(1, completed.ExecutionCount);
     }
 
@@ -2645,7 +2645,8 @@ public sealed class ToolDispatcherUnitTests
             string status,
             long expectedVersion,
             DateTimeOffset updatedAtUtc,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            ToolDispatchResult? outcome = null)
         {
             cancellationToken.ThrowIfCancellationRequested();
             if (status == "Executing" && BeforeExecutingUpdate is { } beforeExecuting)
@@ -2692,7 +2693,13 @@ public sealed class ToolDispatcherUnitTests
                     "AwaitingApproval" when ReturnStatusAfterAwaitingApproval is not null => ReturnStatusAfterAwaitingApproval,
                     _ => status
                 };
-                var updated = entry with { Status = returnedStatus!, UpdatedAtUtc = updatedAtUtc, Version = entry.Version + 1 };
+                var updated = entry with
+                {
+                    Status = returnedStatus!,
+                    UpdatedAtUtc = updatedAtUtc,
+                    Version = entry.Version + 1,
+                    Outcome = outcome
+                };
                 entries[id] = updated;
                 StatusUpdated?.Invoke(status);
                 return updated;
