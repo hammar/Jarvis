@@ -2,6 +2,34 @@ ALTER TABLE memory_facts ADD COLUMN source_type TEXT NOT NULL DEFAULT 'Legacy';
 ALTER TABLE memory_facts ADD COLUMN source_message_id TEXT REFERENCES messages(message_id) ON DELETE SET NULL;
 ALTER TABLE memory_facts ADD COLUMN distinguishing_context TEXT;
 
+DROP TRIGGER memory_facts_fts_insert;
+DROP TRIGGER memory_facts_fts_delete;
+DROP TRIGGER memory_facts_fts_update;
+DROP TABLE memory_facts_fts;
+CREATE VIRTUAL TABLE memory_facts_fts USING fts5(
+    subject,
+    fact_key,
+    value,
+    distinguishing_context,
+    content='memory_facts',
+    content_rowid='rowid'
+);
+CREATE TRIGGER memory_facts_fts_insert AFTER INSERT ON memory_facts BEGIN
+    INSERT INTO memory_facts_fts(rowid, subject, fact_key, value, distinguishing_context)
+    VALUES (new.rowid, new.subject, new.fact_key, new.value, new.distinguishing_context);
+END;
+CREATE TRIGGER memory_facts_fts_delete AFTER DELETE ON memory_facts BEGIN
+    INSERT INTO memory_facts_fts(memory_facts_fts, rowid, subject, fact_key, value, distinguishing_context)
+    VALUES ('delete', old.rowid, old.subject, old.fact_key, old.value, old.distinguishing_context);
+END;
+CREATE TRIGGER memory_facts_fts_update AFTER UPDATE OF subject, fact_key, value, distinguishing_context ON memory_facts BEGIN
+    INSERT INTO memory_facts_fts(memory_facts_fts, rowid, subject, fact_key, value, distinguishing_context)
+    VALUES ('delete', old.rowid, old.subject, old.fact_key, old.value, old.distinguishing_context);
+    INSERT INTO memory_facts_fts(rowid, subject, fact_key, value, distinguishing_context)
+    VALUES (new.rowid, new.subject, new.fact_key, new.value, new.distinguishing_context);
+END;
+INSERT INTO memory_facts_fts(memory_facts_fts) VALUES ('rebuild');
+
 CREATE TABLE memory_commits (
     action_id TEXT NOT NULL PRIMARY KEY REFERENCES actions(id) ON DELETE RESTRICT,
     owner_id TEXT NOT NULL,

@@ -53,7 +53,7 @@ Implementation is committed and independently reviewed.
 Native macOS evidence after the review fix:
 `tools/validate.sh build` passes Release formatting/analyzers with zero
 warnings/errors; `architecture` passes 6 tests; `docs` passes link checks;
-`unit` passes 324 tests; `integration` passes 430 tests; `coverage` passes all
+`unit` passes 324 tests; `integration` passes 431 tests; `coverage` passes all
 existing and new critical thresholds with 99.8% changed executable lines
 (631/632). Coverage also runs the negative gate fixtures.
 
@@ -64,11 +64,11 @@ Both runtime memory retrieval/denial and pre-provider collision checks pass.
 This is protocol compatibility mapping, not a dependency upgrade or an
 inferred owner acceptance of a dependency defect.
 
-After the R6 host-completion fix, `sdk-contracts` passed the standalone actual-runtime
+After the R7 group-boundary fix, `sdk-contracts` passed the standalone actual-runtime
 harness and 57 adapter contracts; `aspire-e2e` passes 8 scenarios;
 `browser-e2e` passes 29 scenarios and verifies that its deliberately failing
 browser probe fails; explicit `gate-self-test` passed. These runtime/E2E gates
-are rerun after R7; their final evidence is recorded on PR #47.
+are rerun after R8; their final evidence is recorded on PR #47.
 
 Linux CI results and exact run links are recorded in PR #47 and its required
 checks. The first run passed build, architecture, unit, integration, coverage,
@@ -98,6 +98,7 @@ matrix or establish live-model behavior.
 | M2-03-R5 | Medium | Invalidation during preparation caused terminal reconciliation to parse a redacted envelope. | Fixed: terminal reconciliation returns invalidated entries before envelope parsing. Deterministic deletion-between-journal-reads regression verifies a content-free invalidation response. |
 | M2-03-R6 | Medium | Call-generated action IDs in canonical commands gave equivalent memory failures separate retry budgets. | Fixed in the subsequent revision: a host-owned semantic failure key omits generated IDs, retains owner/source/content/reviewed versions and sorts conflict references. Same-turn create/update regressions reject the third equivalent call, count exact replay once, separate different content and verify turn-release reset. Exact journal/approval/receipt identities are unchanged. |
 | M2-03-R7 | Medium | Previously missed (summary-only): retain_both or moving an update into a 100-fact group created an unreviewable 101st active fact. | Fixed in the subsequent revision: reject growth when 100 reviewed siblings already exist, but allow in-place updates with 99 siblings and supersession of all 100. Real-SQLite boundary regression verifies both rejected operations preserve the full reviewable group/other fact, in-place version advancement and successful supersession. |
+| M2-03-R8 | Medium | Previously missed (summary-only): distinguishing context was absent from FTS, preventing searches by retained-fact qualifier. | Fixed by extending unreleased migration 007 to index the qualifier, replace all synchronization triggers and rebuild existing entries. Real-SQLite regression verifies qualifier/combined searches, qualifier-only update and deletion; existing v6 upgrade test verifies legacy index rebuilding. |
 
 R2-R5 were reported by automated PR review on `c9511ec` and repeated on
 `80a382f`; their thread roots are respectively 4285248818, 4285248922,
@@ -138,6 +139,12 @@ R7 is retained from the automated review summary on
 “0 open findings” count and lack of an inline thread. All seven findings need
 explicit dispositions; neither omission from an inline list nor green CI is
 evidence of resolution.
+
+R8 is retained from summary-only review 5537021024 on `bf4084b`, again despite
+“0 open findings” and no inline thread. Migration 007 is extended within this
+unmerged slice; no released migration is rewritten. Existing facts and their
+FTS entries are rebuilt transactionally, without changing the schema version
+or weakening owner/privacy filters.
 
 Independent follow-up review of
 `6e1ea399b3721b49900973e576000d55b09e5ee3` against the original reviewed

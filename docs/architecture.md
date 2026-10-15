@@ -109,6 +109,9 @@ receipts, tombstones and derived-action dependencies. Conversation retention
 can remove a source message without removing the fact; source availability
 then becomes false. FTS lookup filters ownership, active status and permitted
 local classifications before limiting results.
+FTS indexes subject, key, value and distinguishing context. Migration 007
+rebuilds legacy entries and updates insert/update/delete synchronization,
+including qualifier-only changes.
 
 Modification/deletion invalidates dependent canonical drafts and journal
 results. Publication registers/checks result dependencies transactionally,

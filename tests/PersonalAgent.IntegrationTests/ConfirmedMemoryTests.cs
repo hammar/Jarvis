@@ -146,6 +146,33 @@ public sealed class ConfirmedMemoryTests
     }
 
     [Fact]
+    public async Task QualifiersAreSearchableAndTheirOnlyUpdatesAndDeletionSynchronizeFts()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var first = await fixture.CreateFactAsync("red");
+        Assert.Equal("Succeeded", (await fixture.ApproveAsync(await fixture.RequestAsync(new("retain_both",
+            Subject: "bathroom", Key: "paint", Value: "red",
+            Conflicts: [new(first.Id.Value, first.Version)], DistinguishingContext: "ceiling")))).Status);
+        var retained = Assert.Single(await fixture.Memory.SearchAsync("owner", "ceiling", 10, default));
+        Assert.Equal(retained.Id, Assert.Single(await fixture.Memory.SearchAsync("owner", "paint ceiling", 10, default)).Id);
+        Assert.Equal("Succeeded", (await fixture.ApproveAsync(await fixture.RequestAsync(new("update",
+            retained.Id.Value, retained.Version, retained.Subject, retained.Key, retained.Value,
+            [new(first.Id.Value, first.Version)], "vaulted")))).Status);
+        Assert.Empty(await fixture.Memory.SearchAsync("owner", "ceiling", 10, default));
+        var updated = Assert.Single(await fixture.Memory.SearchAsync("owner", "paint vaulted", 10, default));
+        Assert.Equal(retained.Id, updated.Id);
+        Assert.Equal(2, updated.Version);
+        Assert.Equal("Succeeded", (await fixture.ApproveAsync(await fixture.RequestAsync(
+            new("delete", updated.Id.Value, updated.Version)))).Status);
+        Assert.Empty(await fixture.Memory.SearchAsync("owner", "vaulted", 10, default));
+        await using var connection = await fixture.Database.OpenConnectionAsync();
+        await using var query = connection.CreateCommand();
+        query.CommandText = "SELECT COUNT(*) FROM memory_facts_fts WHERE memory_facts_fts MATCH 'vaulted';";
+        Assert.Equal(0L, (long)(await query.ExecuteScalarAsync())!);
+        Assert.NotNull(await fixture.Memory.GetAsync("owner", first.Id, default));
+    }
+
+    [Fact]
     public async Task EscapedSearchEvidenceIsSizeBoundedWithMatchingCitationsAndExplicitTruncation()
     {
         using var fixture = await Fixture.CreateAsync();

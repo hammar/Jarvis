@@ -98,6 +98,8 @@ equivalent failed proposal is rejected, while exact replay is counted once,
 different content has a separate budget and turn release resets that budget.
 The 100-fact boundary test rejects retain-both/new-group update growth to 101,
 allows in-place updates with 99 siblings and allows superseding all 100 facts.
+Qualifier searches cover creation, combined subject/key terms, qualifier-only
+updates and deletion against the rebuilt FTS index and synchronization triggers.
 
 `ActualRuntimeRetrievesMaliciousMemoryAsEvidenceButCannotAcquireShellAuthority`
 uses the actual pinned runtime and a controlled OpenAI-compatible endpoint,
