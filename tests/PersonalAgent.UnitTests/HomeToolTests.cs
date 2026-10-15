@@ -57,6 +57,8 @@ public sealed class HomeToolTests
     [InlineData("light.*")]
     [InlineData("light.lamp/../../lock.front")]
     [InlineData("light.Lamp")]
+    [InlineData("light.lamp\n")]
+    [InlineData("light.lamp\r\n")]
     [Trait("Category", "Unit")]
     public void UnsupportedIdsAndPatternsAreRejected(string id) =>
         Assert.Throws<ArgumentException>(() => new HomeEntityCatalog([Lamp with { EntityId = id }], new()));
@@ -163,11 +165,12 @@ public sealed class HomeToolTests
         ], new(true, true));
         var journal = new Journal();
         var approvals = new ApprovalService(new ApprovalStore(), journal, clock);
-        var registry = new ToolRegistry(HomeToolRegistrations.Create(catalog, fake));
+        var registry = new ToolRegistry(HomeToolRegistrations.Create(catalog, fake, catalog.ConfigurationVersion));
         var dispatcher = new ToolDispatcher(registry, new ToolAllowlistPolicy(catalog.ConfigurationVersion, catalog.Permissions()), journal, approvals, clock, TimeSpan.FromSeconds(5));
-        Assert.Throws<ArgumentNullException>(() => HomeToolRegistrations.Create(null!, fake));
-        Assert.Throws<ArgumentNullException>(() => HomeToolRegistrations.Create(catalog, null!));
-        Assert.DoesNotContain(HomeToolRegistrations.Create(new([Lamp], new()), fake), r => r.Definition.Name == "home.set_temperature");
+        Assert.Throws<ArgumentNullException>(() => HomeToolRegistrations.Create(null!, fake, catalog.ConfigurationVersion));
+        Assert.Throws<ArgumentNullException>(() => HomeToolRegistrations.Create(catalog, null!, catalog.ConfigurationVersion));
+        Assert.Throws<ArgumentException>(() => HomeToolRegistrations.Create(catalog, fake, ""));
+        Assert.DoesNotContain(HomeToolRegistrations.Create(new([Lamp], new()), fake, catalog.ConfigurationVersion), r => r.Definition.Name == "home.set_temperature");
         async Task<ToolDispatchResult> Dispatch(string tool, string args, string? text = null) =>
             await dispatcher.DispatchAsync(new(new TurnId(Guid.NewGuid()), Guid.NewGuid().ToString(), tool, args, "owner", text), default);
         var list = await Dispatch("home.list_entities", "{}");

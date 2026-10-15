@@ -132,7 +132,7 @@ else if (profile is "Local" or "Hybrid"
 }
 builder.Services.AddSingleton(services => new ToolRegistry(homeCatalog is null
     ? Array.Empty<IToolRegistration>()
-    : HomeToolRegistrations.Create(homeCatalog, services.GetRequiredService<IHomeAssistantClient>())));
+    : HomeToolRegistrations.Create(homeCatalog, services.GetRequiredService<IHomeAssistantClient>(), homePolicyVersion!)));
 builder.Services.AddSingleton<IToolRegistry>(services => services.GetRequiredService<ToolRegistry>());
 builder.Services.AddSingleton<IToolAuthorizationPolicy>(
     new ToolAllowlistPolicy(homePolicyVersion ?? "home-disabled",

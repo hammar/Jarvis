@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Net.Sockets;
 using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -57,6 +58,70 @@ public sealed class HomeAssistantTests
             Assert.DoesNotContain("synthetic-home-token", error.ToString(), StringComparison.Ordinal);
         }
         Assert.Equal(requests, fixture.Endpoint.ReadCount);
+    }
+
+    [Theory]
+    [InlineData(HttpRequestError.ConnectionError, true)]
+    [InlineData(HttpRequestError.ResponseEnded, true)]
+    [InlineData(HttpRequestError.Unknown, false)]
+    [InlineData(HttpRequestError.NameResolutionError, false)]
+    [InlineData(HttpRequestError.SecureConnectionError, false)]
+    [InlineData(HttpRequestError.HttpProtocolError, false)]
+    [InlineData(HttpRequestError.ExtendedConnectNotSupported, false)]
+    [InlineData(HttpRequestError.VersionNegotiationError, false)]
+    [InlineData(HttpRequestError.UserAuthenticationError, false)]
+    [InlineData(HttpRequestError.ProxyTunnelError, false)]
+    [InlineData(HttpRequestError.InvalidResponse, false)]
+    [InlineData(HttpRequestError.ConfigurationLimitExceeded, false)]
+    [Trait("Category", "Integration")]
+    public async Task OnlyExplicitTransientTransportErrorsAdmitOneRetry(HttpRequestError error, bool retry)
+    {
+        await using var fixture = await Fixture.StartAsync();
+        using var handler = new TransportFailure(error);
+        using var http = new HttpClient(handler) { Timeout = Timeout.InfiniteTimeSpan };
+        var client = new HomeAssistantRestClient(http, fixture.Http.BaseAddress!, new("synthetic-reference"),
+            new Secret(), HomeAssistantConfiguration.SimulatorCatalog(), fixture.Clock);
+        if (retry)
+        {
+            Assert.Equal("21.5", (await client.GetStateAsync("sensor.temperature", default)).State);
+        }
+        else
+        {
+            var failure = await Assert.ThrowsAsync<HomeAssistantException>(
+                () => client.GetStateAsync("sensor.temperature", default).AsTask());
+            Assert.Equal(HomeAssistantFailure.Transport, failure.Failure);
+            Assert.DoesNotContain("synthetic-home-token", failure.ToString(), StringComparison.Ordinal);
+        }
+        Assert.Equal(retry ? 2 : 1, handler.Attempts);
+        Assert.Equal(retry ? 1 : 0, fixture.Endpoint.ReadCount);
+    }
+
+    [Theory]
+    [InlineData(SocketError.ConnectionReset, true)]
+    [InlineData(SocketError.ConnectionAborted, true)]
+    [InlineData(SocketError.NetworkReset, true)]
+    [InlineData(SocketError.TimedOut, true)]
+    [InlineData(SocketError.AccessDenied, false)]
+    [InlineData(SocketError.InvalidArgument, false)]
+    [Trait("Category", "Integration")]
+    public async Task UnknownTransportFailuresRetryOnlyExplicitDroppedConnectionCauses(SocketError error, bool retry)
+    {
+        await using var fixture = await Fixture.StartAsync();
+        using var handler = new TransportFailure(HttpRequestError.Unknown, new IOException("synthetic", new SocketException((int)error)));
+        using var http = new HttpClient(handler) { Timeout = Timeout.InfiniteTimeSpan };
+        var client = new HomeAssistantRestClient(http, fixture.Http.BaseAddress!, new("synthetic-reference"),
+            new Secret(), HomeAssistantConfiguration.SimulatorCatalog(), fixture.Clock);
+        if (retry)
+        {
+            Assert.Equal("21.5", (await client.GetStateAsync("sensor.temperature", default)).State);
+        }
+        else
+        {
+            Assert.Equal(HomeAssistantFailure.Transport,
+                (await Assert.ThrowsAsync<HomeAssistantException>(() => client.GetStateAsync("sensor.temperature", default).AsTask())).Failure);
+        }
+        Assert.Equal(retry ? 2 : 1, handler.Attempts);
+        Assert.Equal(retry ? 1 : 0, fixture.Endpoint.ReadCount);
     }
 
     [Fact]
@@ -328,6 +393,52 @@ public sealed class HomeAssistantTests
         Assert.Equal(1, fixture.Endpoint.WriteCount);
     }
 
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    [Trait("Category", "Integration")]
+    public async Task InterruptedWriteCannotObserveADifferentInstallationOrCredentialReference(bool thermostat, bool changeReference)
+    {
+        var options = new HomeToolOptions(ThermostatEnabled: true, AutomaticLightsEnabled: true);
+        await using var first = await Fixture.StartAsync(options);
+        await using var second = await Fixture.StartAsync(options);
+        var request = thermostat
+            ? first.Request("home.set_temperature", """{"entity":"thermostat","temperature":22}""")
+            : first.Request("home.set_light", """{"entity":"lamp","on":true}""", "turn on lamp");
+        if (thermostat)
+        {
+            var pending = await first.Dispatcher.DispatchAsync(request, default);
+            var approval = await first.Approvals.GetAsync(pending.ApprovalId!.Value, default);
+            await first.Approvals.ResolveAsync(approval!.Id, "owner", approval.ExpectedVersion, true, default);
+        }
+        var completed = await first.Dispatcher.DispatchAsync(request, default);
+        Assert.Equal("Succeeded", completed.Status);
+        var entry = await first.Journal.GetAsync(completed.ActionId!.Value, default);
+        await first.Journal.UpdateStatusAsync(entry!.Id, "Executing", entry.Version, first.Clock.UtcNow, default);
+        var matching = thermostat
+            ? new HomeAssistantEntity("climate.simulator", "heat", first.Clock.UtcNow, true) { TargetTemperature = 22 }
+            : new HomeAssistantEntity("light.simulator_lamp", "on", first.Clock.UtcNow, true);
+        first.Endpoint.SetState(matching);
+        second.Endpoint.SetState(matching);
+        var reference = new SecretReference(changeReference ? "changed-reference" : "synthetic-reference");
+        var endpoint = changeReference ? first.Http.BaseAddress! : second.Http.BaseAddress!;
+        var catalog = HomeAssistantConfiguration.SimulatorCatalog(options);
+        var changedClient = new HomeAssistantRestClient(first.Http, endpoint, reference, new Secret(), catalog, first.Clock);
+        var restarted = first.CreateDispatcher(changedClient, HomeAssistantConfiguration.PolicyVersion(catalog, endpoint, reference));
+        var readsBefore = first.Endpoint.ReadCount;
+        var recovered = await restarted.DispatchAsync(request, default);
+        Assert.Equal("Unknown", recovered.Status);
+        Assert.Equal("interrupted_execution_observation_not_permitted", recovered.ReasonCode);
+        Assert.Equal(recovered, await restarted.DispatchAsync(request, default));
+        Assert.Equal("Unknown", (await first.Journal.GetAsync(entry.Id, default))!.Status);
+        Assert.Equal(readsBefore, first.Endpoint.ReadCount);
+        Assert.Equal(0, second.Endpoint.ReadCount);
+        Assert.Equal(1, first.Endpoint.WriteCount);
+        Assert.Equal(0, second.Endpoint.WriteCount);
+    }
+
     [Fact]
     [Trait("Category", "Integration")]
     public async Task StaleMatchingSnapshotCannotVerifyPhysicalSuccess()
@@ -480,14 +591,18 @@ public sealed class HomeAssistantTests
     }
 
     [Theory]
-    [InlineData("missing")]
-    [InlineData("invalid")]
-    [InlineData("cancelled")]
-    [InlineData("timeout")]
+    [InlineData("missing", false)]
+    [InlineData("invalid", false)]
+    [InlineData("cancelled", false)]
+    [InlineData("timeout", false)]
+    [InlineData("missing", true)]
+    [InlineData("invalid", true)]
+    [InlineData("cancelled", true)]
+    [InlineData("timeout", true)]
     [Trait("Category", "Integration")]
-    public async Task KnownPreSubmissionFailuresAreDefinitiveAndDoNotLockOutTheRemainingWrite(string failure)
+    public async Task KnownPreSubmissionFailuresAreDefinitiveAndDoNotLockOutTheRemainingWrite(string failure, bool thermostat)
     {
-        var options = new HomeToolOptions(AutomaticLightsEnabled: true, RequestTimeoutSeconds: 1);
+        var options = new HomeToolOptions(ThermostatEnabled: true, AutomaticLightsEnabled: true, RequestTimeoutSeconds: 1);
         await using var fixture = await Fixture.StartAsync(options);
         using var cancellation = new CancellationTokenSource();
         var fail = true;
@@ -513,7 +628,16 @@ public sealed class HomeAssistantTests
         var client = new HomeAssistantRestClient(fixture.Http, fixture.Http.BaseAddress!, new("synthetic-reference"),
             resolver, catalog, fixture.Clock);
         var dispatcher = fixture.CreateDispatcher(client);
-        var request = fixture.Request("home.set_light", """{"entity":"lamp","on":true}""", "turn on lamp");
+        var request = thermostat
+            ? fixture.Request("home.set_temperature", """{"entity":"thermostat","temperature":22}""")
+            : fixture.Request("home.set_light", """{"entity":"lamp","on":true}""", "turn on lamp");
+        if (thermostat)
+        {
+            var pending = await dispatcher.DispatchAsync(request, default);
+            Assert.Equal("AwaitingApproval", pending.Status);
+            var approval = await fixture.Approvals.GetAsync(pending.ApprovalId!.Value, default);
+            await fixture.Approvals.ResolveAsync(approval!.Id, "owner", approval.ExpectedVersion, true, default);
+        }
         var dispatch = dispatcher.DispatchAsync(request, cancellation.Token).AsTask();
         if (failure == "cancelled")
         {
@@ -526,7 +650,15 @@ public sealed class HomeAssistantTests
         Assert.Equal(0, fixture.Endpoint.WriteCount);
         Assert.Equal(result, await dispatcher.DispatchAsync(request, default));
         fail = false;
-        var corrected = await dispatcher.DispatchAsync(request with { CallId = "corrected" }, default);
+        var correctedRequest = request with { CallId = "corrected" };
+        var corrected = await dispatcher.DispatchAsync(correctedRequest, default);
+        if (thermostat)
+        {
+            Assert.Equal("AwaitingApproval", corrected.Status);
+            var approval = await fixture.Approvals.GetAsync(corrected.ApprovalId!.Value, default);
+            await fixture.Approvals.ResolveAsync(approval!.Id, "owner", approval.ExpectedVersion, true, default);
+            corrected = await dispatcher.DispatchAsync(correctedRequest, default);
+        }
         Assert.Equal("Succeeded", corrected.Status);
         Assert.Equal(1, fixture.Endpoint.WriteCount);
     }
@@ -572,6 +704,19 @@ public sealed class HomeAssistantTests
         Assert.Equal(reason, result.ReasonCode);
         Assert.Equal(1, fixture.Endpoint.WriteCount);
         Assert.Equal(0, fixture.Endpoint.ReadCount);
+    }
+
+    private sealed class TransportFailure(HttpRequestError error, Exception? inner = null) : DelegatingHandler(new HttpClientHandler { AllowAutoRedirect = false })
+    {
+        public int Attempts { get; private set; }
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            Attempts++;
+            return Attempts == 1
+                ? Task.FromException<HttpResponseMessage>(new HttpRequestException(error, "synthetic-home-token", inner))
+                : base.SendAsync(request, cancellationToken);
+        }
     }
 
     private sealed class ControlledSecret(Func<CancellationToken, Task<ReadOnlyMemory<char>>> resolve) : ISecretResolver
@@ -632,7 +777,8 @@ public sealed class HomeAssistantTests
         }
 
         public ToolDispatcher CreateDispatcher(HomeAssistantRestClient? client = null, string? policyVersion = null) => new(
-            new ToolRegistry(HomeToolRegistrations.Create(catalog, client ?? Client)),
+            new ToolRegistry(HomeToolRegistrations.Create(catalog, client ?? Client,
+                policyVersion ?? HomeAssistantConfiguration.PolicyVersion(catalog, Http.BaseAddress!, new("synthetic-reference")))),
             new ToolAllowlistPolicy(policyVersion ?? HomeAssistantConfiguration.PolicyVersion(
                 catalog, Http.BaseAddress!, new("synthetic-reference")), catalog.Permissions()),
             Journal, Approvals, Clock, TimeSpan.FromSeconds(catalog.Options.VerificationSeconds));

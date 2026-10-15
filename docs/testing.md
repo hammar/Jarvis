@@ -204,6 +204,11 @@ intent. `HomeAssistantTests` covers explicit transient safe-read retry counts,
 original deadlines, stale/unavailable/source timestamps, malformed/oversized
 bodies, exact approvals/rejection/replay, security/ambiguous targets with zero
 requests, delayed observation and uncertain/cancelled writes with one submission.
+Transport classification tests inject typed faults (not live TLS) before a real
+loopback success; dropped-response tests exercise the actual HTTP transport.
+Two-installation/reference recovery tests assert durable Unknown with no reads
+or additional writes on a changed destination, for both write tools. Dispatcher
+unit tests cover legacy missing observation scopes and compatible unscoped tools.
 Synthetic token errors never appear in returned/persisted outcomes or captured
 HTTP endpoint logs.
 

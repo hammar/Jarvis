@@ -15,9 +15,13 @@ See [configuration](../../docs/development.md#home-assistant-configuration).
 
 The adapter repeats catalog/bounds checks before HTTP. Its client disables
 redirects and generic retries; safe reads alone get one transient retry within
-one shared deadline. Exact approvals bind the normalized installation endpoint
+one shared deadline. Transient transport errors are connection failures, ended
+responses and typed reset/aborted/timed-out socket causes; TLS, authentication,
+protocol and unclassified errors are not retried. Exact approvals bind the normalized installation endpoint
 and named credential reference as well as the complete catalog. Tokens resolve
 server-side through `ISecretResolver`.
+The same opaque identity binds interrupted-write observation; changing it
+preserves Unknown without observing the replacement installation.
 Remote error bodies, headers and exception payloads are not returned or logged;
 state parsing is bounded and projects only typed fields. Unauthorized, unknown
 entity, invalid response, transport and deadline failures have safe typed codes.

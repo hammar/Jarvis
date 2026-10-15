@@ -37,13 +37,15 @@ public static class HomeToolRegistrations
     /// <summary>Creates fixed typed registrations; caller uses catalog permissions and configuration hash for policy.</summary>
     /// <param name="catalog">Validated immutable host configuration.</param>
     /// <param name="client">Narrow application-owned HA client.</param>
+    /// <param name="observationScope">Opaque trusted connection/catalog identity binding recovery to the original destination; never a token.</param>
     /// <param name="timeProvider">Controlled time for observation deadlines and delays; system time by default.</param>
     /// <returns>Three registrations plus thermostat only when explicitly enabled.</returns>
     public static IReadOnlyList<IToolRegistration> Create(
-        HomeEntityCatalog catalog, IHomeAssistantClient client, TimeProvider? timeProvider = null)
+        HomeEntityCatalog catalog, IHomeAssistantClient client, string observationScope, TimeProvider? timeProvider = null)
     {
         ArgumentNullException.ThrowIfNull(catalog);
         ArgumentNullException.ThrowIfNull(client);
+        ArgumentException.ThrowIfNullOrWhiteSpace(observationScope);
         var time = timeProvider ?? TimeProvider.System;
         var registrations = new List<IToolRegistration>
         {
@@ -92,7 +94,8 @@ public static class HomeToolRegistrations
                 (args, request, _) => ValueTask.FromResult(Prepare(catalog, args.Entity, "home.set_light", "set_light",
                     id => JsonSerializer.Serialize(args with { Entity = id }),
                     id => catalog.AllowsLight(id, args.On, args.Brightness),
-                    id => HomeLightIntent.Matches(catalog, request.CurrentUserRequest, id, args.On, args.Brightness))),
+                    id => HomeLightIntent.Matches(catalog, request.CurrentUserRequest, id, args.On, args.Brightness),
+                    observationScope)),
                 async (args, action, token) => WriteOutcome(await client.SetLightAsync(
                     action.ResolvedEntityId!, args.On, args.Brightness, token)),
                 (args, action, _, token) => VerifyAsync(client, catalog, time, action.ResolvedEntityId!,
@@ -105,7 +108,7 @@ public static class HomeToolRegistrations
                 "home.set_temperature", TemperatureSchema, ToolRiskClass.ApprovalRequired,
                 (args, _, _) => ValueTask.FromResult(Prepare(catalog, args.Entity, "home.set_temperature", "set_temperature",
                     id => JsonSerializer.Serialize(args with { Entity = id }),
-                    id => catalog.AllowsTemperature(id, args.Temperature))),
+                    id => catalog.AllowsTemperature(id, args.Temperature), observationScope: observationScope)),
                 async (args, action, token) => WriteOutcome(await client.SetTemperatureAsync(
                     action.ResolvedEntityId!, args.Temperature, token)),
                 (args, action, _, token) => VerifyAsync(client, catalog, time, action.ResolvedEntityId!,
@@ -116,7 +119,8 @@ public static class HomeToolRegistrations
 
     private static ToolPreparationResult Prepare(
         HomeEntityCatalog catalog, string? target, string tool, string operation,
-        Func<string, string> canonical, Func<string, bool> allowed, Func<string, bool>? explicitIntent = null)
+        Func<string, string> canonical, Func<string, bool> allowed, Func<string, bool>? explicitIntent = null,
+        string? observationScope = null)
     {
         var candidates = catalog.Resolve(target);
         if (candidates.Count > 1)
@@ -128,7 +132,10 @@ public static class HomeToolRegistrations
             return ToolPreparationResult.Reject("home_operation_not_allowed");
         }
         var id = candidates[0].EntityId;
-        return ToolPreparationResult.Ready(new(tool, operation, id, canonical(id), explicitIntent?.Invoke(id) ?? false));
+        return ToolPreparationResult.Ready(new(tool, operation, id, canonical(id), explicitIntent?.Invoke(id) ?? false)
+        {
+            ObservationScope = observationScope
+        });
     }
 
     private static ToolExecutionOutcome WriteOutcome(HomeAssistantWriteResult result) =>

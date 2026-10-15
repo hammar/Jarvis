@@ -12,11 +12,18 @@ Managed HTTP discovery connects Simulator/E2E to synthetic devices; Local/Hybrid
 requires explicit trusted configuration.
 
 Read transport owns one explicitly classified transient retry within the
-original deadline. Neither HTTP resilience nor the dispatcher duplicates it.
+original deadline: HTTP 408/429/502/503/504, connection failures, ended responses,
+and typed reset/aborted/timed-out socket causes. Permanent TLS, authentication,
+protocol and unclassified errors are not retried.
+Neither HTTP resilience nor the dispatcher duplicates it.
 Known pre-submission credential/cancellation/deadline failures return definitive
 not-submitted outcomes; only possible delivery becomes physical uncertainty.
 Writes submit once; bounded verification/recovery reads current state without
 proving causality, and unchanged state after possible submission remains Unknown.
+Home write drafts persist an opaque connection/catalog observation scope in
+the existing journal envelope. Recovery after a scope change (including a legacy
+unscoped home action) records Unknown without reading a different installation.
+Unscoped tools retain their existing policy-change recovery behavior.
 No SQLite schema change or new authority outside M2-01's journal is introduced.
 The coordinator's chat catalog remains empty until M2-04 composition.
 

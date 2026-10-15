@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Net.Sockets;
 using System.Text.Json;
 using PersonalAgent.Application;
 using PersonalAgent.Application.Tools.Home;
@@ -71,10 +72,10 @@ public sealed class HomeAssistantRestClient : IHomeAssistantClient
                     }
                     return await ReadStateAsync(response, definition, request.Headers.Authorization!.Parameter!, deadline.Token);
                 }
-                catch (HttpRequestException)
+                catch (HttpRequestException error)
                 {
                     deadline.Token.ThrowIfCancellationRequested();
-                    if (attempt != 0)
+                    if (attempt != 0 || !TransientTransport(error))
                     {
                         throw new HomeAssistantException(HomeAssistantFailure.Transport);
                     }
@@ -239,13 +240,26 @@ public sealed class HomeAssistantRestClient : IHomeAssistantClient
         }
         catch (IOException)
         {
-            throw new HttpRequestException("Home Assistant response transport failed.");
+            throw new HttpRequestException(HttpRequestError.ResponseEnded, "Home Assistant response transport failed.");
         }
     }
 
     private static bool Transient(HttpStatusCode status) =>
         status is HttpStatusCode.RequestTimeout or HttpStatusCode.TooManyRequests
             or HttpStatusCode.BadGateway or HttpStatusCode.ServiceUnavailable or HttpStatusCode.GatewayTimeout;
+
+    private static bool TransientTransport(HttpRequestException error) =>
+        error.HttpRequestError is HttpRequestError.ConnectionError or HttpRequestError.ResponseEnded
+        // Some platforms wrap a dropped connection as Unknown with a typed socket cause.
+        || error.HttpRequestError == HttpRequestError.Unknown
+        && error.InnerException is IOException
+        {
+            InnerException: SocketException
+            {
+                SocketErrorCode: SocketError.ConnectionReset or SocketError.ConnectionAborted
+                    or SocketError.NetworkReset or SocketError.TimedOut
+            }
+        };
 
     private static HomeAssistantFailure ReadFailure(HttpStatusCode status) => status switch
     {

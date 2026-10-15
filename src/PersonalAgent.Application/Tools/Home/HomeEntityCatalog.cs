@@ -146,7 +146,7 @@ public sealed class HomeEntityCatalog
     private static HomeEntityDefinition ValidateAndCopy(HomeEntityDefinition entity)
     {
         ArgumentNullException.ThrowIfNull(entity);
-        if (entity.EntityId is null || !Regex.IsMatch(entity.EntityId, @"^(light|climate|sensor)\.[a-z0-9_]{1,128}$",
+        if (entity.EntityId is null || !Regex.IsMatch(entity.EntityId, @"\A(light|climate|sensor)\.[a-z0-9_]{1,128}\z",
                 RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1))
             || !ValidText(entity.FriendlyName) || !ValidText(entity.Area)
             || entity.Aliases is null || entity.Aliases.Length > 20 || entity.Aliases.Any(alias => !ValidText(alias))

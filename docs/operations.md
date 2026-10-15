@@ -15,6 +15,10 @@ is not device verification; Unknown/accepted-unconfirmed outcomes are not a
 reason to blindly resend. Restore preserves the existing action journal and
 must never replay uncertain writes. A matching observation establishes current
 state, not which request caused it. Stale readings retain their source timestamp.
+Interrupted home actions also bind their original connection/catalog observation
+scope. An endpoint/reference/catalog change, or a legacy action without that
+scope, remains Unknown without querying a replacement installation. Retain the
+original journal; configuration changes are not evidence of physical success.
 
 Optional live HA smoke evaluation is outside required CI and has not been run
 by M2-02 automation. Only after explicit owner consent, configure the endpoint,

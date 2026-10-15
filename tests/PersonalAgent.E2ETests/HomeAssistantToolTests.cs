@@ -28,10 +28,11 @@ public sealed class HomeAssistantToolTests(SimulatorHostFixture fixture)
             fixture.HomeAssistantClient.BaseAddress!, new("synthetic-reference"), new Secret(), catalog, clock);
         var journal = new SqliteActionJournalStore(database);
         var approvals = new ApprovalService(new SqliteApprovalStore(database), journal, clock);
+        var policyVersion = HomeAssistantConfiguration.PolicyVersion(
+            catalog, fixture.HomeAssistantClient.BaseAddress!, new("synthetic-reference"));
         var dispatcher = new ToolDispatcher(
-            new ToolRegistry(HomeToolRegistrations.Create(catalog, client)),
-            new ToolAllowlistPolicy(HomeAssistantConfiguration.PolicyVersion(
-                catalog, fixture.HomeAssistantClient.BaseAddress!, new("synthetic-reference")), catalog.Permissions()),
+            new ToolRegistry(HomeToolRegistrations.Create(catalog, client, policyVersion)),
+            new ToolAllowlistPolicy(policyVersion, catalog.Permissions()),
             journal, approvals, clock, TimeSpan.FromSeconds(5));
         ToolDispatchRequest Request(string tool, string arguments, string? text = null) =>
             new(new TurnId(Guid.NewGuid()), Guid.NewGuid().ToString(), tool, arguments, "owner", text);
