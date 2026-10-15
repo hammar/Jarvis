@@ -122,6 +122,10 @@ public static class MemoryPolicy
         {
             throw new PersistenceConcurrencyException("Memory conflicts changed; review a new proposal.");
         }
+        if (change.Operation is "retain_both" or "update" && actual.Length >= 100)
+        {
+            throw new PersistenceConcurrencyException("The active memory group is full; delete or supersede facts first.");
+        }
         if (change.Operation is "retain_both" or "update"
             && current.Any(fact => fact.Id != change.FactId && string.Equals(fact.DistinguishingContext?.Trim(),
                 change.DistinguishingContext?.Trim(), StringComparison.OrdinalIgnoreCase)))

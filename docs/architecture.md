@@ -92,6 +92,8 @@ context to retain both. The full conflict set is checked under SQLite's
 immediate transaction, including concurrent insertions.
 Editing a retained fact in place also binds its sibling versions and distinct
 qualifier; it does not replace the fact ID or overwrite its siblings.
+Mutations cannot grow an active subject/key group beyond its 100-fact review
+bound; updating within a full group or superseding it remains supported.
 Equivalent-failure accounting uses a separate host-owned semantic argument
 key, excluding generated action/new-fact IDs but retaining mutation content,
 source and reviewed versions. Fresh call IDs do not reset the per-turn retry

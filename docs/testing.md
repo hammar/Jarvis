@@ -96,6 +96,8 @@ refusal, and deletion between the early replay check and terminal reconciliation
 Same-turn create/update regressions use fresh call IDs to verify the third
 equivalent failed proposal is rejected, while exact replay is counted once,
 different content has a separate budget and turn release resets that budget.
+The 100-fact boundary test rejects retain-both/new-group update growth to 101,
+allows in-place updates with 99 siblings and allows superseding all 100 facts.
 
 `ActualRuntimeRetrievesMaliciousMemoryAsEvidenceButCannotAcquireShellAuthority`
 uses the actual pinned runtime and a controlled OpenAI-compatible endpoint,

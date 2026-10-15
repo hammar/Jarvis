@@ -53,9 +53,9 @@ Implementation is committed and independently reviewed.
 Native macOS evidence after the review fix:
 `tools/validate.sh build` passes Release formatting/analyzers with zero
 warnings/errors; `architecture` passes 6 tests; `docs` passes link checks;
-`unit` passes 324 tests; `integration` passes 429 tests; `coverage` passes all
+`unit` passes 324 tests; `integration` passes 430 tests; `coverage` passes all
 existing and new critical thresholds with 99.8% changed executable lines
-(629/630). Coverage also runs the negative gate fixtures.
+(631/632). Coverage also runs the negative gate fixtures.
 
 The actual-runtime memory test initially exposed the pinned runtime's rejection
 of dotted tool names. The adapter now translates dots to underscores at the
@@ -64,11 +64,11 @@ Both runtime memory retrieval/denial and pre-provider collision checks pass.
 This is protocol compatibility mapping, not a dependency upgrade or an
 inferred owner acceptance of a dependency defect.
 
-After the R2-R5 fixes, `sdk-contracts` passed the standalone actual-runtime
+After the R6 host-completion fix, `sdk-contracts` passed the standalone actual-runtime
 harness and 57 adapter contracts; `aspire-e2e` passes 8 scenarios;
 `browser-e2e` passes 29 scenarios and verifies that its deliberately failing
 browser probe fails; explicit `gate-self-test` passed. These runtime/E2E gates
-are rerun after R6; their final evidence is recorded on PR #47.
+are rerun after R7; their final evidence is recorded on PR #47.
 
 Linux CI results and exact run links are recorded in PR #47 and its required
 checks. The first run passed build, architecture, unit, integration, coverage,
@@ -97,6 +97,7 @@ matrix or establish live-model behavior.
 | M2-03-R4 | Medium | Valid large escaped search results exceeded the journal response limit. | Fixed: serialized facts/citations/framing are budgeted below 900,000 characters, returning matching fact/reference subsets and explicit Truncated metadata. A 100-fact maximum-size backslash-value SQLite regression verifies publication, replay and deletion invalidation. |
 | M2-03-R5 | Medium | Invalidation during preparation caused terminal reconciliation to parse a redacted envelope. | Fixed: terminal reconciliation returns invalidated entries before envelope parsing. Deterministic deletion-between-journal-reads regression verifies a content-free invalidation response. |
 | M2-03-R6 | Medium | Call-generated action IDs in canonical commands gave equivalent memory failures separate retry budgets. | Fixed in the subsequent revision: a host-owned semantic failure key omits generated IDs, retains owner/source/content/reviewed versions and sorts conflict references. Same-turn create/update regressions reject the third equivalent call, count exact replay once, separate different content and verify turn-release reset. Exact journal/approval/receipt identities are unchanged. |
+| M2-03-R7 | Medium | Previously missed (summary-only): retain_both or moving an update into a 100-fact group created an unreviewable 101st active fact. | Fixed in the subsequent revision: reject growth when 100 reviewed siblings already exist, but allow in-place updates with 99 siblings and supersession of all 100. Real-SQLite boundary regression verifies both rejected operations preserve the full reviewable group/other fact, in-place version advancement and successful supersession. |
 
 R2-R5 were reported by automated PR review on `c9511ec` and repeated on
 `80a382f`; their thread roots are respectively 4285248818, 4285248922,
@@ -131,6 +132,12 @@ normalization therefore recognizes the deterministic new-fact/action ID
 relationship rather than relying on an omitted optional argument. These four
 route/operation cases pass; final-head automated PR review supplements the
 earlier exact-commit review.
+
+R7 is retained from the automated review summary on
+`a188e0dec9df4f3c2dd4e93987ad786f1d82d5e1` (review 5536787893), despite its
+“0 open findings” count and lack of an inline thread. All seven findings need
+explicit dispositions; neither omission from an inline list nor green CI is
+evidence of resolution.
 
 Independent follow-up review of
 `6e1ea399b3721b49900973e576000d55b09e5ee3` against the original reviewed

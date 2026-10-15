@@ -112,6 +112,40 @@ public sealed class ConfirmedMemoryTests
     }
 
     [Fact]
+    public async Task FullConflictGroupRejectsGrowthButAllowsInPlaceUpdatesAndSupersession()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var first = await fixture.CreateFactAsync("walls");
+        await fixture.SqlAsync("""
+            WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x < 99)
+            INSERT INTO memory_facts (id, subject, fact_key, value, source_id, privacy_class,
+                created_at_utc, updated_at_utc, version, distinguishing_context)
+            SELECT printf('00000000-0000-0000-0000-%012x', n.x), f.subject, f.fact_key, f.value, f.source_id,
+                f.privacy_class, f.created_at_utc, f.updated_at_utc, f.version, 'part ' || n.x
+            FROM n CROSS JOIN memory_facts f;
+            """);
+        var full = await fixture.Memory.FindConflictsAsync("owner", "bathroom", "paint", default);
+        Assert.Equal(100, full.Count);
+        var references = full.Select(fact => new MemoryConflictArguments(fact.Id.Value, fact.Version)).ToArray();
+        Assert.Equal("Failed", (await fixture.ApproveAsync(await fixture.RequestAsync(new("retain_both",
+            Subject: "bathroom", Key: "paint", Value: "too many", Conflicts: references, DistinguishingContext: "new part")))).Status);
+        var other = await fixture.CreateFactAsync("kitchen", "kitchen");
+        Assert.Equal("Failed", (await fixture.ApproveAsync(await fixture.RequestAsync(new("update", other.Id.Value,
+            other.Version, "bathroom", "paint", "too many", references, "another part")))).Status);
+        Assert.Equal(other, await fixture.Memory.GetAsync("owner", other.Id, default));
+        Assert.Equal("Succeeded", (await fixture.ApproveAsync(await fixture.RequestAsync(new("update", first.Id.Value,
+            first.Version, "bathroom", "paint", "updated walls",
+            references.Where(reference => reference.Id != first.Id.Value).ToArray(), "walls")))).Status);
+        full = await fixture.Memory.FindConflictsAsync("owner", "bathroom", "paint", default);
+        Assert.Equal(100, full.Count);
+        Assert.Equal(2, full.Single(fact => fact.Id == first.Id).Version);
+        Assert.Equal("Succeeded", (await fixture.ApproveAsync(await fixture.RequestAsync(new("supersede",
+            Subject: "bathroom", Key: "paint", Value: "replacement",
+            Conflicts: full.Select(fact => new MemoryConflictArguments(fact.Id.Value, fact.Version)).ToArray())))).Status);
+        Assert.Single(await fixture.Memory.FindConflictsAsync("owner", "bathroom", "paint", default));
+    }
+
+    [Fact]
     public async Task EscapedSearchEvidenceIsSizeBoundedWithMatchingCitationsAndExplicitTruncation()
     {
         using var fixture = await Fixture.CreateAsync();
