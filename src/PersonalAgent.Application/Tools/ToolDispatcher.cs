@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using PersonalAgent.Application.Memory;
 using PersonalAgent.Domain;
 
 namespace PersonalAgent.Application.Tools;
@@ -83,6 +84,17 @@ public sealed class ToolDispatcher : IToolDispatcher
                     ? Recorded(previous)
                     : Rejected("authenticated_owner_required");
             }
+            if (request.ToolName == "memory.propose_change"
+                && previous is { ActionType: "memory.propose_change", MemoryOwnerId: not null }
+                && previous.MemoryOwnerId == request.OwnerId
+                && (IsTerminal(previous.Status) || previous.Status == "Executing"))
+            {
+                using var stored = JsonDocument.Parse(previous.CanonicalArguments);
+                var command = JsonSerializer.Deserialize<ConfirmedMemoryCommand>(
+                    stored.RootElement.GetProperty("CanonicalArguments").GetString()!)
+                    ?? throw new InvalidDataException("Missing recorded memory command.");
+                request = request with { ReplayMemorySourceId = command.SourceMessageId };
+            }
         }
 
         if (!registry.TryGetRuntime(request.ToolName, out var registration) || registration is null)
@@ -135,7 +147,7 @@ public sealed class ToolDispatcher : IToolDispatcher
             draft.ResolvedEntityId,
             authorization.PolicyVersion,
             effectiveRisk,
-            HashText(request.CurrentUserRequest),
+            request.ReplayCurrentRequestHash ?? HashText(request.CurrentUserRequest),
             canonicalArguments,
             draft.ObservationScope,
             draft.MemoryReferences);

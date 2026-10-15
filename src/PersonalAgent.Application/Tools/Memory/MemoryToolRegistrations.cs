@@ -90,7 +90,8 @@ public static class MemoryToolRegistrations
                 }
                 var actionId = ToolDispatcher.CreateActionId(request.TurnId, request.CallId);
                 var source = await store.ReadSourceAsync(request.OwnerId!, request.TurnId, token);
-                if (source is null || source.Content != request.CurrentUserRequest)
+                if (source is null && request.ReplayMemorySourceId is null
+                    || source is not null && source.Content != request.CurrentUserRequest)
                 {
                     return ToolPreparationResult.Reject("memory_source_unavailable");
                 }
@@ -107,7 +108,8 @@ public static class MemoryToolRegistrations
                 {
                     return ToolPreparationResult.Reject("invalid_memory_change");
                 }
-                var command = new ConfirmedMemoryCommand(actionId, request.OwnerId!, source.MessageId, change);
+                var command = new ConfirmedMemoryCommand(actionId, request.OwnerId!,
+                    source?.MessageId ?? request.ReplayMemorySourceId!.Value, change);
                 return ToolPreparationResult.Ready(new("memory.propose_change", "change", null, JsonSerializer.Serialize(command))
                 {
                     MemoryReferences = change.Conflicts.Append(new(change.FactId, change.ExpectedVersion)).ToArray()

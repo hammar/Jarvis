@@ -20,7 +20,11 @@ copied prompt. Legacy references remain labelled as legacy.
 
 SQLite commits fact changes and action-bound receipts atomically. Recovery
 observes receipts rather than retrying a mutation or guessing from current
-fact values. Durable facts survive conversation/audit retention and SDK loss.
+fact values. Terminal replay and interrupted settlement use the recorded
+source identifier and request fingerprint when the transcript is gone; they
+never execute another mutation. New/uncommitted changes still require the
+original owner message. Durable facts survive conversation/audit retention
+and SDK loss.
 
 Explicit deletion removes fact content and FTS entries and redacts dependent
 proposal/journal content. Content-free fact/action IDs, versions, timestamps

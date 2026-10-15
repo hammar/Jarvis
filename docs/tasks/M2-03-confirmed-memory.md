@@ -67,3 +67,15 @@ SDK aggregate, Aspire/browser regressions, Linux CI and independent exact-commit
 review are not yet claimed. No live models, cloud or devices were used.
 Memory UI/chat end-to-end acceptance remains M2-04, and cloud invalidation
 remains M3-01; neither is represented as implemented by these tests.
+
+### Cumulative independent review ledger
+
+Review of `3f527047e5995447f6ee4b255bfdf060e5179b87` against
+`36d32a4ec00b43880ed0fad54111547ad80b55ee` independently traced approval,
+provenance, receipt, invalidation and source retention boundaries, and ran
+18 memory integration and 9 unit tests. It did not rerun the full platform
+matrix or establish live-model behavior.
+
+| ID | Severity | Finding | Disposition and evidence |
+|---|---|---|---|
+| M2-03-R1 | Medium | Transcript deletion blocked completed replay and receipt-based settlement because preparation required the deleted source. | Fixed in the follow-up revision: only terminal/Executing memory actions reuse the journal's source identifier; host completion also reuses its fingerprint. Strict typed arguments, owner/action/request binding, current observation policy and invalidation remain enforced. Four new cases cover completed replay, both restart recovery routes and refusal of new/uncommitted work after source loss. Focused memory integration suite passes 22 cases. |

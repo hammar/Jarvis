@@ -223,6 +223,65 @@ public sealed class ConfirmedMemoryTests
     }
 
     [Fact]
+    public async Task TranscriptRemovalPreservesExactCompletedReplayButCannotAuthorizeNewWork()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var request = await fixture.RequestAsync(new("create", Subject: "bathroom", Key: "paint", Value: "once"));
+        var result = await fixture.ApproveAsync(request);
+        await fixture.SqlAsync("DELETE FROM conversations;");
+        Assert.Equal(result, await fixture.RestartedDispatcher().DispatchAsync(request, default));
+        Assert.Equal(result, await fixture.Proposals.CompleteAsync("owner", result.ActionId!.Value, default));
+        Assert.Equal("action_identity_reused", (await fixture.Dispatcher.DispatchAsync(request with
+        {
+            CurrentUserRequest = "different request"
+        }, default)).ReasonCode);
+        Assert.Equal("action_identity_reused", (await fixture.Dispatcher.DispatchAsync(request with
+        {
+            ArgumentsJson = JsonSerializer.Serialize(new MemoryChangeArguments("create", Subject: "bathroom", Key: "paint", Value: "changed"))
+        }, default)).ReasonCode);
+        Assert.Equal("memory_source_unavailable", (await fixture.Dispatcher.DispatchAsync(request with { CallId = "new-call" }, default)).ReasonCode);
+        await Assert.ThrowsAsync<KeyNotFoundException>(async () =>
+            await fixture.Proposals.CompleteAsync("other", result.ActionId.Value, default));
+        Assert.Equal(1, Assert.Single(await fixture.Memory.SearchAsync("owner", "once", 10, default)).Version);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task TranscriptRemovalStillAllowsReceiptRecoveryWithoutAnotherMutation(bool hostCompletion)
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var request = await fixture.RequestAsync(new("create", Subject: "bathroom", Key: "paint", Value: "once"));
+        var pending = await fixture.Dispatcher.DispatchAsync(request, default);
+        var preview = await fixture.Proposals.PreviewAsync("owner", pending.ActionId!.Value, default);
+        await fixture.Approvals.ResolveAsync(pending.ApprovalId!.Value, "owner", 1, true, default);
+        var entry = (await fixture.Journal.GetAsync(pending.ActionId.Value, default))!;
+        await fixture.Journal.UpdateStatusAsync(entry.Id, "Executing", entry.Version, fixture.Clock.UtcNow, default);
+        await fixture.Memory.CommitAsync(preview.Command, default);
+        await fixture.SqlAsync("DELETE FROM conversations;");
+        var recovered = hostCompletion
+            ? await fixture.Proposals.CompleteAsync("owner", entry.Id, default)
+            : await fixture.RestartedDispatcher().DispatchAsync(request, default);
+        Assert.Equal("Succeeded", recovered.Status);
+        Assert.Equal(1, Assert.Single(await fixture.Memory.SearchAsync("owner", "once", 10, default)).Version);
+        Assert.Equal(recovered, await fixture.Proposals.CompleteAsync("owner", entry.Id, default));
+    }
+
+    [Fact]
+    public async Task TranscriptRemovalCannotCompleteAnUncommittedApproval()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var request = await fixture.RequestAsync(new("create", Subject: "bathroom", Key: "paint", Value: "not saved"));
+        var pending = await fixture.Dispatcher.DispatchAsync(request, default);
+        await fixture.Approvals.ResolveAsync(pending.ApprovalId!.Value, "owner", 1, true, default);
+        await fixture.SqlAsync("DELETE FROM conversations;");
+        await Assert.ThrowsAsync<PersistenceConcurrencyException>(async () =>
+            await fixture.Proposals.CompleteAsync("owner", pending.ActionId!.Value, default));
+        Assert.Equal("memory_source_unavailable", (await fixture.Dispatcher.DispatchAsync(request, default)).ReasonCode);
+        Assert.Empty(await fixture.Memory.SearchAsync("owner", "saved", 10, default));
+    }
+
+    [Fact]
     public async Task LocalReadsFilterOwnerPrivacyAndFtsSyntaxBeforeApplyingLimit()
     {
         using var fixture = await Fixture.CreateAsync();

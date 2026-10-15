@@ -619,7 +619,12 @@ public sealed record ToolDispatchRequest(
     string ToolName,
     string ArgumentsJson,
     string? OwnerId = null,
-    string? CurrentUserRequest = null);
+    string? CurrentUserRequest = null)
+{
+    // Application-owned replay context is never decoded from tool arguments.
+    internal Guid? ReplayMemorySourceId { get; init; }
+    internal string? ReplayCurrentRequestHash { get; init; }
+}
 
 /// <summary>Reports the host's dispatch outcome, including uncertain physical results.</summary>
 /// <param name="Status">Stable outcome such as Succeeded, Rejected, Failed, or Unknown.</param>

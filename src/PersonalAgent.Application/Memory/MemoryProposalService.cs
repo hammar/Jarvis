@@ -47,11 +47,18 @@ public sealed class MemoryProposalService(
         var (entry, command) = await ReadAsync(ownerId, actionId, cancellationToken);
         using var envelope = JsonDocument.Parse(entry.CanonicalArguments);
         var turnId = new TurnId(Guid.Parse(envelope.RootElement.GetProperty("TurnId").GetString()!));
-        var source = await memories.ReadSourceAsync(ownerId, turnId, cancellationToken)
-            ?? throw new PersistenceConcurrencyException("The original request is no longer available.");
+        var source = await memories.ReadSourceAsync(ownerId, turnId, cancellationToken);
+        if (source is null && entry.Status is not ("Executing" or "Succeeded" or "Failed" or "Rejected" or "Expired" or "Unknown"))
+        {
+            throw new PersistenceConcurrencyException("The original request is no longer available.");
+        }
         return await dispatcher.DispatchAsync(new(turnId,
             envelope.RootElement.GetProperty("CallId").GetString()!, "memory.propose_change",
-            JsonSerializer.Serialize(MemoryToolRegistrations.Arguments(command.Change)), ownerId, source.Content), cancellationToken);
+            JsonSerializer.Serialize(MemoryToolRegistrations.Arguments(command.Change)), ownerId, source?.Content)
+        {
+            ReplayCurrentRequestHash = source is null
+                ? envelope.RootElement.GetProperty("CurrentRequestHash").GetString() : null
+        }, cancellationToken);
     }
 
     private async ValueTask<(ActionJournalEntry, ConfirmedMemoryCommand)> ReadAsync(

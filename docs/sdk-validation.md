@@ -29,6 +29,14 @@ The SDK targets .NET 10. The package lock records its transitive dependencies. T
 
 Sources and SDK compatibility reviewed on 2026-10-04.
 
+M2-03 additionally validates custom tool wire names against this pinned runtime:
+it rejects dots in names such as `memory.get`. The application adapter maps dots
+to underscores only in SDK tool exposure and rejects alias collisions before
+provider access. Callbacks, policy, approvals and journals retain dotted host
+names. The actual-runtime malicious-memory contract exercises `memory_get`,
+evidence forwarding and denial of an unsolicited shell request; it does not
+establish live-model prompt-injection immunity or memory chat/UI integration.
+
 The project remains on the .NET 10 LTS target (`net10.0`), which is the latest
 GA major release. On 2026-10-04, [Microsoft's official .NET 10 release
 metadata](https://dotnetcli.blob.core.windows.net/dotnet/release-metadata/10.0/releases.json)
