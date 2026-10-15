@@ -53,9 +53,9 @@ Implementation is committed and independently reviewed.
 Native macOS evidence after the review fix:
 `tools/validate.sh build` passes Release formatting/analyzers with zero
 warnings/errors; `architecture` passes 6 tests; `docs` passes link checks;
-`unit` passes 324 tests; `integration` passes 420 tests; `coverage` passes all
-existing and new critical thresholds with 100% changed executable lines
-(583/583). Coverage also runs the negative gate fixtures.
+`unit` passes 324 tests; `integration` passes 425 tests; `coverage` passes all
+existing and new critical thresholds with 99.8% changed executable lines
+(617/618). Coverage also runs the negative gate fixtures.
 
 The actual-runtime memory test initially exposed the pinned runtime's rejection
 of dotted tool names. The adapter now translates dots to underscores at the
@@ -64,11 +64,11 @@ Both runtime memory retrieval/denial and pre-provider collision checks pass.
 This is protocol compatibility mapping, not a dependency upgrade or an
 inferred owner acceptance of a dependency defect.
 
-After the recovery fix, `sdk-contracts` passes the standalone actual-runtime
+After the R1 recovery fix, `sdk-contracts` passed the standalone actual-runtime
 harness and 57 adapter contracts; `aspire-e2e` passes 8 scenarios;
 `browser-e2e` passes 29 scenarios and verifies that its deliberately failing
-browser probe fails; explicit `gate-self-test` passes. Together with the
-commands above, every native macOS gate has passed on the reviewed code.
+browser probe fails; explicit `gate-self-test` passed. These runtime/E2E gates
+are being rerun after R2-R5; their final evidence is recorded on PR #47.
 
 Linux CI results and exact run links are recorded in PR #47 and its required
 checks. The first run passed build, architecture, unit, integration, coverage,
@@ -100,8 +100,18 @@ matrix or establish live-model behavior.
 R2-R5 were reported by automated PR review on `c9511ec` and repeated on
 `80a382f`; their thread roots are respectively 4285248818, 4285248922,
 4285248973 and 4285249038. The original narrow review's no-new-findings result
-does not dispose of these later findings. Their follow-up revision and final
-gate/review evidence must pass before readiness is claimed.
+does not dispose of these later findings.
+
+Independent R2-R5 follow-up reviewed exact fix
+`90f8b6548380ee7414f29cfeb66a7a4a2980aefb`, confirmed each of R2-R5 fixed with
+concrete boundary/test evidence and reported no new findings. It independently
+ran 27 memory SQLite integration and 9 memory unit tests. Both transaction
+orderings were inspected; commit-first uses two gated dispatchers and
+settlement-first uses recovery followed by a late direct store commit rather
+than a second gated dispatcher ordering. The review used existing Release
+binaries and did not independently rebuild or rerun broad gates/platforms.
+Final readiness still requires current-head CI/runtime gates and resolved PR
+threads; passing an automated review workflow alone is not a disposition.
 
 Independent follow-up review of
 `6e1ea399b3721b49900973e576000d55b09e5ee3` against the original reviewed
