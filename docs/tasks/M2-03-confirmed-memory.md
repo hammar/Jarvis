@@ -92,6 +92,16 @@ matrix or establish live-model behavior.
 | ID | Severity | Finding | Disposition and evidence |
 |---|---|---|---|
 | M2-03-R1 | Medium | Transcript deletion blocked completed replay and receipt-based settlement because preparation required the deleted source. | Fixed in the follow-up revision: only terminal/Executing memory actions reuse the journal's source identifier; host completion also reuses its fingerprint. Strict typed arguments, owner/action/request binding, current observation policy and invalidation remain enforced. Four new cases cover completed replay, both restart recovery routes and refusal of new/uncommitted work after source loss. Focused memory integration suite passes 22 cases. |
+| M2-03-R2 | Medium | Retained facts could not be updated in place with siblings active. | Fixed: updates accept the complete reviewed sibling snapshot and require a distinct qualifier. Regression preserves both IDs, increments only the target version and rejects an omitted sibling snapshot. |
+| M2-03-R3 | Medium | A stale missing-receipt recovery observation could settle Failed after a concurrent mutation committed. | Fixed: journal settlement checks receipts inside the immediate transaction that serializes with commit authorization; commit-first publishes the receipt as success and settlement-first prevents a later write. Two-dispatcher gated regression covers both publications; separate regression covers settlement-first. |
+| M2-03-R4 | Medium | Valid large escaped search results exceeded the journal response limit. | Fixed: serialized facts/citations/framing are budgeted below 900,000 characters, returning matching fact/reference subsets and explicit Truncated metadata. A 100-fact maximum-size backslash-value SQLite regression verifies publication, replay and deletion invalidation. |
+| M2-03-R5 | Medium | Invalidation during preparation caused terminal reconciliation to parse a redacted envelope. | Fixed: terminal reconciliation returns invalidated entries before envelope parsing. Deterministic deletion-between-journal-reads regression verifies a content-free invalidation response. |
+
+R2-R5 were reported by automated PR review on `c9511ec` and repeated on
+`80a382f`; their thread roots are respectively 4285248818, 4285248922,
+4285248973 and 4285249038. The original narrow review's no-new-findings result
+does not dispose of these later findings. Their follow-up revision and final
+gate/review evidence must pass before readiness is claimed.
 
 Independent follow-up review of
 `6e1ea399b3721b49900973e576000d55b09e5ee3` against the original reviewed

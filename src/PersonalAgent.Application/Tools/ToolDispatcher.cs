@@ -789,7 +789,7 @@ public sealed class ToolDispatcher : IToolDispatcher
         ToolActionDraft draft,
         CancellationToken cancellationToken)
     {
-        if (!IsTerminal(action.Status))
+        if (action.MemoryInvalidated || !IsTerminal(action.Status))
         {
             return action;
         }
@@ -877,14 +877,26 @@ public sealed class ToolDispatcher : IToolDispatcher
         ActionJournalEntry action,
         ToolDispatchResult outcome)
     {
-        var completed = await journal.UpdateStatusAsync(
-            action.Id,
-            outcome.Status,
-            action.Version,
-            clock.UtcNow.ToUniversalTime(),
-            CancellationToken.None,
-            outcome);
-        return Recorded(completed);
+        try
+        {
+            var completed = await journal.UpdateStatusAsync(
+                action.Id,
+                outcome.Status,
+                action.Version,
+                clock.UtcNow.ToUniversalTime(),
+                CancellationToken.None,
+                outcome);
+            return Recorded(completed);
+        }
+        catch (PersistenceConcurrencyException) when (action.ActionType == "memory.propose_change")
+        {
+            var current = await journal.GetAsync(action.Id, CancellationToken.None);
+            if (current is not null && (current.MemoryInvalidated || IsTerminal(current.Status)))
+            {
+                return Recorded(current);
+            }
+            throw;
+        }
     }
 
     private async ValueTask JournalUnknownBeforeThrowAsync(

@@ -130,6 +130,19 @@ public sealed class SqliteActionJournalStore : IActionJournalStore
                 await transaction.CommitAsync(cancellationToken);
                 return current;
             }
+            if (current is { ActionType: "memory.propose_change", Status: "Executing", MemoryOwnerId: { } receiptOwner }
+                && status is "Succeeded" or "Failed" or "Unknown")
+            {
+                // Serialize settlement with mutation authorization: a stale missing-receipt
+                // observation cannot report failure after the fact transaction commits.
+                var receipt = await SqliteConfirmedMemoryStore.ReadReceiptAsync(
+                    connection, transaction, receiptOwner, id, cancellationToken);
+                if (receipt is not null)
+                {
+                    status = "Succeeded";
+                    outcome = new(status, JsonSerializer.Serialize(receipt), null, id);
+                }
+            }
             if (current?.MemoryOwnerId is { } owner && outcome?.ResultJson is { } resultJson)
             {
                 var references = SqliteMemoryDependencies.ReadReferences(resultJson, "MemoryReferences");

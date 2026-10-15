@@ -104,8 +104,9 @@ public static class MemoryPolicy
             RequireText(change.DistinguishingContext, 512);
         }
         if (change.Operation is "supersede" or "retain_both" && change.Conflicts.Count == 0
-            || change.Operation == "retain_both" && change.DistinguishingContext is null
-            || change.Operation is "create" or "update" && change.Conflicts.Count != 0)
+            || (change.Operation == "retain_both" || change.Operation == "update" && change.Conflicts.Count > 0)
+                && change.DistinguishingContext is null
+            || change.Operation == "create" && change.Conflicts.Count != 0)
         {
             throw new ArgumentException("Conflicts require explicit supersede or qualified retain-both.", nameof(change));
         }
@@ -121,8 +122,8 @@ public static class MemoryPolicy
         {
             throw new PersistenceConcurrencyException("Memory conflicts changed; review a new proposal.");
         }
-        if (change.Operation == "retain_both"
-            && current.Any(fact => string.Equals(fact.DistinguishingContext?.Trim(),
+        if (change.Operation is "retain_both" or "update"
+            && current.Any(fact => fact.Id != change.FactId && string.Equals(fact.DistinguishingContext?.Trim(),
                 change.DistinguishingContext?.Trim(), StringComparison.OrdinalIgnoreCase)))
         {
             throw new PersistenceConcurrencyException("Retained facts require distinct context.");

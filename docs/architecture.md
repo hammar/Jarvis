@@ -78,6 +78,9 @@ M2-03's `Memory/` use cases and `Tools/Memory/` registrations expose bounded,
 owner-scoped local facts. New facts are LocalOnly; model arguments cannot
 change identity, provenance, privacy routing or approval. Retrieved JSON is
 labelled evidence-only and includes fact IDs, versions and UTC update times.
+Serialized evidence is capped at 900,000 characters including JSON escaping
+and citations, below the journal response limit. `Truncated` explicitly reports
+omitted facts; returned fact/reference lists always describe the same subset.
 No fact text is inserted into host instructions or treated as owner intent.
 
 `memory.propose_change` uses the existing exact-action approval flow. The
@@ -87,9 +90,14 @@ can preview, resolve and complete it without a live callback. Normalized
 subject/key conflicts require exact-version supersession or distinguishing
 context to retain both. The full conflict set is checked under SQLite's
 immediate transaction, including concurrent insertions.
+Editing a retained fact in place also binds its sibling versions and distinct
+qualifier; it does not replace the fact ID or overwrite its siblings.
 
 `SqliteConfirmedMemoryStore` commits facts and action-bound receipts together.
-Interrupted settlement observes a receipt, never repeats a mutation. Migration
+Interrupted settlement observes a receipt, never repeats a mutation. Journal
+settlement rechecks that receipt under the commit-authorization write lock:
+if commit wins it publishes success; if settlement wins a later commit fails
+its Executing-state authorization. Migration
 007 preserves legacy facts/provenance and adds typed source links, qualifiers,
 receipts, tombstones and derived-action dependencies. Conversation retention
 can remove a source message without removing the fact; source availability

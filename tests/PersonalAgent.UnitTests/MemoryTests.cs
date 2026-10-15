@@ -57,6 +57,7 @@ public sealed class MemoryTests
             Create with { DistinguishingContext = new string('x', 513) },
             Create with { Operation = "supersede" }, Create with { Operation = "retain_both" },
             Create with { Operation = "retain_both", Conflicts = [conflict] },
+            Create with { Operation = "update", ExpectedVersion = 1, Conflicts = [conflict] },
             Create with { Conflicts = [conflict] },
             new("delete", Id, 1, "subject", null, null, []),
             new("delete", Id, 1, null, "key", null, []),
@@ -75,6 +76,11 @@ public sealed class MemoryTests
             MemoryPolicy.ValidateConflicts(retain, [fact with { Version = 2 }]));
         Assert.Throws<PersistenceConcurrencyException>(() =>
             MemoryPolicy.ValidateConflicts(retain, [fact with { DistinguishingContext = " CEILING " }]));
+        var update = retain with { Operation = "update", ExpectedVersion = 1 };
+        MemoryPolicy.Validate(update);
+        MemoryPolicy.ValidateConflicts(update, [fact, fact with { Id = Id, DistinguishingContext = "ceiling" }]);
+        Assert.Throws<PersistenceConcurrencyException>(() =>
+            MemoryPolicy.ValidateConflicts(update, [fact with { DistinguishingContext = " CEILING " }]));
         MemoryPolicy.ValidateConflicts(Create with { Operation = "update", ExpectedVersion = 1 },
             [fact with { Id = Id }]);
     }

@@ -265,7 +265,7 @@ public sealed partial class SqliteConfirmedMemoryStore(SqliteDatabase database, 
         }
     }
 
-    private static async Task<MemoryReceipt?> ReadReceiptAsync(
+    internal static async Task<MemoryReceipt?> ReadReceiptAsync(
         SqliteConnection connection, SqliteTransaction? transaction, string ownerId, ActionId id, CancellationToken token)
     {
         await using var command = connection.CreateCommand();

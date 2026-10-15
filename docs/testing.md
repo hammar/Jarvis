@@ -89,6 +89,10 @@ outcomes. `ConfirmedMemoryTests` uses real isolated SQLite with the production
 dispatcher/approval service: confirmation, supersede/retain-both, concurrent
 conflicts, deletion/redaction, delayed result publication, version conflicts,
 rejection/expiry, source removal and receipt-based crash recovery.
+Review regressions cover editing a retained fact in place, escaped maximum-size
+FTS evidence with explicit truncation and matching dependencies, a deterministic
+two-dispatcher stale-receipt observation racing a commit, settlement-before-commit
+refusal, and deletion between the early replay check and terminal reconciliation.
 
 `ActualRuntimeRetrievesMaliciousMemoryAsEvidenceButCannotAcquireShellAuthority`
 uses the actual pinned runtime and a controlled OpenAI-compatible endpoint,

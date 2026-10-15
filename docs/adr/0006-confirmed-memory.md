@@ -11,6 +11,8 @@ authenticated owner approves the exact operation. Subject/key conflicts are
 detected deterministically after normalization, not inferred semantically.
 Supersession identifies exact versions; retaining both requires distinguishing
 context. Changed facts/conflict sets require a new proposal.
+An in-place update of a retained fact binds the complete sibling version set
+and a qualifier distinct from the siblings, preserving both fact identities.
 
 New facts are LocalOnly. Model arguments cannot supply another owner, assert
 approval, forge source provenance or reclassify data for cloud disclosure.
@@ -20,7 +22,10 @@ copied prompt. Legacy references remain labelled as legacy.
 
 SQLite commits fact changes and action-bound receipts atomically. Recovery
 observes receipts rather than retrying a mutation or guessing from current
-fact values. Terminal replay and interrupted settlement use the recorded
+fact values. Journal settlement rechecks receipts under the same immediate
+write lock as commit authorization: a stale missing-receipt observation cannot
+settle failure after a commit; settlement winning first prevents that commit.
+Terminal replay and interrupted settlement use the recorded
 source identifier and request fingerprint when the transcript is gone; they
 never execute another mutation. New/uncommitted changes still require the
 original owner message. Durable facts survive conversation/audit retention

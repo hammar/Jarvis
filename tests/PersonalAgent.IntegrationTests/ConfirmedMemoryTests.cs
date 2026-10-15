@@ -90,6 +90,128 @@ public sealed class ConfirmedMemoryTests
     }
 
     [Fact]
+    public async Task RetainedFactCanBeEditedInPlaceWithExactSiblingSnapshotAndDistinctContext()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var first = await fixture.CreateFactAsync("walls");
+        Assert.Equal("Succeeded", (await fixture.ApproveAsync(await fixture.RequestAsync(
+            new("retain_both", Subject: "bathroom", Key: "paint", Value: "ceiling",
+                Conflicts: [new(first.Id.Value, first.Version)], DistinguishingContext: "ceiling")))).Status);
+        var retained = (await fixture.Memory.FindConflictsAsync("owner", "bathroom", "paint", default))
+            .Single(fact => fact.Id != first.Id);
+        var update = new MemoryChangeArguments("update", retained.Id.Value, retained.Version,
+            "bathroom", "paint", "new ceiling", [new(first.Id.Value, first.Version)], "ceiling");
+        Assert.Equal("Succeeded", (await fixture.ApproveAsync(await fixture.RequestAsync(update))).Status);
+        var edited = (await fixture.Memory.GetAsync("owner", retained.Id, default))!;
+        Assert.Equal(2, edited.Version);
+        Assert.Equal("new ceiling", edited.Value);
+        Assert.Equal("ceiling", edited.DistinguishingContext);
+        Assert.Equal(first, await fixture.Memory.GetAsync("owner", first.Id, default));
+        Assert.Equal("Failed", (await fixture.ApproveAsync(await fixture.RequestAsync(
+            update with { ExpectedVersion = 2, Conflicts = [] }))).Status);
+    }
+
+    [Fact]
+    public async Task EscapedSearchEvidenceIsSizeBoundedWithMatchingCitationsAndExplicitTruncation()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        await fixture.CreateFactAsync(new string('\\', 8192));
+        await fixture.SqlAsync("""
+            WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x < 99)
+            INSERT INTO memory_facts (id, subject, fact_key, value, source_id, privacy_class,
+                created_at_utc, updated_at_utc, version)
+            SELECT printf('00000000-0000-0000-0000-%012x', n.x), f.subject, f.fact_key, f.value, f.source_id, f.privacy_class,
+                f.created_at_utc, f.updated_at_utc, f.version FROM n CROSS JOIN memory_facts f;
+            """);
+        var request = await fixture.ReadRequestAsync("memory.search", new MemorySearchArguments("bathroom", 100));
+        var result = await fixture.Dispatcher.DispatchAsync(request, default);
+        Assert.Equal("Succeeded", result.Status);
+        Assert.InRange(result.ResultJson!.Length, 1, 900_000);
+        var evidence = JsonSerializer.Deserialize<MemoryEvidence>(result.ResultJson)!;
+        Assert.True(evidence.Truncated);
+        Assert.InRange(evidence.Facts.Count, 1, 99);
+        Assert.Equal(evidence.Facts.Select(fact => new MemoryReference(fact.Id, fact.Version)), evidence.MemoryReferences);
+        Assert.Equal(result, await fixture.RestartedDispatcher().DispatchAsync(request, default));
+        var fact = evidence.Facts[0];
+        Assert.Equal("Succeeded", (await fixture.ApproveAsync(await fixture.RequestAsync(
+            new("delete", fact.Id.Value, fact.Version)))).Status);
+        Assert.Equal("memory_result_invalidated", (await fixture.Dispatcher.DispatchAsync(request, default)).ReasonCode);
+    }
+
+    [Fact]
+    public async Task StaleMissingReceiptObservationCannotOverrideConcurrentCommitAcrossDispatchers()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var request = await fixture.RequestAsync(new("create", Subject: "bathroom", Key: "paint", Value: "once"));
+        var pending = await fixture.Dispatcher.DispatchAsync(request, default);
+        await fixture.Approvals.ResolveAsync(pending.ApprovalId!.Value, "owner", 1, true, default);
+        var claimed = new AsyncGate();
+        var committed = new AsyncGate();
+        var staleObservation = new AsyncGate();
+        var originalJournal = new InterleavingJournal(fixture.Journal)
+        {
+            AfterStatus = status => status == "Executing" ? claimed.PauseAsync() : Task.CompletedTask,
+            BeforeStatus = status => status == "Succeeded" ? committed.PauseAsync() : Task.CompletedTask
+        };
+        var recoveryJournal = new InterleavingJournal(fixture.Journal)
+        {
+            BeforeStatus = status => status == "Failed" ? staleObservation.PauseAsync() : Task.CompletedTask
+        };
+        var original = fixture.RestartedDispatcher(originalJournal).DispatchAsync(request, default).AsTask();
+        await claimed.Reached.Task.WaitAsync(TimeSpan.FromSeconds(15));
+        var recovering = fixture.RestartedDispatcher(recoveryJournal).DispatchAsync(request, default).AsTask();
+        await staleObservation.Reached.Task.WaitAsync(TimeSpan.FromSeconds(15));
+        claimed.Release.SetResult();
+        await committed.Reached.Task.WaitAsync(TimeSpan.FromSeconds(15));
+        staleObservation.Release.SetResult();
+        var recovered = await recovering.WaitAsync(TimeSpan.FromSeconds(15));
+        Assert.Equal("Succeeded", recovered.Status);
+        committed.Release.SetResult();
+        Assert.Equal(recovered, await original.WaitAsync(TimeSpan.FromSeconds(15)));
+        Assert.NotNull(JsonSerializer.Deserialize<MemoryReceipt>(recovered.ResultJson!));
+        Assert.Equal(1, Assert.Single(await fixture.Memory.SearchAsync("owner", "once", 10, default)).Version);
+    }
+
+    [Fact]
+    public async Task InvalidationDuringPreparationReturnsContentFreeOutcomeInsteadOfParsingRedactedEnvelope()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var fact = await fixture.CreateFactAsync("secret");
+        var request = await fixture.RequestAsync(new("update", fact.Id.Value, fact.Version, "bathroom", "paint", "updated"));
+        var pending = await fixture.Dispatcher.DispatchAsync(request, default);
+        await fixture.Approvals.ResolveAsync(pending.ApprovalId!.Value, "owner", 1, true, default);
+        var entry = (await fixture.Journal.GetAsync(pending.ActionId!.Value, default))!;
+        await fixture.Journal.UpdateStatusAsync(entry.Id, "Executing", entry.Version, fixture.Clock.UtcNow, default);
+        var deletion = await fixture.RequestAsync(new("delete", fact.Id.Value, fact.Version));
+        var journal = new InterleavingJournal(fixture.Journal)
+        {
+            AfterFirstRead = async () => Assert.Equal("Succeeded", (await fixture.ApproveAsync(deletion)).Status)
+        };
+        var result = await fixture.RestartedDispatcher(journal).DispatchAsync(request, default);
+        Assert.Equal("Unknown", result.Status);
+        Assert.Equal("memory_result_invalidated", result.ReasonCode);
+        Assert.Null(result.ResultJson);
+        Assert.Null(await fixture.Memory.GetAsync("owner", fact.Id, default));
+    }
+
+    [Fact]
+    public async Task SettlementBeforeCommitPreventsALateMutation()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var request = await fixture.RequestAsync(new("create", Subject: "bathroom", Key: "paint", Value: "not applied"));
+        var pending = await fixture.Dispatcher.DispatchAsync(request, default);
+        var preview = await fixture.Proposals.PreviewAsync("owner", pending.ActionId!.Value, default);
+        await fixture.Approvals.ResolveAsync(pending.ApprovalId!.Value, "owner", 1, true, default);
+        var entry = (await fixture.Journal.GetAsync(pending.ActionId.Value, default))!;
+        await fixture.Journal.UpdateStatusAsync(entry.Id, "Executing", entry.Version, fixture.Clock.UtcNow, default);
+        Assert.Equal("Failed", (await fixture.RestartedDispatcher().DispatchAsync(request, default)).Status);
+        await Assert.ThrowsAsync<PersistenceConcurrencyException>(async () =>
+            await fixture.Memory.CommitAsync(preview.Command, default));
+        Assert.Empty(await fixture.Memory.SearchAsync("owner", "paint", 10, default));
+        Assert.Null(await fixture.Memory.GetReceiptAsync("owner", entry.Id, default));
+    }
+
+    [Fact]
     public async Task DeleteRedactsDerivedCopiesAndOldCallsCannotRestoreThem()
     {
         using var fixture = await Fixture.CreateAsync();
@@ -467,10 +589,10 @@ public sealed class ConfirmedMemoryTests
             return fixture;
         }
 
-        internal ToolDispatcher RestartedDispatcher() => new(
+        internal ToolDispatcher RestartedDispatcher(IActionJournalStore? journal = null) => new(
             new ToolRegistry(MemoryToolRegistrations.Create(Memory)),
             new ToolAllowlistPolicy("memory-v1", MemoryToolRegistrations.Permissions()),
-            Journal, Approvals, Clock, TimeSpan.FromSeconds(5));
+            journal ?? Journal, Approvals, Clock, TimeSpan.FromSeconds(5));
 
         internal async Task<ToolDispatchRequest> RequestAsync(MemoryChangeArguments args) =>
             await ReadRequestAsync("memory.propose_change", args);
@@ -514,6 +636,51 @@ public sealed class ConfirmedMemoryTests
         }
 
         public void Dispose() => file.Dispose();
+    }
+
+    private sealed class AsyncGate
+    {
+        internal TaskCompletionSource Reached { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal async Task PauseAsync()
+        {
+            Reached.SetResult();
+            await Release.Task.WaitAsync(TimeSpan.FromSeconds(15));
+        }
+    }
+
+    private sealed class InterleavingJournal(IActionJournalStore inner) : IActionJournalStore
+    {
+        internal Func<Task>? AfterFirstRead { get; set; }
+        internal Func<string, Task>? BeforeStatus { get; init; }
+        internal Func<string, Task>? AfterStatus { get; init; }
+        public ValueTask<ActionJournalEntry> CreateAsync(ActionJournalEntry entry, CancellationToken token) =>
+            inner.CreateAsync(entry, token);
+        public async ValueTask<ActionJournalEntry?> GetAsync(ActionId id, CancellationToken token)
+        {
+            var result = await inner.GetAsync(id, token);
+            var callback = AfterFirstRead;
+            AfterFirstRead = null;
+            if (callback is not null)
+            {
+                await callback();
+            }
+            return result;
+        }
+        public async ValueTask<ActionJournalEntry> UpdateStatusAsync(ActionId id, string status, long expectedVersion,
+            DateTimeOffset updatedAtUtc, CancellationToken cancellationToken, ToolDispatchResult? outcome = null)
+        {
+            if (BeforeStatus is not null)
+            {
+                await BeforeStatus(status);
+            }
+            var result = await inner.UpdateStatusAsync(id, status, expectedVersion, updatedAtUtc, cancellationToken, outcome);
+            if (AfterStatus is not null)
+            {
+                await AfterStatus(status);
+            }
+            return result;
+        }
     }
 
     private sealed class Clock : IClock
