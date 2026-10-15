@@ -1,6 +1,22 @@
 {
   "version": 2,
   "dependencies": {
-    "net10.0": {}
+    "net10.0": {
+      "personalagent.application": {
+        "type": "Project",
+        "dependencies": {
+          "PersonalAgent.Domain": "[1.0.0, )"
+        }
+      },
+      "personalagent.domain": {
+        "type": "Project"
+      },
+      "personalagent.testsupport": {
+        "type": "Project",
+        "dependencies": {
+          "PersonalAgent.Application": "[1.0.0, )"
+        }
+      }
+    }
   }
 }

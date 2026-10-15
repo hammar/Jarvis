@@ -3,4 +3,7 @@
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <WarningsAsErrors>$(WarningsAsErrors);CS1591</WarningsAsErrors>
   </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/PersonalAgent.Application/PersonalAgent.Application.csproj" />
+  </ItemGroup>
 </Project>

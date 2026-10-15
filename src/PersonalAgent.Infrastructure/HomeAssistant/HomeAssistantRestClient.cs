@@ -1,0 +1,236 @@
+using System.Net;
+using System.Net.Http.Headers;
+using System.Net.Http.Json;
+using System.Text.Json;
+using PersonalAgent.Application;
+using PersonalAgent.Application.Tools.Home;
+
+namespace PersonalAgent.Infrastructure.HomeAssistant;
+
+/// <summary>Implements exact approved HA REST operations, secret-safe errors and one bounded safe-read retry.</summary>
+/// <remarks>The supplied HTTP pipeline must disable redirects, retries and hedging. Service acceptance is not verification.</remarks>
+public sealed class HomeAssistantRestClient : IHomeAssistantClient
+{
+    private const int MaximumResponseBytes = 65_536;
+    private readonly HttpClient http;
+    private readonly Uri baseUri;
+    private readonly SecretReference secret;
+    private readonly ISecretResolver secrets;
+    private readonly HomeEntityCatalog catalog;
+    private readonly IClock clock;
+
+    /// <summary>Creates the adapter using trusted endpoint, secret reference and catalog.</summary>
+    /// <param name="http">Host-owned client with no redirect/retry/hedging pipeline.</param>
+    /// <param name="baseUri">Trusted HTTP(S) root without userinfo, query or fragment.</param>
+    /// <param name="secret">Named protected reference, never a resolved token.</param>
+    /// <param name="secrets">Server-side resolver.</param>
+    /// <param name="catalog">Exact host-owned permission/bounds catalog.</param>
+    /// <param name="clock">UTC observation-age clock.</param>
+    public HomeAssistantRestClient(
+        HttpClient http, Uri baseUri, SecretReference secret, ISecretResolver secrets,
+        HomeEntityCatalog catalog, IClock clock)
+    {
+        ArgumentNullException.ThrowIfNull(http);
+        ArgumentNullException.ThrowIfNull(baseUri);
+        ArgumentNullException.ThrowIfNull(secret);
+        ArgumentNullException.ThrowIfNull(secrets);
+        ArgumentNullException.ThrowIfNull(catalog);
+        ArgumentNullException.ThrowIfNull(clock);
+        if (!baseUri.IsAbsoluteUri || baseUri.Scheme is not ("http" or "https")
+            || baseUri.UserInfo.Length != 0 || baseUri.Query.Length != 0 || baseUri.Fragment.Length != 0
+            || string.IsNullOrWhiteSpace(secret.Name))
+        {
+            throw new ArgumentException("Home Assistant requires a trusted HTTP(S) base URI and named secret reference.");
+        }
+        this.http = http;
+        this.baseUri = new Uri(baseUri.AbsoluteUri.TrimEnd('/') + "/");
+        this.secret = secret;
+        this.secrets = secrets;
+        this.catalog = catalog;
+        this.clock = clock;
+    }
+
+    /// <inheritdoc />
+    public async ValueTask<HomeAssistantEntity> GetStateAsync(string entityId, CancellationToken cancellationToken)
+    {
+        var definition = catalog.Require(entityId);
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        deadline.CancelAfter(TimeSpan.FromSeconds(catalog.Options.RequestTimeoutSeconds));
+        try
+        {
+            for (var attempt = 0; ; attempt++)
+            {
+                try
+                {
+                    deadline.Token.ThrowIfCancellationRequested();
+                    using var request = await RequestAsync(HttpMethod.Get, "api/states/" + entityId, deadline.Token);
+                    using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token);
+                    if (Transient(response.StatusCode) && attempt == 0)
+                    {
+                        deadline.Token.ThrowIfCancellationRequested();
+                        continue;
+                    }
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        throw new HomeAssistantException(ReadFailure(response.StatusCode));
+                    }
+                    return await ReadStateAsync(response, definition, request.Headers.Authorization!.Parameter!, deadline.Token);
+                }
+                catch (HttpRequestException)
+                {
+                    deadline.Token.ThrowIfCancellationRequested();
+                    if (attempt != 0)
+                    {
+                        throw new HomeAssistantException(HomeAssistantFailure.Transport);
+                    }
+                }
+            }
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new HomeAssistantException(HomeAssistantFailure.Timeout);
+        }
+    }
+
+    /// <inheritdoc />
+    public ValueTask<HomeAssistantWriteResult> SetLightAsync(
+        string entityId, bool on, int? brightness, CancellationToken cancellationToken)
+    {
+        if (!catalog.AllowsLight(entityId, on, brightness))
+        {
+            return ValueTask.FromResult(new HomeAssistantWriteResult(HomeAssistantWriteStatus.Rejected, "home_operation_not_allowed"));
+        }
+        return WriteAsync("api/services/light/" + (on ? "turn_on" : "turn_off"),
+            brightness is null ? new { entity_id = entityId } : (object)new { entity_id = entityId, brightness }, cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public ValueTask<HomeAssistantWriteResult> SetTemperatureAsync(
+        string entityId, decimal temperature, CancellationToken cancellationToken)
+    {
+        if (!catalog.AllowsTemperature(entityId, temperature))
+        {
+            return ValueTask.FromResult(new HomeAssistantWriteResult(HomeAssistantWriteStatus.Rejected, "home_operation_not_allowed"));
+        }
+        return WriteAsync("api/services/climate/set_temperature", new { entity_id = entityId, temperature }, cancellationToken);
+    }
+
+    private async ValueTask<HomeAssistantWriteResult> WriteAsync(string path, object body, CancellationToken token)
+    {
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
+        deadline.CancelAfter(TimeSpan.FromSeconds(catalog.Options.RequestTimeoutSeconds));
+        // Resolve credentials and build the request before entering the possible-submission boundary.
+        using var request = await RequestAsync(HttpMethod.Post, path, deadline.Token);
+        request.Content = JsonContent.Create(body);
+        deadline.Token.ThrowIfCancellationRequested();
+        try
+        {
+            using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token);
+            if (response.IsSuccessStatusCode)
+            {
+                return new(HomeAssistantWriteStatus.Accepted, null);
+            }
+            if (response.StatusCode is HttpStatusCode.BadRequest or HttpStatusCode.Unauthorized
+                or HttpStatusCode.Forbidden or HttpStatusCode.NotFound or HttpStatusCode.MethodNotAllowed
+                or HttpStatusCode.UnprocessableEntity)
+            {
+                return new(HomeAssistantWriteStatus.Rejected, "home_service_rejected");
+            }
+            return new(HomeAssistantWriteStatus.Unknown, "home_delivery_uncertain");
+        }
+        catch (HttpRequestException)
+        {
+            return new(HomeAssistantWriteStatus.Unknown, "home_delivery_uncertain");
+        }
+        catch (OperationCanceledException)
+        {
+            return new(HomeAssistantWriteStatus.Unknown, "home_delivery_uncertain");
+        }
+    }
+
+    private async ValueTask<HttpRequestMessage> RequestAsync(HttpMethod method, string path, CancellationToken token)
+    {
+        ReadOnlyMemory<char> value;
+        try
+        {
+            value = await secrets.ResolveAsync(secret, token);
+        }
+        catch (Exception error) when (error is ArgumentException or InvalidOperationException)
+        {
+            throw new HomeAssistantException(HomeAssistantFailure.Unauthorized);
+        }
+        if (value.IsEmpty || value.Span.ContainsAnyInRange('\0', ' ') || value.Span.ContainsAnyInRange('\x7f', char.MaxValue))
+        {
+            throw new HomeAssistantException(HomeAssistantFailure.Unauthorized);
+        }
+        var request = new HttpRequestMessage(method, new Uri(baseUri, path));
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", value.ToString());
+        return request;
+    }
+
+    private async ValueTask<HomeAssistantEntity> ReadStateAsync(
+        HttpResponseMessage response, HomeEntityDefinition definition, string tokenValue, CancellationToken token)
+    {
+        try
+        {
+            await using var stream = await response.Content.ReadAsStreamAsync(token);
+            using var buffer = new MemoryStream();
+            var bytes = new byte[4096];
+            int count;
+            while ((count = await stream.ReadAsync(bytes, token)) != 0)
+            {
+                if (buffer.Length + count > MaximumResponseBytes)
+                {
+                    throw new HomeAssistantException(HomeAssistantFailure.InvalidResponse);
+                }
+                buffer.Write(bytes, 0, count);
+            }
+            using var document = JsonDocument.Parse(buffer.ToArray(), new JsonDocumentOptions { MaxDepth = 16 });
+            var root = document.RootElement;
+            var id = root.GetProperty("entity_id").GetString();
+            var state = root.GetProperty("state").GetString();
+            var source = root.GetProperty("last_updated").GetDateTimeOffset().ToUniversalTime();
+            if (id != definition.EntityId || state is null || state.Length > 256 || state.Any(char.IsControl)
+                || state.Contains(tokenValue, StringComparison.Ordinal)
+                || source > clock.UtcNow)
+            {
+                throw new HomeAssistantException(HomeAssistantFailure.InvalidResponse);
+            }
+            var attributes = root.GetProperty("attributes");
+            int? brightness = attributes.TryGetProperty("brightness", out var b) && b.ValueKind != JsonValueKind.Null
+                ? b.GetInt32() : null;
+            decimal? temperature = attributes.TryGetProperty("temperature", out var t) && t.ValueKind != JsonValueKind.Null
+                ? t.GetDecimal() : null;
+            if (brightness is < 0 or > 255)
+            {
+                throw new HomeAssistantException(HomeAssistantFailure.InvalidResponse);
+            }
+            return new(id, state, source, state is not ("unavailable" or "unknown"))
+            {
+                Brightness = brightness,
+                TargetTemperature = temperature,
+                Stale = clock.UtcNow - source > TimeSpan.FromSeconds(definition.MaximumAgeSeconds)
+            };
+        }
+        catch (Exception error) when (error is JsonException or InvalidOperationException or KeyNotFoundException
+            or FormatException or OverflowException)
+        {
+            throw new HomeAssistantException(HomeAssistantFailure.InvalidResponse);
+        }
+        catch (IOException)
+        {
+            throw new HttpRequestException("Home Assistant response transport failed.");
+        }
+    }
+
+    private static bool Transient(HttpStatusCode status) =>
+        status is HttpStatusCode.RequestTimeout or HttpStatusCode.TooManyRequests
+            or HttpStatusCode.BadGateway or HttpStatusCode.ServiceUnavailable or HttpStatusCode.GatewayTimeout;
+
+    private static HomeAssistantFailure ReadFailure(HttpStatusCode status) => status switch
+    {
+        HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden => HomeAssistantFailure.Unauthorized,
+        HttpStatusCode.NotFound => HomeAssistantFailure.UnknownEntity,
+        _ => HomeAssistantFailure.Transport
+    };
+}

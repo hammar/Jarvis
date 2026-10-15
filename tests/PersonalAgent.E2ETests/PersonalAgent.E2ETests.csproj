@@ -9,5 +9,7 @@
   <ItemGroup>
     <ProjectReference Include="../../src/PersonalAgent.AppHost/PersonalAgent.AppHost.csproj" />
     <ProjectReference Include="../PersonalAgent.TestSupport/PersonalAgent.TestSupport.csproj" />
+    <ProjectReference Include="../../src/PersonalAgent.Application/PersonalAgent.Application.csproj" />
+    <ProjectReference Include="../../src/PersonalAgent.Infrastructure/PersonalAgent.Infrastructure.csproj" />
   </ItemGroup>
 </Project>

@@ -536,7 +536,10 @@
         }
       },
       "personalagent.testsupport": {
-        "type": "Project"
+        "type": "Project",
+        "dependencies": {
+          "PersonalAgent.Application": "[1.0.0, )"
+        }
       },
       "personalagent.web": {
         "type": "Project",

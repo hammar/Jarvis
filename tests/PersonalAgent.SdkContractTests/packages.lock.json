@@ -159,7 +159,10 @@
         }
       },
       "personalagent.testsupport": {
-        "type": "Project"
+        "type": "Project",
+        "dependencies": {
+          "PersonalAgent.Application": "[1.0.0, )"
+        }
       },
       "GitHub.Copilot.SDK": {
         "type": "CentralTransitive",

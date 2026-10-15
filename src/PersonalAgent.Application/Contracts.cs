@@ -1203,7 +1203,17 @@ public interface IJobRunner
 /// <param name="State">Current state string.</param>
 /// <param name="ObservedAtUtc">UTC source observation instant.</param>
 /// <param name="Available">Whether the source reports the entity available.</param>
-public sealed record HomeAssistantEntity(string EntityId, string State, DateTimeOffset ObservedAtUtc, bool Available);
+public sealed record HomeAssistantEntity(string EntityId, string State, DateTimeOffset ObservedAtUtc, bool Available)
+{
+    /// <summary>Gets the HA native brightness (0-255), when reported.</summary>
+    public int? Brightness { get; init; }
+
+    /// <summary>Gets the thermostat target setpoint in its configured unit, not room temperature.</summary>
+    public decimal? TargetTemperature { get; init; }
+
+    /// <summary>Gets whether the source timestamp exceeds the configured maximum age.</summary>
+    public bool Stale { get; init; }
+}
 
 /// <summary>Provides typed reads and narrowly mapped operations for approved Home Assistant entities.</summary>
 public interface IHomeAssistantClient
@@ -1213,6 +1223,23 @@ public interface IHomeAssistantClient
     /// <param name="cancellationToken">Token that cancels the request.</param>
     /// <returns>Typed state and source observation time.</returns>
     ValueTask<HomeAssistantEntity> GetStateAsync(string entityId, CancellationToken cancellationToken);
+
+    /// <summary>Sends one narrow light service operation without retrying possible submission.</summary>
+    /// <param name="entityId">Exact approved light identifier.</param>
+    /// <param name="on">Whether the light should be on.</param>
+    /// <param name="brightness">Optional HA native brightness, within catalog bounds; allowed only when on.</param>
+    /// <param name="cancellationToken">Cancels before send; cancellation after possible send is uncertain.</param>
+    /// <returns>Acceptance, definitive rejection, or uncertain delivery; never physical verification.</returns>
+    ValueTask<HomeAssistantWriteResult> SetLightAsync(
+        string entityId, bool on, int? brightness, CancellationToken cancellationToken);
+
+    /// <summary>Sends one approved thermostat target setpoint without retrying possible submission.</summary>
+    /// <param name="entityId">Exact approved thermostat identifier.</param>
+    /// <param name="temperature">Target setpoint in the catalog's configured unit and bounds.</param>
+    /// <param name="cancellationToken">Cancels before send; cancellation after possible send is uncertain.</param>
+    /// <returns>Acceptance, definitive rejection, or uncertain delivery; never physical verification.</returns>
+    ValueTask<HomeAssistantWriteResult> SetTemperatureAsync(
+        string entityId, decimal temperature, CancellationToken cancellationToken);
 }
 
 /// <summary>Names a protected secret reference without carrying its secret value.</summary>

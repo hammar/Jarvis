@@ -5,6 +5,29 @@ depends on Application and Domain; `Microsoft.Data.Sqlite` and SQLite types
 remain inside this project. GitHub Copilot SDK types are confined to
 `AgentEngine/Copilot/`.
 
+## Home Assistant adapter
+
+`HomeAssistant/HomeAssistantRestClient` uses only approved state reads and
+fixed light/climate service calls. It never updates `/api/states` to control
+devices. `HomeAssistantConfiguration` supplies explicit synthetic defaults
+only for Simulator/E2E; live catalogs are administrator-authored JSON.
+See [configuration](../../docs/development.md#home-assistant-configuration).
+
+The adapter repeats catalog/bounds checks before HTTP. Its client disables
+redirects and generic retries; safe reads alone get one transient retry within
+one shared deadline. Tokens resolve server-side through `ISecretResolver`.
+Remote error bodies, headers and exception payloads are not returned or logged;
+state parsing is bounded and projects only typed fields. Unauthorized, unknown
+entity, invalid response, transport and deadline failures have safe typed codes.
+Snapshots separately carry availability and source-age staleness.
+
+Service acceptance is not physical success. A possibly submitted write is
+Unknown and can only be observed, never automatically resent. Verification
+compares target power/brightness or thermostat setpoint, not room temperature,
+and cannot establish which command caused an observed state. Security devices,
+wildcards, generic services, switches, covers and WebSockets are unsupported.
+Tests: `tools/validate.sh integration` and `tools/validate.sh aspire-e2e`.
+
 ## SQLite migrations and local use
 
 The Web composition root initializes the database before serving requests.
@@ -109,11 +132,10 @@ callbacks always pass through the host's `IToolDispatcher`.
 M2-01 carries the authenticated owner and current request from the accepted
 host context through each callback. `ToolDispatcher` validates registered
 inputs, applies the exact host allowlist, journals action intent, and routes
-approval/verification through Application services. The current composition
-has no registered production tools or allowlist entries; tool-bearing flows
-remain unavailable until their owning feature tasks provide real handlers.
-Controlled dispatcher tests do not establish Home Assistant or live-device
-behavior.
+approval/verification through Application services. M2-02 registers the initial home tools when Home Assistant is configured,
+using exact permissions derived from its validated catalog. Chat orchestration
+and approval UI remain M2-04 scope. Controlled HTTP tests establish adapter/
+dispatcher integration, not actual device behavior.
 
 The adapter uses `LocalChatPrompt` for selected history/current-task framing
 and the supported `OnUserPromptTransformed` hook to keep the model-facing prompt

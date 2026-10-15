@@ -44,8 +44,9 @@ public sealed class ArchitectureBoundaryTests
                 "PersonalAgent.Web"
             ],
             ["PersonalAgent.SdkContractTests"] = ["PersonalAgent.Infrastructure", "PersonalAgent.TestSupport"],
-            ["PersonalAgent.E2ETests"] = ["PersonalAgent.AppHost", "PersonalAgent.TestSupport"],
-            ["PersonalAgent.TestSupport"] = []
+            ["PersonalAgent.E2ETests"] = ["PersonalAgent.AppHost", "PersonalAgent.TestSupport", "PersonalAgent.Infrastructure", "PersonalAgent.Application"],
+            ["PersonalAgent.TestSupport"] = ["PersonalAgent.Application"],
+            ["PersonalAgent.SimulatorEndpoints"] = ["PersonalAgent.TestSupport"]
         };
 
     [Fact]

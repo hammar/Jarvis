@@ -65,6 +65,13 @@ remain in the private data directory across restarts and application updates.
 See the [Web guide](src/PersonalAgent.Web/README.md) for session, API, and
 retention details.
 
+M2-02 provides the four narrow Home Assistant tools, approved catalog, REST
+adapter and controlled HTTP fixtures. Aspire tests exercise their dispatcher/
+approval integration; chat tool routing and approval UI are M2-04 scope, not
+yet available from the chat page. Live automatic light writes and thermostat
+writes are disabled by default. See the
+[Home Assistant configuration](docs/development.md#home-assistant-configuration).
+
 ## Validation
 
 Use `tools/validate.sh` on macOS/Linux. It relies on the pinned .NET SDK and
