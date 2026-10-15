@@ -184,7 +184,7 @@ R7/R8, both labelled "Previously missed"; both are retained below. Commit
 | M2-01-R3 | High | Approval expiry or policy could change while awaiting the durable execution claim. | Fixed in the review follow-up: recheck expiry and policy immediately after the claim. `AuthorizationIsRecheckedAfterDurableClaimBeforeSending` and `AutomaticActionCannotExecuteWhenPolicyChangesWhileClaimingIt` assert terminal rejection/expiry and zero sends. |
 | M2-01-R4 | Medium | Fresh call IDs bypassed the two-equivalent-failure limit. | Fixed in the review follow-up: canonical turn-scoped failure accounting serializes equivalent attempts; `TwoEquivalentFailuresStopFreshCallIdsButNotLaterTurns` and `ConcurrentEquivalentFailuresCannotRacePastTheTwoAttemptLimit` cover errors, aliases/property order, fresh call IDs, and concurrency. SDK contracts assert turn accounting cleanup. |
 | M2-01-R5 | Medium | Changed policy prevented recovery of an orphaned `Executing` action. | Fixed in the review follow-up: permit observation-only recovery when current policy allows; otherwise journal `Unknown` without observing or sending. `RestartedExecutionHandlesChangedPolicyWithoutReplayingIt` and `PolicyChangeDoesNotMistakeActiveExecutionForRestartRecovery` cover both restart permissions and active-call arbitration against real SQLite. |
-| M2-01-R6 | Medium | Duplicate/restarted dispatch loses the original result JSON and detailed reason. | Originally deferred outside unchanged-T03 scope, not owner-accepted. The owner subsequently authorized the single-copy journal/schema extension in ADR 0005. Implementation and exact replay/atomic persistence/migration/runtime-reference evidence are recorded in the R6 update below; historical review records retain their original scope and conclusions. |
+| M2-01-R6 | Medium | Duplicate/restarted dispatch loses the original result JSON and detailed reason. | Fixed in `fbd5f8b` after the owner authorized ADR 0005's single-copy journal/schema extension. Exact terminal replay, atomic persistence, bounds, migration preservation and runtime event-reference checks pass; independent source review found no new significant issue. Historical deferral records retain their original scope/conclusions, not a current acceptance gap. Full PR readiness still requires every current-head gate. |
 | M2-01-R7 (Previously missed) | Medium | A stale approval read could falsely report expiry after another dispatch began or completed execution. | Fixed in `c5f3d63`: report `Expired` only when the transition actually produced that status; otherwise return the recorded action outcome. `StaleApprovalReadCannotReportExpiryAfterExecutionBegins` exercises both `Executing` and `Succeeded` across the expiry boundary. |
 | M2-01-R8 (Previously missed) | High | A fresh equivalent call ID could resend after an uncertain write. | Fixed in `c5f3d63`: serialize equivalent proposals and keep their write gate closed from the send boundary until a known outcome is durably recorded. `UncertainWritesBlockEquivalentFreshIdsIncludingQueuedAttempts` and `EquivalentUncertainWritesCannotResendWithFreshIds` cover sequential/concurrent fresh IDs, unknown results, cancellation, handler/verification exceptions, and terminal-journal failure. Known failed writes retain two attempts; later owner turns remain independent. |
 | M2-01-R9 (review label R7; Previously missed) | Medium | A delayed duplicate returning a recorded failure could consume the second failure slot without executing. | Fixed in `1669296`: deduplicate failed-attempt accounting by action ID on both returned-outcome and exception paths. `DelayedDuplicateDoesNotConsumeASecondFailureSlot` pauses a duplicate's `Prepared` snapshot until the first attempt fails; the next fresh call still executes, and a third distinct attempt is rejected only after two failures. |
@@ -290,8 +290,46 @@ Targeted implementation evidence: 146 dispatcher unit cases and 68 real-SQLite
 dispatcher/outcome cases passed. Exact tests cover all five terminal statuses,
 opaque payload text, identifiers, restart without sends/observations, CAS and
 transaction abort, cancellation, bounds and genuine v5 upgrade preservation.
-Required full gates and independent exact-commit review are still pending;
-these targeted checks alone do not establish PR readiness.
+The cohesive extension changes 529 lines across 21 files, exceeding the review
+target because the one storage change requires contracts, migration, every
+terminal response surface, real persistence/runtime coverage and corresponding
+specification/operations documentation. No unrelated cleanup is included.
+
+Required native macOS checks at runtime revision
+`fbd5f8b4958422dc4dd614bf40f7a31d66f6316c` used the unchanged commands
+`sh tools/validate.sh build`, `unit`, `integration`, `coverage`, `architecture`,
+`docs`, `sdk-contracts`, `aspire-e2e` and `browser-e2e`, with standard
+`UseArtifactsOutput=true` and
+`ArtifactsPath="$PWD/artifacts/isolated-validation-r15-r16"`.
+Build/format passed with zero warnings/errors; unit277, integration288,
+architecture6, dedicated SDK55 plus bootstrap runtime probes, and Aspire7 all
+passed with discovery verified. Coverage gates passed: changed99.2%(939/947);
+Application98.6%(1845/1872) lines94.5%(834/883) branches;
+Infrastructure93.4%(2921/3127) lines79.2%(755/953) branches. Inputs are
+`artifacts/coverage/unit/20261015T012506Z-73788` and
+`artifacts/coverage/integration/20261015T012543Z-74050`.
+Browser29 passed in 8m9s with discovery verified; the deliberately failing
+Playwright probe was discovered and failed as expected, so the browser gate
+also passed. Reports are under
+`artifacts/test-results/20261015T012859Z-75486/sdk-contracts`,
+`artifacts/test-results/20261015T013050Z-76119/aspire-e2e` and
+`artifacts/test-results/20261015T013141Z-76403/browser-e2e`.
+All nine local commands completed successfully. Current-head Linux CI
+remains a required separate gate; no live household/cloud/device writes used.
+
+Independent reviewer `review-r6-outcomes` examined exact revision
+`fbd5f8b4958422dc4dd614bf40f7a31d66f6316c` against `318ebee`, specification,
+ADRs 0003/0005, implementation/tests/docs and the complete R1-R23 ledger.
+No new significant findings/R24 were identified. The review examined atomic
+CAS/readback/rollback, all terminal replay surfaces and winner equality,
+pre-wait original risk, action-owned uncertainty, proposal gating/final
+admission, exact approvals, observation-only recovery, genuine legacy
+migrations and no payload duplication/context expansion. It independently
+reviewed source, not test execution, CI, live-device or cross-process behavior.
+The actual SDK fixture proves forwarding/references with a recording
+dispatcher; separate SQLite tests establish journal durability. This source
+review supports R6's fix, not a blanket correctness guarantee, owner residual-risk
+acceptance or merge authorization. All prior finding dispositions remain intact.
 
 ### Exact-commit independent review
 
