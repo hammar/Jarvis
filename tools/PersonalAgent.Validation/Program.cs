@@ -130,6 +130,11 @@ internal static class CoverageGate
         ("M2-01 exact approval lifecycle", "src/PersonalAgent.Application/Approvals/ApprovalService.cs", 95, 90),
         ("M2-02 exact home catalog and operation bounds", "src/PersonalAgent.Application/Tools/Home/HomeEntityCatalog.cs", 95, 90),
         ("M2-02 whole-request light intent", "src/PersonalAgent.Application/Tools/Home/HomeLightIntent.cs", 95, 90),
+        ("M2-03 memory privacy and conflict policy", "src/PersonalAgent.Application/Memory/MemoryPolicy.cs", 95, 90),
+        ("M2-03 durable memory confirmation", "src/PersonalAgent.Application/Memory/MemoryProposalService.cs", 95, 90),
+        ("M2-03 memory tools and evidence boundary", "src/PersonalAgent.Application/Tools/Memory/MemoryToolRegistrations.cs", 95, 90),
+        ("M2-03 atomic memory persistence", "src/PersonalAgent.Infrastructure/Persistence/SqliteConfirmedMemoryStore.cs", 95, 90),
+        ("M2-03 derived memory invalidation", "src/PersonalAgent.Infrastructure/Persistence/SqliteMemoryDependencies.cs", 95, 90),
         ("Approval persistence invariants", "src/PersonalAgent.Infrastructure/Persistence/SqliteApprovalStore.cs", 95, 90),
         ("Action journal idempotency", "src/PersonalAgent.Infrastructure/Persistence/SqliteActionJournalStore.cs", 95, 90)
     ];

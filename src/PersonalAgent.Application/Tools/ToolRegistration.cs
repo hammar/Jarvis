@@ -32,6 +32,12 @@ public sealed record ToolActionDraft(
 {
     /// <summary>Opaque host-owned destination identity; interrupted recovery may observe only the same scope. Null preserves unscoped tools.</summary>
     public string? ObservationScope { get; init; }
+
+    /// <summary>Gets exact memory versions used by the proposal, enabling privacy-safe invalidation.</summary>
+    public IReadOnlyList<PersonalAgent.Application.Memory.MemoryReference>? MemoryReferences { get; init; }
+
+    // Retry accounting must not include generated action/new-fact identities.
+    internal string? EquivalentFailureArguments { get; init; }
 }
 
 /// <summary>Describes whether a typed proposal is executable, needs clarification, or is invalid.</summary>

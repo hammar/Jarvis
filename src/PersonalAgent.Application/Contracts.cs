@@ -619,7 +619,12 @@ public sealed record ToolDispatchRequest(
     string ToolName,
     string ArgumentsJson,
     string? OwnerId = null,
-    string? CurrentUserRequest = null);
+    string? CurrentUserRequest = null)
+{
+    // Application-owned replay context is never decoded from tool arguments.
+    internal Guid? ReplayMemorySourceId { get; init; }
+    internal string? ReplayCurrentRequestHash { get; init; }
+}
 
 /// <summary>Reports the host's dispatch outcome, including uncertain physical results.</summary>
 /// <param name="Status">Stable outcome such as Succeeded, Rejected, Failed, or Unknown.</param>
@@ -721,7 +726,27 @@ public sealed record MemoryFact(
     string Value,
     string SourceId,
     string PrivacyClass,
-    long Version);
+    long Version)
+{
+    /// <summary>Gets the authenticated owning account.</summary>
+    public string OwnerId { get; init; } = "owner";
+    /// <summary>Gets OwnerMessage for verified message provenance, or Legacy for imported references.</summary>
+    public string SourceType { get; init; } = "Legacy";
+    /// <summary>Gets the original message ID, null for legacy or removed provenance.</summary>
+    public Guid? SourceMessageId { get; init; }
+    /// <summary>Gets whether the original source message still exists.</summary>
+    public bool SourceAvailable { get; init; }
+    /// <summary>Gets the UTC creation instant.</summary>
+    public DateTimeOffset CreatedAtUtc { get; init; }
+    /// <summary>Gets the UTC instant of the last accepted fact change.</summary>
+    public DateTimeOffset UpdatedAtUtc { get; init; }
+    /// <summary>Gets Active or Superseded; only active facts are retrieved.</summary>
+    public string ValidityStatus { get; init; } = "Active";
+    /// <summary>Gets the superseded fact ID, if its record remains available.</summary>
+    public MemoryFactId? SupersedesId { get; init; }
+    /// <summary>Gets owner-reviewed context distinguishing retained conflicting facts.</summary>
+    public string? DistinguishingContext { get; init; }
+}
 
 /// <summary>Stores and retrieves explicit owner-confirmed facts.</summary>
 public interface IMemoryStore
@@ -1058,7 +1083,13 @@ public sealed record ActionJournalEntry(
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset UpdatedAtUtc,
     long Version,
-    ToolDispatchResult? Outcome = null);
+    ToolDispatchResult? Outcome = null)
+{
+    /// <summary>Gets whether memory privacy changes permanently invalidated this action's payload.</summary>
+    public bool MemoryInvalidated { get; init; }
+    /// <summary>Gets the host-authenticated owner for memory actions, retained after content redaction.</summary>
+    public string? MemoryOwnerId { get; init; }
+}
 
 /// <summary>Persists action intent and observed outcomes before and after external side effects.</summary>
 public interface IActionJournalStore

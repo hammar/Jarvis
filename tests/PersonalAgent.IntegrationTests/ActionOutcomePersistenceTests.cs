@@ -143,7 +143,7 @@ public sealed class ActionOutcomePersistenceTests
         await using var verify = await database.OpenConnectionAsync();
         await using var command = verify.CreateCommand();
         command.CommandText = "PRAGMA user_version;";
-        Assert.Equal(6L, (long)(await command.ExecuteScalarAsync())!);
+        Assert.Equal(7L, (long)(await command.ExecuteScalarAsync())!);
         command.CommandText = "SELECT content FROM messages;";
         Assert.Equal("preserved answer", (string?)await command.ExecuteScalarAsync());
         command.CommandText = "UPDATE actions SET outcome_json = '{\"Status\":\"Succeeded\"}';";
