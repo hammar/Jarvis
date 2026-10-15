@@ -7,6 +7,36 @@ explicit trusted local endpoint/model configuration; use protected named
 secret references rather than embedding credentials in URIs or source control.
 AppHost does not own external Ollama, Home Assistant, or personal data.
 
+Home Assistant configuration is opt-in and preserved independently of binaries;
+see [settings](development.md#home-assistant-configuration). Live automatic light
+writes and thermostat are off by default. Do not enable automatic light writes
+before the spec's model-evaluation prerequisite. A service acceptance response
+is not device verification; Unknown/accepted-unconfirmed outcomes are not a
+reason to blindly resend. Restore preserves the existing action journal and
+must never replay uncertain writes. A matching observation establishes current
+state, not which request caused it. Stale readings retain their source timestamp.
+Interrupted home actions also bind their original connection/catalog observation
+scope. An endpoint/reference/catalog change, or a legacy action without that
+scope, remains Unknown without querying a replacement installation. Retain the
+original journal; configuration changes are not evidence of physical success.
+Service HTTP errors (including 400) may be returned after a device effect and
+are not proof of rejection without application. Jarvis observes them without
+resubmission; an unchanged/unavailable state remains Unknown and blocks an
+equivalent write in that turn. Correct known local configuration/credential
+failures before submission rather than assuming a remote error rolled back.
+
+Optional live HA smoke evaluation is outside required CI and has not been run
+by M2-02 automation. Only after explicit owner consent, configure the endpoint,
+protected reference and a minimal read-only catalog in an isolated direct host;
+keep automatic lights/thermostat disabled. Check a selected sensor through the
+application client against its source timestamp/unit and stop on unauthorized,
+unknown, stale or transport errors. Do not add real tokens to simulator fixtures.
+Physical write evaluation requires separate consent, exact target/bounds,
+baseline/expected observation and owner-controlled restoration; timeout or
+uncertainty means stop and observe, never automatically retry. Remove test
+configuration and stop only test-owned processes afterward. This guidance is
+not a claim of implemented live smoke tooling or required manual certification.
+
 The Web host initializes SQLite migrations before accepting work. A stable
 client request ID is durable per conversation; same-request retries return
 the original turn, including after restart, while conflicting reuse is

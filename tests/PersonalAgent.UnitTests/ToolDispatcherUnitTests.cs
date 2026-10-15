@@ -1892,6 +1892,16 @@ public sealed class ToolDispatcherUnitTests
         fixture.PrepareOverride = (_, _) => ToolPreparationResult.Ready(
             new ToolActionDraft("home.set_light", "turn_on", "light.porch", """[]"""));
         var invalidCanonical = await fixture.Dispatcher.DispatchAsync(Request with { CallId = "bad-json" }, CancellationToken.None);
+        foreach (var invalidScope in new[] { "", " ", "bad\nscope", new string('x', 257) })
+        {
+            fixture.PrepareOverride = (_, _) => ToolPreparationResult.Ready(
+                new ToolActionDraft("home.set_light", "turn_on", "light.porch", """{"on":true}""")
+                {
+                    ObservationScope = invalidScope
+                });
+            Assert.Equal("invalid_tool_action",
+                (await fixture.Dispatcher.DispatchAsync(Request, CancellationToken.None)).ReasonCode);
+        }
         fixture.PrepareOverride = null;
         var noOwner = await fixture.Dispatcher.DispatchAsync(Request with { CallId = "no-owner", OwnerId = null }, CancellationToken.None);
         var wrongTarget = await fixture.Dispatcher.DispatchAsync(
@@ -1908,6 +1918,42 @@ public sealed class ToolDispatcherUnitTests
         Assert.Equal("Rejected", wrongTarget.Status);
         Assert.Equal(0, fixture.ExecutionCount);
         Assert.Equal("Rejected", fixture.Journal.Entries.Single().Status);
+    }
+
+    [Theory]
+    [InlineData(null, "current", false)]
+    [InlineData("original", null, false)]
+    [InlineData("original", "changed", false)]
+    [InlineData("same", "same", true)]
+    [InlineData(null, null, true)]
+    [Trait("Category", "Unit")]
+    public async Task RecoveryRequiresThePersistedObservationScopeWhileUnscopedToolsRemainCompatible(
+        string? originalScope, string? currentScope, bool observe)
+    {
+        using var fixture = new Fixture();
+        var scope = originalScope;
+        fixture.PrepareOverride = (_, _) => ToolPreparationResult.Ready(
+            new ToolActionDraft("home.set_light", "turn_on", "light.porch", """{"on":true}""", true)
+            {
+                ObservationScope = scope
+            });
+        var orphan = await fixture.MarkExecutingAsync(Request);
+        scope = currentScope;
+        fixture.Policy.Replace("changed-policy");
+        var restarted = fixture.CreateRestartedDispatcher();
+        var result = await restarted.DispatchAsync(Request, CancellationToken.None);
+        Assert.Equal(observe ? "Succeeded" : "Unknown", result.Status);
+        Assert.Equal(result, await restarted.DispatchAsync(Request, CancellationToken.None));
+        Assert.Equal(result.Status, (await fixture.Journal.GetAsync(orphan.Id, CancellationToken.None))!.Status);
+        Assert.Equal(1, fixture.ExecutionCount);
+        Assert.Equal(observe ? 2 : 1, fixture.VerificationCount);
+        if (!observe)
+        {
+            Assert.Equal("interrupted_execution_observation_not_permitted", result.ReasonCode);
+            Assert.Equal("equivalent_write_outcome_unknown",
+                (await restarted.DispatchAsync(Request with { CallId = "next" }, CancellationToken.None)).ReasonCode);
+            Assert.Equal(1, fixture.ExecutionCount);
+        }
     }
 
     [Fact]

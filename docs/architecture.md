@@ -2,6 +2,34 @@
 
 ## Runtime ownership
 
+M2-02's Application `Tools/Home` catalog is the exact entity/operation boundary,
+shared by typed registrations and Infrastructure's narrow REST adapter. All
+metadata, bounds, aliases and gates, plus the normalized installation endpoint
+and named credential-reference identity, enter the policy identity for exact approvals.
+Web composes these services only in `Program.cs`; HA/HTTP types do not cross
+Application contracts. The non-production simulator alone references TestSupport.
+Managed HTTP discovery connects Simulator/E2E to synthetic devices; Local/Hybrid
+requires explicit trusted configuration.
+
+Read transport owns one explicitly classified transient retry within the
+original deadline: HTTP 408/429/502/503/504, connection failures, ended responses,
+and typed reset/aborted/timed-out socket causes. Permanent TLS, authentication,
+protocol and unclassified errors are not retried.
+Neither HTTP resilience nor the dispatcher duplicates it.
+Known pre-submission credential/cancellation/deadline failures return definitive
+not-submitted outcomes; only possible delivery becomes physical uncertainty.
+Writes submit once; bounded verification/recovery reads current state without
+proving causality, and unchanged state after possible submission remains Unknown.
+An unsuccessful service HTTP response also remains Unknown: HA service execution
+can return errors after side effects, without rollback guarantees. Only
+host-proven pre-submission failures are definitive no-application outcomes.
+Home write drafts persist an opaque connection/catalog observation scope in
+the existing journal envelope. Recovery after a scope change (including a legacy
+unscoped home action) records Unknown without reading a different installation.
+Unscoped tools retain their existing policy-change recovery behavior.
+No SQLite schema change or new authority outside M2-01's journal is introduced.
+The coordinator's chat catalog remains empty until M2-04 composition.
+
 The C# host owns user identity, route policy, privacy/context selection,
 approval, tool authorization, durable conversations/jobs/audit, cancellation,
 and outcome reporting. The Copilot runtime is a replaceable inference engine,
@@ -73,9 +101,9 @@ and resolve once using optimistic concurrency. Execution rechecks the exact
 canonical envelope and current policy immediately before crossing the
 side-effect boundary, after the durable execution claim has completed any
 SQLite lock wait. Approval expiry at that point records `Expired`; a changed
-policy records `Rejected`, without sending. Production composition currently has an empty tool
-registry and empty allowlist: no feature tool is exposed until its owning
-feature task registers a real handler.
+policy records `Rejected`, without sending. M2-02 composition registers only
+the configured home tools and their exact catalog-derived permissions; absent
+HA configuration exposes no home tools.
 If a concurrent dispatch already claimed or completed the action, a stale
 approval expiry attempt returns that recorded state instead of falsely claiming
 that expiry stopped execution.
@@ -108,7 +136,8 @@ observed result or `Unknown`. Concurrent duplicate calls handled by the active
 dispatcher return the in-progress journal state rather than mistaking it for a
 restart. SQLite cannot transact with Home Assistant, so `Succeeded` means the
 intended state was verified, not exactly-once physical execution. Approval UI
-and real Home Assistant handlers remain M2-04 and M2-02 respectively.
+remains M2-04 scope; M2-02 supplies the real REST handler and controlled tests,
+not evidence of live household behavior.
 Definitive `NotApplied` verification records `Failed` even after an `Unknown`
 execution result, consistently with interrupted-execution recovery. It permits
 only the remaining known-failure attempt, not an automatic retry. An unchanged

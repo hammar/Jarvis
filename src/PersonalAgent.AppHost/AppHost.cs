@@ -24,7 +24,9 @@ if (profile is "Simulator" or "E2E")
         .WithEnvironment("JARVIS_CLOUD_BASE_URL", string.Empty)
         .WithEnvironment("JARVIS_CLOUD_SECRET_REFERENCE", string.Empty)
         .WithEnvironment("JARVIS_HOME_ASSISTANT_BASE_URL", string.Empty)
-        .WithEnvironment("JARVIS_HOME_ASSISTANT_SECRET_REFERENCE", string.Empty);
+        .WithEnvironment("JARVIS_HOME_ASSISTANT_SECRET_REFERENCE", string.Empty)
+        .WithEnvironment("JARVIS_SIMULATOR_HOME_TOKEN", "synthetic-home-token")
+        .WithEnvironment("JARVIS_HOME_THERMOSTAT_ENABLED", "false");
     if (profile == "E2E")
     {
         web.WithEnvironment(
@@ -44,6 +46,7 @@ if (profile is "Simulator" or "E2E")
             launchProfileName: null)
         .WithHttpEndpoint()
         .WithEnvironment("JARVIS_SIMULATOR_KIND", "home-assistant")
+        .WithEnvironment("JARVIS_SIMULATOR_CONTROLS_ENABLED", profile == "E2E" ? "true" : "false")
         .WithHttpHealthCheck("/health/ready");
     web.WithReference(simulatorModel).WithReference(simulatorHome);
 }
@@ -91,6 +94,18 @@ else
     if (!string.IsNullOrWhiteSpace(homeAssistantSecretReference))
     {
         web.WithEnvironment("JARVIS_HOME_ASSISTANT_SECRET_REFERENCE", homeAssistantSecretReference);
+    }
+    foreach (var setting in new[]
+    {
+        "JARVIS_HOME_ENTITY_CATALOG", "JARVIS_HOME_THERMOSTAT_ENABLED",
+        "JARVIS_HOME_AUTOMATIC_LIGHTS_ENABLED", "JARVIS_HOME_REQUEST_TIMEOUT_SECONDS",
+        "JARVIS_HOME_VERIFICATION_SECONDS", "JARVIS_HOME_POLL_MILLISECONDS"
+    })
+    {
+        if (builder.Configuration[setting] is { } value)
+        {
+            web.WithEnvironment(setting, value);
+        }
     }
 }
 

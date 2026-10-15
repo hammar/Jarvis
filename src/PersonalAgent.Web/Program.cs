@@ -8,6 +8,8 @@ using PersonalAgent.Application.Tools;
 using PersonalAgent.Domain;
 using PersonalAgent.Infrastructure.AgentEngine.Copilot;
 using PersonalAgent.Infrastructure.Persistence;
+using PersonalAgent.Infrastructure.HomeAssistant;
+using PersonalAgent.Application.Tools.Home;
 using PersonalAgent.Web;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -87,11 +89,54 @@ builder.Services.AddSingleton<OwnerAuthenticationService>(services => new OwnerA
 builder.Services.AddSingleton<IConversationStore, SqliteConversationStore>();
 builder.Services.AddSingleton<IAtomicTurnOutcomeStore>(services =>
     (IAtomicTurnOutcomeStore)services.GetRequiredService<IConversationStore>());
-var toolRegistry = new ToolRegistry(Array.Empty<IToolRegistration>());
-builder.Services.AddSingleton(toolRegistry);
-builder.Services.AddSingleton<IToolRegistry>(toolRegistry);
+var homeEndpoint = profile is "Simulator" or "E2E"
+    ? builder.Configuration["services:simulator-home-assistant:http:0"]
+    : builder.Configuration["JARVIS_HOME_ASSISTANT_BASE_URL"];
+var homeSecretReference = profile is "Simulator" or "E2E"
+    ? "JARVIS_SIMULATOR_HOME_TOKEN"
+    : builder.Configuration["JARVIS_HOME_ASSISTANT_SECRET_REFERENCE"];
+HomeEntityCatalog? homeCatalog = null;
+string? homePolicyVersion = null;
+if (!string.IsNullOrWhiteSpace(homeEndpoint))
+{
+    var homeOptions = new HomeToolOptions(
+        builder.Configuration.GetValue<bool>("JARVIS_HOME_THERMOSTAT_ENABLED"),
+        profile is "Simulator" or "E2E" || builder.Configuration.GetValue<bool>("JARVIS_HOME_AUTOMATIC_LIGHTS_ENABLED"),
+        ReadBoundedSeconds(builder.Configuration, "JARVIS_HOME_REQUEST_TIMEOUT_SECONDS", 5, 60),
+        ReadBoundedSeconds(builder.Configuration, "JARVIS_HOME_VERIFICATION_SECONDS", 5, 60),
+        ReadBoundedSeconds(builder.Configuration, "JARVIS_HOME_POLL_MILLISECONDS", 250, 1000));
+    homeCatalog = profile is "Simulator" or "E2E"
+        ? HomeAssistantConfiguration.SimulatorCatalog(homeOptions)
+        : HomeAssistantConfiguration.ParseCatalog(builder.Configuration["JARVIS_HOME_ENTITY_CATALOG"] ?? "", homeOptions);
+    if (string.IsNullOrWhiteSpace(homeSecretReference))
+    {
+        throw new InvalidOperationException("Home Assistant requires a protected named secret reference.");
+    }
+    var homeBaseUri = HomeAssistantConfiguration.NormalizeEndpoint(new Uri(homeEndpoint, UriKind.Absolute));
+    var homeReference = new SecretReference(homeSecretReference);
+    homePolicyVersion = HomeAssistantConfiguration.PolicyVersion(homeCatalog, homeBaseUri, homeReference);
+    builder.Services.AddHttpClient("home-assistant", http => http.Timeout = Timeout.InfiniteTimeSpan)
+        .RemoveAllLoggers()
+        .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
+    builder.Services.AddSingleton(homeCatalog);
+    builder.Services.AddSingleton<IHomeAssistantClient>(services => new HomeAssistantRestClient(
+        services.GetRequiredService<IHttpClientFactory>().CreateClient("home-assistant"),
+        homeBaseUri, homeReference,
+        services.GetRequiredService<ISecretResolver>(), homeCatalog, clock));
+}
+else if (profile is "Local" or "Hybrid"
+    && (!string.IsNullOrWhiteSpace(homeSecretReference)
+        || !string.IsNullOrWhiteSpace(builder.Configuration["JARVIS_HOME_ENTITY_CATALOG"])))
+{
+    throw new InvalidOperationException("Home Assistant partial configuration requires an explicit base URL.");
+}
+builder.Services.AddSingleton(services => new ToolRegistry(homeCatalog is null
+    ? Array.Empty<IToolRegistration>()
+    : HomeToolRegistrations.Create(homeCatalog, services.GetRequiredService<IHomeAssistantClient>(), homePolicyVersion!)));
+builder.Services.AddSingleton<IToolRegistry>(services => services.GetRequiredService<ToolRegistry>());
 builder.Services.AddSingleton<IToolAuthorizationPolicy>(
-    new ToolAllowlistPolicy("m2-01-empty", Array.Empty<ToolPermission>()));
+    new ToolAllowlistPolicy(homePolicyVersion ?? "home-disabled",
+        homeCatalog?.Permissions() ?? Array.Empty<ToolPermission>()));
 builder.Services.AddSingleton<IMemoryStore, SqliteMemoryStore>();
 builder.Services.AddSingleton<IJobStore, SqliteJobStore>();
 builder.Services.AddSingleton<IActionJournalStore, SqliteActionJournalStore>();
@@ -106,7 +151,7 @@ builder.Services.AddSingleton<IToolDispatcher>(services => new ToolDispatcher(
     services.GetRequiredService<IActionJournalStore>(),
     services.GetRequiredService<IApprovalService>(),
     services.GetRequiredService<IClock>(),
-    TimeSpan.FromSeconds(5)));
+    TimeSpan.FromSeconds(homeCatalog?.Options.VerificationSeconds ?? 5)));
 builder.Services.AddSingleton(new CopilotAgentEngineOptions(
     Path.Combine(dataDirectory, "copilot-runtime"),
     localProvider,

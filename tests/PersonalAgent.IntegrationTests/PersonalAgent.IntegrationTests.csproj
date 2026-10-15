@@ -16,5 +16,6 @@
     <ProjectReference Include="../../src/PersonalAgent.Web/PersonalAgent.Web.csproj" />
     <Compile Include="../PersonalAgent.SdkContractTests/CopilotAgentEngineContractTests.cs" Link="AgentEngine/CopilotAgentEngineContractTests.cs" />
     <Compile Include="../../tools/sdk-validation/FakeOpenAiProvider.cs" Link="Fixtures/FakeOpenAiProvider.cs" />
+    <Compile Include="../../tools/PersonalAgent.SimulatorEndpoints/HomeAssistantSimulator.cs" Link="Fixtures/HomeAssistantSimulator.cs" />
   </ItemGroup>
 </Project>

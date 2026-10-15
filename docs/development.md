@@ -1,5 +1,78 @@
 # Development
 
+## Home Assistant configuration
+
+Home tools are registered when an HA endpoint is configured; production chat
+tool selection and approval UI remain M2-04 scope. Simulator/E2E uses the
+managed HA endpoint, synthetic credentials and explicit fixture catalog.
+Direct controlled Web hosts without that resource register no home tools.
+Local/Hybrid never substitute fixture entities for a missing live catalog.
+
+Live configuration (trusted administrator settings, never model arguments):
+
+| Setting | Meaning/default |
+| --- | --- |
+| `JARVIS_HOME_ASSISTANT_BASE_URL` | Explicit HTTP(S) root; no embedded credentials, query or fragment |
+| `JARVIS_HOME_ASSISTANT_SECRET_REFERENCE` | Name of a protected environment secret resolved server-side |
+| `JARVIS_HOME_ENTITY_CATALOG` | Strict JSON array of explicit approved entity definitions |
+| `JARVIS_HOME_THERMOSTAT_ENABLED` | False; when true, thermostat always requires exact approval |
+| `JARVIS_HOME_AUTOMATIC_LIGHTS_ENABLED` | False live; enable only after spec section 14 model evaluation |
+| `JARVIS_HOME_REQUEST_TIMEOUT_SECONDS` | 5 (1-60); shared across at most two safe-read attempts |
+| `JARVIS_HOME_VERIFICATION_SECONDS` | 5 (1-60); observation only |
+| `JARVIS_HOME_POLL_MILLISECONDS` | 250 (10-1000); bounded observation interval |
+
+Catalog example (configuration JSON uses these exact property names):
+
+```json
+[
+  {
+    "EntityId": "light.study",
+    "FriendlyName": "study light",
+    "Area": "Study",
+    "Unit": null,
+    "Aliases": ["desk light"],
+    "AllowWrite": true,
+    "MinimumBrightness": 10,
+    "MaximumBrightness": 200,
+    "MaximumAgeSeconds": 300
+  }
+]
+```
+
+Allowed domains are `light`, `climate` and explicitly selected `sensor`.
+`AllowWrite` defaults false; sensor writes are rejected. `climate` requires
+`Unit` C or F and `MinimumTemperature`/`MaximumTemperature` bounds (defaults
+16/28, in the configured unit). Configure the actual HA thermostat unit;
+the adapter does not query household configuration or silently convert units.
+Brightness uses native HA integer 1-255 units, not percent; optional brightness
+is rejected for off. ID wildcards, paths, unsupported domains and collisions
+between entity IDs and other aliases fail configuration. Duplicate descriptive
+aliases are permitted but require clarification before an entity is selected.
+Live endpoint/reference/catalog must be provided together.
+
+Pending approvals bind the normalized endpoint, named reference and complete
+catalog/options hash. Changing the installation or reference requires fresh
+consent; resolved token values never enter that identity.
+
+The existing environment resolver reads the variable named by the reference.
+Set its value through a protected local launch mechanism, not chat, committed
+files, command history, dashboard links or logs. Environment variables are not
+an encrypted secret store; the reference mechanism does not imply granular HA
+token permissions. Use a dedicated HA account/token and a trusted network/TLS
+where feasible. Preserve reference names across updates.
+
+Exact automatic-light grammar, case-insensitive and whole-request only:
+`turn on <unique ID/name/alias>`, `turn off <unique ID/name/alias>`, or
+`turn on <unique ID/name/alias> at brightness <native integer>`.
+Every target/value must match the proposal; extra clauses, negation, missing
+brightness intent or other phrasing require approval. This is conservative
+recognition, not unrestricted natural-language intent certification.
+
+Freshness uses source `last_updated` age against `MaximumAgeSeconds`.
+Unchanged HA values may not update that timestamp; stale is an age heuristic,
+not proof that a device failed to measure. Answers expose the timestamp and
+availability rather than inventing a fresh reading.
+
 ## Toolchain and validation commands
 
 Install the exact .NET SDK in `global.json` (`10.0.401`) and use the solution

@@ -28,7 +28,11 @@ public sealed record ToolActionDraft(
     string Operation,
     string? ResolvedEntityId,
     string CanonicalArguments,
-    bool ExplicitlyRequestedByOwner = false);
+    bool ExplicitlyRequestedByOwner = false)
+{
+    /// <summary>Opaque host-owned destination identity; interrupted recovery may observe only the same scope. Null preserves unscoped tools.</summary>
+    public string? ObservationScope { get; init; }
+}
 
 /// <summary>Describes whether a typed proposal is executable, needs clarification, or is invalid.</summary>
 public enum ToolPreparationStatus

@@ -197,6 +197,34 @@ authority.
 
 ## Scenario mapping
 
+M2-02 credential-free HA tests use instance-local synthetic state, real loopback
+HTTP and isolated SQLite. `HomeToolTests` covers catalog/pattern rejection,
+exact operation bounds, immutable configuration identity and whole-request light
+intent. `HomeAssistantTests` covers explicit transient safe-read retry counts,
+original deadlines, stale/unavailable/source timestamps, malformed/oversized
+bodies, exact approvals/rejection/replay, security/ambiguous targets with zero
+requests, delayed observation and uncertain/cancelled writes with one submission.
+Transport classification tests inject typed faults (not live TLS) before a real
+loopback success; dropped-response tests exercise the actual HTTP transport.
+Two-installation/reference recovery tests assert durable Unknown with no reads
+or additional writes on a changed destination, for both write tools. Dispatcher
+unit tests cover legacy missing observation scopes and compatible unscoped tools.
+Applied/unapplied HTTP 400 cases cover both write tools; additional service
+error statuses prove that HTTP rejection alone cannot establish no application.
+Each submits once, observes only, replays exactly after restart, and blocks
+equivalent unresolved writes rather than spending a false known-failure retry.
+Synthetic token errors never appear in returned/persisted outcomes or captured
+HTTP endpoint logs.
+
+`HomeAssistantToolTests` launches the actual managed HA process through Aspire
+and uses production REST adapter/registration factories with a test-owned
+dispatcher, exact thermostat approval and real SQLite. It proves all four
+tools over controlled HTTP, not Web chat/approval UI, live HA or real hardware.
+`HomeEntityCatalog.cs` and `HomeLightIntent.cs` are exact-path critical modules
+at 95% lines / 90% branches. Adapter code retains ordinary runtime coverage;
+E2E is a separate pass gate, not in-process coverage. See the
+[task evidence](tasks/M2-02-home-assistant-tools.md).
+
 | Acceptance scenario | Test |
 | --- | --- |
 | Strong application IDs are independent | `IdentifierContractTests` |

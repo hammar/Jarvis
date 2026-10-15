@@ -4,6 +4,15 @@ Owns the frozen turn, route, context, approval, tool, conversation, memory,
 job, secret-reference, clock, and Home Assistant contracts. Depends only on
 Domain and contains no provider, ASP.NET Core, Aspire, or persistence types.
 
+`Tools/Home/` owns the exact immutable Home Assistant catalog, bounds, feature
+gates, whole-request light intent and four typed registrations. Permissions and
+approval configuration identity derive from the same catalog, including aliases
+and bounds. Duplicate aliases clarify; no model-proposed service, URL or approval
+is accepted. Thermostat is disabled by default and always approval-required.
+Writes verify by bounded observation without replay. See
+[configuration and command syntax](../../docs/development.md#home-assistant-configuration).
+Run `tools/validate.sh unit` for catalog, intent and registration tests.
+
 The M1 `Routing/LocalOnlyModelRouter` applies deterministic local-only
 decisions, `Context/ConversationContextBuilder` builds bounded,
 provenance-labelled context from `IConversationStore`, and

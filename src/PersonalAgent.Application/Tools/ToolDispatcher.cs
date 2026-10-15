@@ -125,7 +125,8 @@ public sealed class ToolDispatcher : IToolDispatcher
             authorization.PolicyVersion,
             effectiveRisk,
             HashText(request.CurrentUserRequest),
-            canonicalArguments);
+            canonicalArguments,
+            draft.ObservationScope);
         var serializedEnvelope = JsonSerializer.Serialize(envelope);
         var requestHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(serializedEnvelope)));
         var actionId = CreateActionId(request.TurnId, request.CallId);
@@ -641,7 +642,8 @@ public sealed class ToolDispatcher : IToolDispatcher
                 var authorization = policy.Evaluate(request.ToolName, draft, registration.RiskClass);
                 var result = await ObserveInterruptedExecutionAsync(
                     action, arguments, registration, draft,
-                    authorization.Allowed && authorization.EffectiveRisk != ToolRiskClass.Unsupported,
+                    authorization.Allowed && authorization.EffectiveRisk != ToolRiskClass.Unsupported
+                        && ObservationScopeMatches(action.CanonicalArguments, draft.ObservationScope),
                     cancellationToken);
                 RecordBudgetOutcome(budget, action.Id, result.Status);
                 return result;
@@ -930,7 +932,9 @@ public sealed class ToolDispatcher : IToolDispatcher
         && action.ActionType.Length <= 96
         && !string.IsNullOrWhiteSpace(action.Operation)
         && action.Operation.Length <= 64
-        && action.ResolvedEntityId is not { Length: 0 or > 256 };
+        && action.ResolvedEntityId is not { Length: 0 or > 256 }
+        && (action.ObservationScope is null || !string.IsNullOrWhiteSpace(action.ObservationScope)
+            && action.ObservationScope.Length <= 256 && !action.ObservationScope.Any(char.IsControl));
 
     private static string? CanonicalizeObjectJson(string value)
     {
@@ -1026,6 +1030,19 @@ public sealed class ToolDispatcher : IToolDispatcher
         }
     }
 
+    private static bool ObservationScopeMatches(string storedEnvelope, string? currentScope)
+    {
+        try
+        {
+            var stored = JsonSerializer.Deserialize<CanonicalActionEnvelope>(storedEnvelope);
+            return stored is not null && stored.ObservationScope == currentScope;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
     private static bool SameProposalIgnoringPolicy(string storedEnvelope, CanonicalActionEnvelope current)
     {
         try
@@ -1070,7 +1087,8 @@ public sealed class ToolDispatcher : IToolDispatcher
         string PolicyVersion,
         ToolRiskClass RiskClass,
         string CurrentRequestHash,
-        string CanonicalArguments);
+        string CanonicalArguments,
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? ObservationScope = null);
 
     private sealed class FailureBudget
     {

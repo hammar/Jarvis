@@ -1,4 +1,6 @@
 using System.Text.Json;
+using PersonalAgent.Application;
+using PersonalAgent.SimulatorEndpoints;
 
 var builder = WebApplication.CreateBuilder(args);
 var app = builder.Build();
@@ -114,10 +116,8 @@ if (kind == "model")
 }
 else
 {
-    app.MapGet("/fixture/entities", () => Results.Json(new[]
-    {
-        new { entityId = "light.simulator_lamp", state = "off", available = true }
-    }));
+    new HomeAssistantSimulator(new SimulatorClock()).Map(
+        app, builder.Configuration.GetValue<bool>("JARVIS_SIMULATOR_CONTROLS_ENABLED"));
 }
 
 app.Run();
@@ -179,4 +179,10 @@ async Task WriteStreamingCompletionAsync(HttpResponse response, CancellationToke
             await Task.Delay(TimeSpan.FromSeconds(5), cancellationToken);
         }
     }
+
+}
+
+internal sealed class SimulatorClock : IClock
+{
+    public DateTimeOffset UtcNow => DateTimeOffset.UtcNow;
 }
