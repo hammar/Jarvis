@@ -202,6 +202,8 @@ R7/R8, both labelled "Previously missed"; both are retained below. Commit
 | M2-01-R21 (Previously missed) | High | An equivalent call passed its early uncertainty check then awaited its claim; orphan registration could win while queued recovery was cancelled, yet the fresh handler still sent. | Fixed in the follow-up after `3f2f4e0`: final synchronous admission after the durable claim/policy/expiry checks shares a short lock with every registration. A winning marker durably rejects the unsent action without clearing the orphan. Unit/SQLite paused-claim regressions prove zero fresh sends/observations, original-read/lowered-risk behavior and a permitted fresh send after known recovery. |
 | M2-01-R22 (Previously missed) | Medium | A delayed Executing snapshot re-registered uncertainty after completion, then cancelled behind another holder; terminal replay never reconciled the stale marker and blocked the rest of the turn. | Fixed in the follow-up after `e0962dc`: terminal replay refreshes under the canonical proposal gate and reconciles only that action's accounting. Unit/SQLite races cover same/policy-changed success/failure, another unresolved orphan, bounded remaining attempts and no replay send/observation; cancelled waits and failed refreshes preserve uncertainty. |
 | M2-01-R23 (Previously missed) | High | Replaying persisted Unknown on a fresh dispatcher counted a failure without seeding original write uncertainty, allowing an equivalent fresh-ID resend despite unresolved effects. | Fixed in the follow-up after `5773e76`: share strict original-envelope classification with Executing recovery and register Unknown write risk before the cancellable replay wait. Unit/SQLite cases cover normal/lowered risk, cancellation, failed refresh, read-only failure limits, malformed risk, repeated replay, unchanged durable state and zero extra replay send/observation. |
+| M2-01-R24 | High | A policy-only redispatch losing its invalidation CAS returned a new rejection instead of the complete terminal approval winner. | Fixed in the follow-up after `6d9e96c`: invalidate nonterminal snapshots before handling same-proposal winners through existing reconciliation; genuinely changed content still receives identity-reuse rejection. |
+| M2-01-R25 | High | A stale rejected/expired approval read could overwrite a different terminal winner using its fresh journal version. | Fixed in the follow-up after `6d9e96c`: settle only actions still AwaitingApproval; otherwise reconcile/return the durable winner without changing status, version or response. |
 
 R9 uniquely identifies review comment `4273196189`, which reused the R7 label
 already assigned to the distinct approval-expiry race. Its review was against
@@ -330,6 +332,45 @@ The actual SDK fixture proves forwarding/references with a recording
 dispatcher; separate SQLite tests establish journal durability. This source
 review supports R6's fix, not a blanket correctness guarantee, owner residual-risk
 acceptance or merge authorization. All prior finding dispositions remain intact.
+
+### R24/R25 terminal-winner preservation
+
+The full review of `6d9e96c` at 2026-10-15T02:05:57Z identified R24
+(`4278270493`, thread `PRRT_kwDOU693js6sl-sE`) and R25
+(`4278270539`, thread `PRRT_kwDOU693js6sl-sh`), both High. Its summary
+contained no additional summary-only finding. The preceding zero-finding
+review's browser-pending observation is historical: all required CI passed on
+`6d9e96c` before this follow-up. That does not validate the new runtime revision.
+
+R24 moves pending-state invalidation before same-proposal terminal/executing
+handling, so a lost CAS returns the actual winner through existing reconciliation.
+Changed arguments still return identity-reuse rejection, not the original
+proposal's approval metadata/result. R25 refreshes the action but settles an
+approval decision only while the action remains AwaitingApproval. Any different
+terminal winner is immutable on that path.
+
+Six new unit and six real-SQLite paused-read cases reproduce expiry/rejection
+races and changed-content/same-status controls. Before the fix, each layer had
+three genuine failures and three passing controls. Afterward, all six per layer
+pass, as do dispatcher unit152 and SQLite dispatcher/outcome74 subsets.
+Cases assert complete response equality, unchanged durable status/version/body,
+approval metadata when applicable, and zero execution/observation. The R25
+fixture commits the approval decision separately to model the existing
+two-store settlement gap; it does not claim approval/action atomicity.
+The unchanged `sh tools/validate.sh build`, `unit`, `integration`, `coverage`,
+`architecture` and `docs` commands passed with standard isolated MSBuild output
+as above: zero build/format warnings/errors, unit283, integration294 and
+architecture6, all discovery verified. Coverage passed all thresholds:
+changed99.2%(939/947), Application98.6%(1845/1872) lines94.5%(834/883)
+branches, Infrastructure93.4%(2921/3127) lines79.2%(755/953) branches.
+Coverage inputs are `artifacts/coverage/unit/20261015T021201Z-82884` and
+`artifacts/coverage/integration/20261015T021301Z-83165`.
+Dedicated local SDK/Aspire/browser commands were not rerun for this bounded
+Application-only follow-up; integration includes the actual SDK sources.
+The prior nine-command local evidence and passed parent CI remain historical,
+not current-head evidence. Required new-head CI and independent exact-commit
+review remain pending. No new schema, API, dependency, profile or UI changes
+are introduced.
 
 ### Exact-commit independent review
 

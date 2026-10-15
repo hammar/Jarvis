@@ -491,6 +491,105 @@ public sealed class ToolDispatcherUnitTests
     }
 
     [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    [Trait("Category", "Unit")]
+    public async Task StalePolicyInvalidationPreservesApprovalWinnerButStillRejectsChangedContent(bool expired, bool changedContent)
+    {
+        using var fixture = new Fixture(ToolRiskClass.ApprovalRequired);
+        var pending = await fixture.Dispatcher.DispatchAsync(Request, CancellationToken.None);
+        fixture.Policy.Replace("policy-v2");
+        var reading = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var reads = 0;
+        fixture.Journal.AfterRead = async (entry, token) =>
+        {
+            if (entry?.Status == "AwaitingApproval" && Interlocked.Increment(ref reads) == 1)
+            {
+                reading.SetResult();
+                await release.Task.WaitAsync(TimeSpan.FromSeconds(5), token);
+            }
+        };
+        var request = changedContent ? Request with { ArgumentsJson = """{"Entity":"light.porch","On":false}""" } : Request;
+        var stale = fixture.Dispatcher.DispatchAsync(request, CancellationToken.None).AsTask();
+        try
+        {
+            await reading.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            if (expired)
+            {
+                fixture.Clock.Advance(TimeSpan.FromMinutes(5));
+            }
+            await fixture.Approvals.ResolveAsync(pending.ApprovalId!.Value, "owner", 1, false, CancellationToken.None);
+            var winner = fixture.Journal.Entries.Single();
+            release.SetResult();
+            var result = await stale.WaitAsync(TimeSpan.FromSeconds(2));
+            if (changedContent)
+            {
+                Assert.Equal(new ToolDispatchResult("Rejected", null, "action_identity_reused", winner.Id), result);
+            }
+            else
+            {
+                Assert.Equal(winner.Outcome, result);
+                Assert.Equal(pending.ApprovalId, result.ApprovalId);
+            }
+            Assert.Equal(winner, fixture.Journal.Entries.Single());
+            Assert.Equal(0, fixture.ExecutionCount);
+            Assert.Equal(0, fixture.VerificationCount);
+        }
+        finally
+        {
+            release.TrySetResult();
+        }
+    }
+
+    [Theory]
+    [InlineData("Expired")]
+    [InlineData("Rejected")]
+    [Trait("Category", "Unit")]
+    public async Task StaleApprovalDecisionCannotReplaceAPolicyInvalidationWinner(string decision)
+    {
+        using var fixture = new Fixture(ToolRiskClass.ApprovalRequired);
+        var pending = await fixture.Dispatcher.DispatchAsync(Request, CancellationToken.None);
+        if (decision == "Expired")
+        {
+            fixture.Clock.Advance(TimeSpan.FromMinutes(5));
+        }
+        await fixture.ApprovalStore.ResolveAsync(pending.ApprovalId!.Value, "owner", decision, 1,
+            fixture.Clock.UtcNow, CancellationToken.None);
+        var reading = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var reads = 0;
+        fixture.ApprovalStore.AfterRead = async (entry, token) =>
+        {
+            if (entry?.Status == decision && Interlocked.Increment(ref reads) == 1)
+            {
+                reading.SetResult();
+                await release.Task.WaitAsync(TimeSpan.FromSeconds(5), token);
+            }
+        };
+        var stale = fixture.Dispatcher.DispatchAsync(Request, CancellationToken.None).AsTask();
+        try
+        {
+            await reading.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            fixture.Policy.Replace("policy-v2");
+            var winner = await fixture.Dispatcher.DispatchAsync(Request, CancellationToken.None);
+            var persisted = fixture.Journal.Entries.Single();
+            Assert.Equal("action_identity_reused", winner.ReasonCode);
+            release.SetResult();
+            Assert.Equal(winner, await stale.WaitAsync(TimeSpan.FromSeconds(2)));
+            Assert.Equal(persisted, fixture.Journal.Entries.Single());
+            Assert.Equal(0, fixture.ExecutionCount);
+            Assert.Equal(0, fixture.VerificationCount);
+        }
+        finally
+        {
+            release.TrySetResult();
+        }
+    }
+
+    [Theory]
     [InlineData("Rejected")]
     [InlineData("Executing")]
     [InlineData("Succeeded")]

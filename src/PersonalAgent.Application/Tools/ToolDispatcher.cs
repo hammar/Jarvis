@@ -138,7 +138,13 @@ public sealed class ToolDispatcher : IToolDispatcher
 
         if (!string.Equals(action.RequestHash, requestHash, StringComparison.Ordinal))
         {
-            if (SameProposalIgnoringPolicy(action.CanonicalArguments, envelope))
+            var sameProposal = SameProposalIgnoringPolicy(action.CanonicalArguments, envelope);
+            if (action.Status is "Prepared" or "AwaitingApproval")
+            {
+                action = await TransitionAsync(action, "Rejected", cancellationToken, "action_identity_reused");
+            }
+
+            if (sameProposal)
             {
                 if (IsTerminal(action.Status))
                 {
@@ -151,11 +157,6 @@ public sealed class ToolDispatcher : IToolDispatcher
                         action, preparation.Arguments!, registration, draft, request,
                         cancellationToken);
                 }
-            }
-
-            if (action.Status is "Prepared" or "AwaitingApproval")
-            {
-                action = await TransitionAsync(action, "Rejected", cancellationToken, "action_identity_reused");
             }
 
             return new("Rejected", null, "action_identity_reused", action.Id);
@@ -318,16 +319,12 @@ public sealed class ToolDispatcher : IToolDispatcher
 
         if (approval.Status == "Rejected" || approval.Status == "Expired")
         {
-            var currentAction = await journal.GetAsync(action.Id, cancellationToken)
+            action = await journal.GetAsync(action.Id, cancellationToken)
                 ?? throw new InvalidOperationException("The action disappeared while resolving its approval.");
-            if (currentAction.Status != approval.Status)
+            if (action.Status == "AwaitingApproval")
             {
-                action = await TransitionAsync(currentAction, approval.Status, cancellationToken,
+                action = await TransitionAsync(action, approval.Status, cancellationToken,
                     $"approval_{approval.Status.ToLowerInvariant()}", approvalId);
-            }
-            else
-            {
-                action = currentAction;
             }
 
             action = await ReconcileTerminalReplayAsync(action, request, draft, cancellationToken);

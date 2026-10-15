@@ -794,6 +794,105 @@ public sealed class ToolDispatcherTests
         Assert.Equal(0, fixture.ExecutionCount);
     }
 
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    [Trait("Category", "Integration")]
+    public async Task StaleSqlitePolicyInvalidationReturnsApprovalWinnerOnlyForUnchangedContent(bool expired, bool changedContent)
+    {
+        using var fixture = await Fixture.CreateAsync(ToolRiskClass.ApprovalRequired);
+        var pending = await fixture.Dispatcher.DispatchAsync(PorchRequest, CancellationToken.None);
+        fixture.Policy.Replace("policy-v2", fixture.AllowedPermission);
+        var reading = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var reads = 0;
+        var journal = new PausedJournal(fixture.Journal, async (entry, token) =>
+        {
+            if (entry?.Status == "AwaitingApproval" && Interlocked.Increment(ref reads) == 1)
+            {
+                reading.SetResult();
+                await release.Task.WaitAsync(TimeSpan.FromSeconds(5), token);
+            }
+        });
+        var request = changedContent ? PorchRequest with { ArgumentsJson = """{"Entity":"light.porch","On":false}""" } : PorchRequest;
+        var stale = fixture.CreateRestartedDispatcher(journal).DispatchAsync(request, CancellationToken.None).AsTask();
+        try
+        {
+            await reading.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            if (expired)
+            {
+                fixture.Clock.Advance(TimeSpan.FromMinutes(5));
+            }
+            await fixture.Approvals.ResolveAsync(pending.ApprovalId!.Value, "owner", 1, false, CancellationToken.None);
+            var winner = (await fixture.Journal.GetAsync(pending.ActionId!.Value, CancellationToken.None))!;
+            release.SetResult();
+            var result = await stale.WaitAsync(TimeSpan.FromSeconds(2));
+            if (changedContent)
+            {
+                Assert.Equal(new ToolDispatchResult("Rejected", null, "action_identity_reused", winner.Id), result);
+            }
+            else
+            {
+                Assert.Equal(winner.Outcome, result);
+                Assert.Equal(pending.ApprovalId, result.ApprovalId);
+            }
+            Assert.Equal(winner, await fixture.Journal.GetAsync(winner.Id, CancellationToken.None));
+            Assert.Equal(0, fixture.ExecutionCount);
+            Assert.Equal(0, fixture.VerificationCount);
+        }
+        finally
+        {
+            release.TrySetResult();
+        }
+    }
+
+    [Theory]
+    [InlineData("Expired")]
+    [InlineData("Rejected")]
+    [Trait("Category", "Integration")]
+    public async Task StaleSqliteApprovalDecisionPreservesPolicyInvalidationOutcomeAndVersion(string decision)
+    {
+        using var fixture = await Fixture.CreateAsync(ToolRiskClass.ApprovalRequired);
+        var pending = await fixture.Dispatcher.DispatchAsync(PorchRequest, CancellationToken.None);
+        if (decision == "Expired")
+        {
+            fixture.Clock.Advance(TimeSpan.FromMinutes(5));
+        }
+        await fixture.ApprovalStore.ResolveAsync(pending.ApprovalId!.Value, "owner", decision, 1,
+            fixture.Clock.UtcNow, CancellationToken.None);
+        var reading = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var reads = 0;
+        var journal = new PausedJournal(fixture.Journal, async (entry, token) =>
+        {
+            if (entry?.Status == "AwaitingApproval" && Interlocked.Increment(ref reads) == 1)
+            {
+                reading.SetResult();
+                await release.Task.WaitAsync(TimeSpan.FromSeconds(5), token);
+            }
+        });
+        var stale = fixture.CreateRestartedDispatcher(journal).DispatchAsync(PorchRequest, CancellationToken.None).AsTask();
+        try
+        {
+            await reading.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            fixture.Policy.Replace("policy-v2", fixture.AllowedPermission);
+            var winner = await fixture.Dispatcher.DispatchAsync(PorchRequest, CancellationToken.None);
+            var persisted = await fixture.Journal.GetAsync(pending.ActionId!.Value, CancellationToken.None);
+            Assert.Equal("action_identity_reused", winner.ReasonCode);
+            release.SetResult();
+            Assert.Equal(winner, await stale.WaitAsync(TimeSpan.FromSeconds(2)));
+            Assert.Equal(persisted, await fixture.Journal.GetAsync(pending.ActionId.Value, CancellationToken.None));
+            Assert.Equal(0, fixture.ExecutionCount);
+            Assert.Equal(0, fixture.VerificationCount);
+        }
+        finally
+        {
+            release.TrySetResult();
+        }
+    }
+
     [Fact]
     [Trait("Category", "Integration")]
     public async Task UnknownExecutionIsObservedOnceAndNeverBlindlyReplayed()
@@ -1172,9 +1271,9 @@ public sealed class ToolDispatcherTests
         {
             this.file = file;
             Journal = new SqliteActionJournalStore(database);
-            var approvalStore = new SqliteApprovalStore(database);
+            ApprovalStore = new SqliteApprovalStore(database);
             Clock = new MutableClock(Start);
-            Approvals = new ApprovalService(approvalStore, Journal, Clock);
+            Approvals = new ApprovalService(ApprovalStore, Journal, Clock);
             AllowedPermission = new ToolPermission(
                 "home.set_light",
                 "home.set_light",
@@ -1196,6 +1295,7 @@ public sealed class ToolDispatcherTests
         }
 
         public SqliteActionJournalStore Journal { get; }
+        public SqliteApprovalStore ApprovalStore { get; }
         public ApprovalService Approvals { get; }
         public MutableClock Clock { get; }
         public MutablePolicy Policy { get; }

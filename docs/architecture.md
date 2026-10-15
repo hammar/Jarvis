@@ -176,6 +176,11 @@ Unsupported, it records `Unknown` without observing; an allowed policy-version
 change still permits observation. Active execution arbitration
 still applies, including when policy changes while a handler is running.
 
+Policy-only invalidation that loses a CAS returns the complete durable winner
+through existing reconciliation; changed-content reuse still receives a
+rejection. Rejected/expired approval settlement may update only an action still
+AwaitingApproval, never overwrite another terminal status/response/version.
+
 **Single-copy outcomes:** migration 006 adds the complete terminal response to
 the action journal, committed atomically with status and optimistic version.
 Duplicate/restarted dispatch returns that exact response, including result JSON,
