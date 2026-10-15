@@ -4,7 +4,8 @@
 
 M2-02's Application `Tools/Home` catalog is the exact entity/operation boundary,
 shared by typed registrations and Infrastructure's narrow REST adapter. All
-metadata, bounds, aliases and gates enter the policy identity for exact approvals.
+metadata, bounds, aliases and gates, plus the normalized installation endpoint
+and named credential-reference identity, enter the policy identity for exact approvals.
 Web composes these services only in `Program.cs`; HA/HTTP types do not cross
 Application contracts. The non-production simulator alone references TestSupport.
 Managed HTTP discovery connects Simulator/E2E to synthetic devices; Local/Hybrid
@@ -12,6 +13,8 @@ requires explicit trusted configuration.
 
 Read transport owns one explicitly classified transient retry within the
 original deadline. Neither HTTP resilience nor the dispatcher duplicates it.
+Known pre-submission credential/cancellation/deadline failures return definitive
+not-submitted outcomes; only possible delivery becomes physical uncertainty.
 Writes submit once; bounded verification/recovery reads current state without
 proving causality, and unchanged state after possible submission remains Unknown.
 No SQLite schema change or new authority outside M2-01's journal is introduced.

@@ -15,15 +15,18 @@ See [configuration](../../docs/development.md#home-assistant-configuration).
 
 The adapter repeats catalog/bounds checks before HTTP. Its client disables
 redirects and generic retries; safe reads alone get one transient retry within
-one shared deadline. Tokens resolve server-side through `ISecretResolver`.
+one shared deadline. Exact approvals bind the normalized installation endpoint
+and named credential reference as well as the complete catalog. Tokens resolve
+server-side through `ISecretResolver`.
 Remote error bodies, headers and exception payloads are not returned or logged;
 state parsing is bounded and projects only typed fields. Unauthorized, unknown
 entity, invalid response, transport and deadline failures have safe typed codes.
 Snapshots separately carry availability and source-age staleness.
 
 Service acceptance is not physical success. A possibly submitted write is
-Unknown and can only be observed, never automatically resent. Verification
-compares target power/brightness or thermostat setpoint, not room temperature,
+Unknown and can only be observed, never automatically resent. Known pre-submission
+credential/deadline/cancellation failures return a definitive not-submitted
+result. Verification compares target power/brightness or thermostat setpoint, not room temperature,
 and cannot establish which command caused an observed state. Security devices,
 wildcards, generic services, switches, covers and WebSockets are unsupported.
 Tests: `tools/validate.sh integration` and `tools/validate.sh aspire-e2e`.

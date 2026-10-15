@@ -96,6 +96,7 @@ var homeSecretReference = profile is "Simulator" or "E2E"
     ? "JARVIS_SIMULATOR_HOME_TOKEN"
     : builder.Configuration["JARVIS_HOME_ASSISTANT_SECRET_REFERENCE"];
 HomeEntityCatalog? homeCatalog = null;
+string? homePolicyVersion = null;
 if (!string.IsNullOrWhiteSpace(homeEndpoint))
 {
     var homeOptions = new HomeToolOptions(
@@ -111,13 +112,16 @@ if (!string.IsNullOrWhiteSpace(homeEndpoint))
     {
         throw new InvalidOperationException("Home Assistant requires a protected named secret reference.");
     }
+    var homeBaseUri = HomeAssistantConfiguration.NormalizeEndpoint(new Uri(homeEndpoint, UriKind.Absolute));
+    var homeReference = new SecretReference(homeSecretReference);
+    homePolicyVersion = HomeAssistantConfiguration.PolicyVersion(homeCatalog, homeBaseUri, homeReference);
     builder.Services.AddHttpClient("home-assistant", http => http.Timeout = Timeout.InfiniteTimeSpan)
         .RemoveAllLoggers()
         .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
     builder.Services.AddSingleton(homeCatalog);
     builder.Services.AddSingleton<IHomeAssistantClient>(services => new HomeAssistantRestClient(
         services.GetRequiredService<IHttpClientFactory>().CreateClient("home-assistant"),
-        new Uri(homeEndpoint, UriKind.Absolute), new SecretReference(homeSecretReference),
+        homeBaseUri, homeReference,
         services.GetRequiredService<ISecretResolver>(), homeCatalog, clock));
 }
 else if (profile is "Local" or "Hybrid"
@@ -131,7 +135,7 @@ builder.Services.AddSingleton(services => new ToolRegistry(homeCatalog is null
     : HomeToolRegistrations.Create(homeCatalog, services.GetRequiredService<IHomeAssistantClient>())));
 builder.Services.AddSingleton<IToolRegistry>(services => services.GetRequiredService<ToolRegistry>());
 builder.Services.AddSingleton<IToolAuthorizationPolicy>(
-    new ToolAllowlistPolicy(homeCatalog?.ConfigurationVersion ?? "home-disabled",
+    new ToolAllowlistPolicy(homePolicyVersion ?? "home-disabled",
         homeCatalog?.Permissions() ?? Array.Empty<ToolPermission>()));
 builder.Services.AddSingleton<IMemoryStore, SqliteMemoryStore>();
 builder.Services.AddSingleton<IJobStore, SqliteJobStore>();

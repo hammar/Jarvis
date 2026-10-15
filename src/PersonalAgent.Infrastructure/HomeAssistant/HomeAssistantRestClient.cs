@@ -36,14 +36,9 @@ public sealed class HomeAssistantRestClient : IHomeAssistantClient
         ArgumentNullException.ThrowIfNull(secrets);
         ArgumentNullException.ThrowIfNull(catalog);
         ArgumentNullException.ThrowIfNull(clock);
-        if (!baseUri.IsAbsoluteUri || baseUri.Scheme is not ("http" or "https")
-            || baseUri.UserInfo.Length != 0 || baseUri.Query.Length != 0 || baseUri.Fragment.Length != 0
-            || string.IsNullOrWhiteSpace(secret.Name))
-        {
-            throw new ArgumentException("Home Assistant requires a trusted HTTP(S) base URI and named secret reference.");
-        }
+        _ = HomeAssistantConfiguration.PolicyVersion(catalog, baseUri, secret);
         this.http = http;
-        this.baseUri = new Uri(baseUri.AbsoluteUri.TrimEnd('/') + "/");
+        this.baseUri = HomeAssistantConfiguration.NormalizeEndpoint(baseUri);
         this.secret = secret;
         this.secrets = secrets;
         this.catalog = catalog;
@@ -119,32 +114,57 @@ public sealed class HomeAssistantRestClient : IHomeAssistantClient
     {
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
         deadline.CancelAfter(TimeSpan.FromSeconds(catalog.Options.RequestTimeoutSeconds));
-        // Resolve credentials and build the request before entering the possible-submission boundary.
-        using var request = await RequestAsync(HttpMethod.Post, path, deadline.Token);
-        request.Content = JsonContent.Create(body);
-        deadline.Token.ThrowIfCancellationRequested();
+        HttpRequestMessage? request = null;
         try
         {
-            using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token);
-            if (response.IsSuccessStatusCode)
+            // Failures before SendAsync are definitively not submitted, not physical uncertainty.
+            try
             {
-                return new(HomeAssistantWriteStatus.Accepted, null);
+                request = await RequestAsync(HttpMethod.Post, path, deadline.Token);
+                request.Content = JsonContent.Create(body);
+                deadline.Token.ThrowIfCancellationRequested();
             }
-            if (response.StatusCode is HttpStatusCode.BadRequest or HttpStatusCode.Unauthorized
-                or HttpStatusCode.Forbidden or HttpStatusCode.NotFound or HttpStatusCode.MethodNotAllowed
-                or HttpStatusCode.UnprocessableEntity)
+            catch (HomeAssistantException error)
             {
-                return new(HomeAssistantWriteStatus.Rejected, "home_service_rejected");
+                return new(HomeAssistantWriteStatus.Rejected, "home_not_submitted_" + error.Failure.ToString().ToLowerInvariant());
             }
-            return new(HomeAssistantWriteStatus.Unknown, "home_delivery_uncertain");
+            catch (OperationCanceledException)
+            {
+                return new(HomeAssistantWriteStatus.Rejected,
+                    token.IsCancellationRequested ? "home_not_submitted_cancelled" : "home_not_submitted_timeout");
+            }
+            try
+            {
+                using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token);
+                if (response.IsSuccessStatusCode)
+                {
+                    return new(HomeAssistantWriteStatus.Accepted, null);
+                }
+                if (response.StatusCode is HttpStatusCode.BadRequest or HttpStatusCode.Unauthorized
+                    or HttpStatusCode.Forbidden or HttpStatusCode.NotFound or HttpStatusCode.MethodNotAllowed
+                    or HttpStatusCode.UnprocessableEntity)
+                {
+                    return new(HomeAssistantWriteStatus.Rejected, response.StatusCode switch
+                    {
+                        HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden => "home_unauthorized",
+                        HttpStatusCode.NotFound => "home_unknownentity",
+                        _ => "home_service_rejected"
+                    });
+                }
+                return new(HomeAssistantWriteStatus.Unknown, "home_delivery_uncertain");
+            }
+            catch (HttpRequestException)
+            {
+                return new(HomeAssistantWriteStatus.Unknown, "home_delivery_uncertain");
+            }
+            catch (OperationCanceledException)
+            {
+                return new(HomeAssistantWriteStatus.Unknown, "home_delivery_uncertain");
+            }
         }
-        catch (HttpRequestException)
+        finally
         {
-            return new(HomeAssistantWriteStatus.Unknown, "home_delivery_uncertain");
-        }
-        catch (OperationCanceledException)
-        {
-            return new(HomeAssistantWriteStatus.Unknown, "home_delivery_uncertain");
+            request?.Dispose();
         }
     }
 

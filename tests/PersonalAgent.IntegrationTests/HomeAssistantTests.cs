@@ -455,6 +455,125 @@ public sealed class HomeAssistantTests
         Assert.Equal(0, fixture.Endpoint.ReadCount);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("Category", "Integration")]
+    public async Task ChangingInstallationOrSecretReferenceInvalidatesApprovedActionWithoutSending(bool changeReference)
+    {
+        var options = new HomeToolOptions(ThermostatEnabled: true);
+        await using var first = await Fixture.StartAsync(options);
+        await using var second = await Fixture.StartAsync(options);
+        var request = first.Request("home.set_temperature", """{"entity":"thermostat","temperature":22}""");
+        var pending = await first.Dispatcher.DispatchAsync(request, default);
+        var approval = await first.Approvals.GetAsync(pending.ApprovalId!.Value, default);
+        await first.Approvals.ResolveAsync(approval!.Id, "owner", approval.ExpectedVersion, true, default);
+        var endpoint = changeReference ? first.Http.BaseAddress! : second.Http.BaseAddress!;
+        var reference = new SecretReference(changeReference ? "other-reference" : "synthetic-reference");
+        var catalog = HomeAssistantConfiguration.SimulatorCatalog(options);
+        var changedClient = new HomeAssistantRestClient(first.Http, endpoint, reference, new Secret(), catalog, first.Clock);
+        var restarted = first.CreateDispatcher(changedClient, HomeAssistantConfiguration.PolicyVersion(catalog, endpoint, reference));
+        var rejected = await restarted.DispatchAsync(request, default);
+        Assert.Equal("Rejected", rejected.Status);
+        Assert.Equal(0, first.Endpoint.WriteCount);
+        Assert.Equal(0, second.Endpoint.WriteCount);
+    }
+
+    [Theory]
+    [InlineData("missing")]
+    [InlineData("invalid")]
+    [InlineData("cancelled")]
+    [InlineData("timeout")]
+    [Trait("Category", "Integration")]
+    public async Task KnownPreSubmissionFailuresAreDefinitiveAndDoNotLockOutTheRemainingWrite(string failure)
+    {
+        var options = new HomeToolOptions(AutomaticLightsEnabled: true, RequestTimeoutSeconds: 1);
+        await using var fixture = await Fixture.StartAsync(options);
+        using var cancellation = new CancellationTokenSource();
+        var fail = true;
+        var resolving = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var resolver = new ControlledSecret(async token =>
+        {
+            if (fail)
+            {
+                if (failure == "missing")
+                {
+                    throw new InvalidOperationException("synthetic-home-token");
+                }
+                if (failure == "invalid")
+                {
+                    return "bad\r\nheader".AsMemory();
+                }
+                resolving.TrySetResult();
+                await Task.Delay(Timeout.InfiniteTimeSpan, token);
+            }
+            return "synthetic-home-token".AsMemory();
+        });
+        var catalog = HomeAssistantConfiguration.SimulatorCatalog(options);
+        var client = new HomeAssistantRestClient(fixture.Http, fixture.Http.BaseAddress!, new("synthetic-reference"),
+            resolver, catalog, fixture.Clock);
+        var dispatcher = fixture.CreateDispatcher(client);
+        var request = fixture.Request("home.set_light", """{"entity":"lamp","on":true}""", "turn on lamp");
+        var dispatch = dispatcher.DispatchAsync(request, cancellation.Token).AsTask();
+        if (failure == "cancelled")
+        {
+            await resolving.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            cancellation.Cancel();
+        }
+        var result = await dispatch;
+        Assert.Equal("Failed", result.Status);
+        Assert.Equal("home_not_submitted_" + (failure is "missing" or "invalid" ? "unauthorized" : failure), result.ReasonCode);
+        Assert.Equal(0, fixture.Endpoint.WriteCount);
+        Assert.Equal(result, await dispatcher.DispatchAsync(request, default));
+        fail = false;
+        var corrected = await dispatcher.DispatchAsync(request with { CallId = "corrected" }, default);
+        Assert.Equal("Succeeded", corrected.Status);
+        Assert.Equal(1, fixture.Endpoint.WriteCount);
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public void ConnectionPolicyIdentityNormalizesRootsRejectsUnsafeUrisAndNeverContainsCredentials()
+    {
+        var catalog = HomeAssistantConfiguration.SimulatorCatalog();
+        var reference = new SecretReference("named-reference");
+        var version = HomeAssistantConfiguration.PolicyVersion(catalog, new("http://LOCALHOST:80/ha"), reference);
+        Assert.Equal(version, HomeAssistantConfiguration.PolicyVersion(catalog, new("http://localhost/ha/"), reference));
+        Assert.NotEqual(version, HomeAssistantConfiguration.PolicyVersion(catalog, new("http://localhost/other/"), reference));
+        Assert.NotEqual(version, HomeAssistantConfiguration.PolicyVersion(catalog, new("http://localhost/ha/"), new("different-reference")));
+        Assert.DoesNotContain(reference.Name, version, StringComparison.Ordinal);
+        foreach (var endpoint in new[] { "ftp://localhost/", "http://user:password@localhost/", "http://localhost/?token=value", "http://localhost/#fragment", "relative" })
+        {
+            Assert.Throws<ArgumentException>(() => HomeAssistantConfiguration.NormalizeEndpoint(new(endpoint, UriKind.RelativeOrAbsolute)));
+        }
+        Assert.Throws<ArgumentNullException>(() => HomeAssistantConfiguration.NormalizeEndpoint(null!));
+        Assert.Throws<ArgumentNullException>(() => HomeAssistantConfiguration.PolicyVersion(null!, new("http://localhost"), reference));
+        Assert.Throws<ArgumentNullException>(() => HomeAssistantConfiguration.PolicyVersion(catalog, new("http://localhost"), null!));
+        foreach (var name in new[] { "", "bad/name", new string('x', 257) })
+        {
+            Assert.Throws<ArgumentException>(() => HomeAssistantConfiguration.PolicyVersion(catalog, new("http://localhost"), new(name)));
+        }
+    }
+
+    [Theory]
+    [InlineData(400, "home_service_rejected")]
+    [InlineData(401, "home_unauthorized")]
+    [InlineData(403, "home_unauthorized")]
+    [InlineData(404, "home_unknownentity")]
+    [InlineData(405, "home_service_rejected")]
+    [InlineData(422, "home_service_rejected")]
+    [Trait("Category", "Integration")]
+    public async Task DefinitiveServiceRejectionsAreDistinctAndNeverRetried(int status, string reason)
+    {
+        await using var fixture = await Fixture.StartAsync();
+        fixture.Endpoint.Configure([], false, status);
+        var result = await fixture.Client.SetLightAsync("light.simulator_lamp", true, null, default);
+        Assert.Equal(HomeAssistantWriteStatus.Rejected, result.Status);
+        Assert.Equal(reason, result.ReasonCode);
+        Assert.Equal(1, fixture.Endpoint.WriteCount);
+        Assert.Equal(0, fixture.Endpoint.ReadCount);
+    }
+
     private sealed class ControlledSecret(Func<CancellationToken, Task<ReadOnlyMemory<char>>> resolve) : ISecretResolver
     {
         public async ValueTask<ReadOnlyMemory<char>> ResolveAsync(SecretReference reference, CancellationToken token) =>
@@ -512,9 +631,10 @@ public sealed class HomeAssistantTests
             return new(app, file, database, clock, endpoint, HomeAssistantConfiguration.SimulatorCatalog(options), logs);
         }
 
-        public ToolDispatcher CreateDispatcher() => new(
-            new ToolRegistry(HomeToolRegistrations.Create(catalog, Client)),
-            new ToolAllowlistPolicy(catalog.ConfigurationVersion, catalog.Permissions()),
+        public ToolDispatcher CreateDispatcher(HomeAssistantRestClient? client = null, string? policyVersion = null) => new(
+            new ToolRegistry(HomeToolRegistrations.Create(catalog, client ?? Client)),
+            new ToolAllowlistPolicy(policyVersion ?? HomeAssistantConfiguration.PolicyVersion(
+                catalog, Http.BaseAddress!, new("synthetic-reference")), catalog.Permissions()),
             Journal, Approvals, Clock, TimeSpan.FromSeconds(catalog.Options.VerificationSeconds));
 
         public ToolDispatchRequest Request(string tool, string args, string? text = null) =>

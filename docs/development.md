@@ -50,6 +50,10 @@ between entity IDs and other aliases fail configuration. Duplicate descriptive
 aliases are permitted but require clarification before an entity is selected.
 Live endpoint/reference/catalog must be provided together.
 
+Pending approvals bind the normalized endpoint, named reference and complete
+catalog/options hash. Changing the installation or reference requires fresh
+consent; resolved token values never enter that identity.
+
 The existing environment resolver reads the variable named by the reference.
 Set its value through a protected local launch mechanism, not chat, committed
 files, command history, dashboard links or logs. Environment variables are not
