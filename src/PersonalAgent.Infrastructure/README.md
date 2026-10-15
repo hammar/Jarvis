@@ -39,6 +39,17 @@ Tests: `tools/validate.sh integration` and `tools/validate.sh aspire-e2e`.
 
 ## SQLite migrations and local use
 
+`SqliteConfirmedMemoryStore` is the production owner-scoped memory adapter.
+Migration 007 adds provenance, distinguishing context, action-bound commit
+receipts, deletion tombstones and journal dependencies. Approved mutations
+validate versions/conflicts/expiry under an immediate transaction. Recovery
+observes the receipt without reapplying. Derived responses/drafts are
+invalidated on change/deletion, including results published after a racing
+deletion; see [ADR 0006](../../docs/adr/0006-confirmed-memory.md).
+The unscoped T03 `SqliteMemoryStore` remains a low-level compatibility fixture,
+not a registered production mutation API. Tests:
+`dotnet test tests/PersonalAgent.IntegrationTests --filter FullyQualifiedName~ConfirmedMemoryTests`.
+
 The Web composition root initializes the database before serving requests.
 Set `JARVIS_DATA_DIR` to a writable directory outside the deployment folder;
 the database is `jarvis.db` inside it. If unset, the Web host uses the

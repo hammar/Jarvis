@@ -72,6 +72,43 @@ Copilot adapter namespaces, and the Web composition exception.
 
 ## Turn and privacy model
 
+### Confirmed local memory
+
+M2-03's `Memory/` use cases and `Tools/Memory/` registrations expose bounded,
+owner-scoped local facts. New facts are LocalOnly; model arguments cannot
+change identity, provenance, privacy routing or approval. Retrieved JSON is
+labelled evidence-only and includes fact IDs, versions and UTC update times.
+No fact text is inserted into host instructions or treated as owner intent.
+
+`memory.propose_change` uses the existing exact-action approval flow. The
+journaled canonical change is the pending draft; fact mutation requires an
+approved, unexpired owner-bound action. The host's `MemoryProposalService`
+can preview, resolve and complete it without a live callback. Normalized
+subject/key conflicts require exact-version supersession or distinguishing
+context to retain both. The full conflict set is checked under SQLite's
+immediate transaction, including concurrent insertions.
+
+`SqliteConfirmedMemoryStore` commits facts and action-bound receipts together.
+Interrupted settlement observes a receipt, never repeats a mutation. Migration
+007 preserves legacy facts/provenance and adds typed source links, qualifiers,
+receipts, tombstones and derived-action dependencies. Conversation retention
+can remove a source message without removing the fact; source availability
+then becomes false. FTS lookup filters ownership, active status and permitted
+local classifications before limiting results.
+
+Modification/deletion invalidates dependent canonical drafts and journal
+results. Publication registers/checks result dependencies transactionally,
+preventing a delayed result from reintroducing deleted content. Invalidated
+calls return `memory_result_invalidated`, never execute again. This narrow
+owner-approved exception to exact journal replay is recorded in
+[ADR 0006](adr/0006-confirmed-memory.md). Other actions retain ADR 0005 behavior.
+No memory context cache is introduced. M2-04 owns UI/chat composition and must
+track dependencies for new derived context; M3-01 owns cloud packet/consent
+invalidation. Original conversation answers and backups retain separate
+retention; logical deletion is not secure erasure.
+
+### Host turn policy
+
 The application owns a stable `TurnId` independent of Copilot runtime session
 IDs. Events use UTC observation times and typed outcomes. `Interrupted` is not
 success: a child process stopping or a request timing out after a side effect

@@ -81,6 +81,28 @@ unbounded transcripts or byte-identical Ollama GUI output.
 
 ## Coverage semantics
 
+### M2-03 memory scenarios
+
+`MemoryTests` exercises application validation, privacy/routes, evidence-only
+formatting, conflicts, host confirmation, malformed proposals and failure
+outcomes. `ConfirmedMemoryTests` uses real isolated SQLite with the production
+dispatcher/approval service: confirmation, supersede/retain-both, concurrent
+conflicts, deletion/redaction, delayed result publication, version conflicts,
+rejection/expiry, source removal and receipt-based crash recovery.
+
+`ActualRuntimeRetrievesMaliciousMemoryAsEvidenceButCannotAcquireShellAuthority`
+uses the actual pinned runtime and a controlled OpenAI-compatible endpoint,
+not a live model. It checks structured retrieval of adversarial stored text,
+the unavailable shell capability, unchanged memory and no inferred approval.
+No household/cloud credentials are involved.
+
+Exact-path 95% line / 90% branch gates cover `MemoryPolicy.cs`,
+`MemoryProposalService.cs`, `MemoryToolRegistrations.cs`,
+`SqliteConfirmedMemoryStore.cs` and `SqliteMemoryDependencies.cs`, in addition
+to the existing dispatcher, approval and journal gates. No thresholds are lowered.
+Memory UI and out-of-process feature acceptance remain M2-04 scope; running
+existing Aspire/browser regressions is not evidence of a memory UI.
+
 `tools/PersonalAgent.Validation` consumes VSTest TRX discovery results and
 Coverlet Cobertura output for line coverage and OpenCover output for individual
 branch outcomes. Missing reports, missing expected assemblies,

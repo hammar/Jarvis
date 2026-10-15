@@ -35,13 +35,17 @@ public sealed class SqliteActionJournalStore : IActionJournalStore
         }
 
         await using var connection = await database.OpenConnectionAsync(cancellationToken);
+        await using var transaction = await SqliteDatabase.BeginImmediateTransactionAsync(connection, cancellationToken);
         await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText = """
             INSERT INTO actions
-                (id, action_type, canonical_arguments, request_hash, status, created_at_utc, updated_at_utc, version)
-            VALUES ($id, $type, $arguments, $hash, $status, $created, $updated, 1)
+                (id, action_type, canonical_arguments, request_hash, status, created_at_utc, updated_at_utc, version, memory_owner_id)
+            VALUES ($id, $type, $arguments, $hash, $status, $created, $updated, 1, $memoryOwner)
             ON CONFLICT(id) DO NOTHING;
             """;
+        var memoryOwner = SqliteMemoryDependencies.ReadOwner(entry);
+        command.Parameters.AddWithValue("$memoryOwner", (object?)memoryOwner ?? DBNull.Value);
         command.Parameters.AddWithValue("$id", SqliteValue.Guid(entry.Id.Value));
         command.Parameters.AddWithValue("$type", entry.ActionType);
         command.Parameters.AddWithValue("$arguments", entry.CanonicalArguments);
@@ -51,9 +55,17 @@ public sealed class SqliteActionJournalStore : IActionJournalStore
         command.Parameters.AddWithValue("$updated", SqliteValue.Utc(entry.UpdatedAtUtc));
         if (await command.ExecuteNonQueryAsync(cancellationToken) == 1)
         {
-            return entry;
+            if (memoryOwner is not null)
+            {
+                await SqliteMemoryDependencies.RegisterAsync(connection, transaction, entry.Id, memoryOwner,
+                    SqliteMemoryDependencies.ReadReferences(entry.CanonicalArguments, "MemoryReferences"), cancellationToken);
+            }
+            await transaction.CommitAsync(cancellationToken);
+            return await GetAsync(entry.Id, cancellationToken)
+                ?? throw new InvalidDataException("The created action disappeared.");
         }
 
+        await transaction.CommitAsync(cancellationToken);
         var existing = await GetAsync(entry.Id, cancellationToken);
         if (existing is not null
             && string.Equals(existing.RequestHash, entry.RequestHash, StringComparison.Ordinal)
@@ -73,7 +85,7 @@ public sealed class SqliteActionJournalStore : IActionJournalStore
         await using var command = connection.CreateCommand();
         command.CommandText = """
             SELECT id, action_type, canonical_arguments, request_hash, status,
-                   created_at_utc, updated_at_utc, version, outcome_json
+                   created_at_utc, updated_at_utc, version, outcome_json, memory_invalidated, memory_owner_id
             FROM actions WHERE id = $id;
             """;
         command.Parameters.AddWithValue("$id", SqliteValue.Guid(id.Value));
@@ -99,12 +111,40 @@ public sealed class SqliteActionJournalStore : IActionJournalStore
 
         await using var connection = await database.OpenConnectionAsync(cancellationToken);
         await using var transaction = connection.BeginTransaction(deferred: false);
+        await using (var currentCommand = connection.CreateCommand())
+        {
+            currentCommand.Transaction = transaction;
+            currentCommand.CommandText = """
+                SELECT id, action_type, canonical_arguments, request_hash, status,
+                       created_at_utc, updated_at_utc, version, outcome_json, memory_invalidated, memory_owner_id
+                FROM actions WHERE id = $id;
+                """;
+            currentCommand.Parameters.AddWithValue("$id", SqliteValue.Guid(id.Value));
+            ActionJournalEntry? current;
+            await using (var reader = await currentCommand.ExecuteReaderAsync(cancellationToken))
+            {
+                current = await reader.ReadAsync(cancellationToken) ? ReadEntry(reader) : null;
+            }
+            if (current is { MemoryInvalidated: true })
+            {
+                await transaction.CommitAsync(cancellationToken);
+                return current;
+            }
+            if (current?.MemoryOwnerId is { } owner && outcome?.ResultJson is { } resultJson)
+            {
+                var references = SqliteMemoryDependencies.ReadReferences(resultJson, "MemoryReferences");
+                if (references.Count > 0)
+                {
+                    await SqliteMemoryDependencies.RegisterAsync(connection, transaction, id, owner, references, cancellationToken);
+                }
+            }
+        }
         await using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = """
             UPDATE actions SET status = $status, updated_at_utc = $updated,
                 outcome_json = $outcome, version = version + 1
-            WHERE id = $id AND version = $version;
+            WHERE id = $id AND version = $version AND memory_invalidated = 0;
             """;
         command.Parameters.AddWithValue("$status", status);
         command.Parameters.AddWithValue("$updated", SqliteValue.Utc(updatedAtUtc));
@@ -114,6 +154,24 @@ public sealed class SqliteActionJournalStore : IActionJournalStore
             outcome is null ? DBNull.Value : JsonSerializer.Serialize(outcome));
         if (await command.ExecuteNonQueryAsync(cancellationToken) != 1)
         {
+            await using var invalidated = connection.CreateCommand();
+            invalidated.Transaction = transaction;
+            invalidated.CommandText = """
+                SELECT id, action_type, canonical_arguments, request_hash, status,
+                       created_at_utc, updated_at_utc, version, outcome_json, memory_invalidated, memory_owner_id
+                FROM actions WHERE id = $id AND memory_invalidated = 1;
+                """;
+            invalidated.Parameters.AddWithValue("$id", SqliteValue.Guid(id.Value));
+            ActionJournalEntry? winner;
+            await using (var reader = await invalidated.ExecuteReaderAsync(cancellationToken))
+            {
+                winner = await reader.ReadAsync(cancellationToken) ? ReadEntry(reader) : null;
+            }
+            if (winner is not null)
+            {
+                await transaction.CommitAsync(cancellationToken);
+                return winner;
+            }
             throw new PersistenceConcurrencyException("The action journal entry changed or no longer exists.");
         }
 
@@ -123,7 +181,7 @@ public sealed class SqliteActionJournalStore : IActionJournalStore
             read.Transaction = transaction;
             read.CommandText = """
                 SELECT id, action_type, canonical_arguments, request_hash, status,
-                       created_at_utc, updated_at_utc, version, outcome_json
+                       created_at_utc, updated_at_utc, version, outcome_json, memory_invalidated, memory_owner_id
                 FROM actions WHERE id = $id;
                 """;
             read.Parameters.AddWithValue("$id", SqliteValue.Guid(id.Value));
@@ -151,7 +209,15 @@ public sealed class SqliteActionJournalStore : IActionJournalStore
             SqliteValue.DateTimeOffset(reader.GetString(6)),
             reader.GetInt64(7),
             reader.IsDBNull(8) ? null : JsonSerializer.Deserialize<ToolDispatchResult>(reader.GetString(8))
-                ?? throw new InvalidDataException("The persisted action response is null."));
+                ?? throw new InvalidDataException("The persisted action response is null."))
+        {
+            MemoryInvalidated = reader.GetBoolean(9),
+            MemoryOwnerId = reader.IsDBNull(10) ? null : reader.GetString(10)
+        };
+        if (entry.MemoryInvalidated)
+        {
+            entry = entry with { Outcome = new(entry.Status, null, "memory_result_invalidated", entry.Id) };
+        }
         ValidateOutcome(entry.Id, entry.Status, entry.Outcome);
         return entry;
     }

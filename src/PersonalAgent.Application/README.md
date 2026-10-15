@@ -4,6 +4,14 @@ Owns the frozen turn, route, context, approval, tool, conversation, memory,
 job, secret-reference, clock, and Home Assistant contracts. Depends only on
 Domain and contains no provider, ASP.NET Core, Aspire, or persistence types.
 
+`Memory/` owns explicit local facts, deterministic normalized subject/key
+conflicts and host-side proposal review/completion. `Tools/Memory/` registers
+search/get and always-approved-by-owner mutations. New facts default to
+LocalOnly; model arguments cannot reclassify or approve. Tool evidence carries
+IDs/versions/update times, never authority. The production host uses
+`IConfirmedMemoryStore`; the older unscoped `IMemoryStore` is not registered.
+See [ADR 0006](../../docs/adr/0006-confirmed-memory.md).
+
 `Tools/Home/` owns the exact immutable Home Assistant catalog, bounds, feature
 gates, whole-request light intent and four typed registrations. Permissions and
 approval configuration identity derive from the same catalog, including aliases
@@ -48,8 +56,8 @@ are `Succeeded`; sent-but-unconfirmed actions remain `Unknown` and are never
 replayed. If restart finds an action still `Executing`, the dispatcher only
 performs bounded verification and records the observed result or uncertainty;
 it does not call the execution handler again. The current Web composition
-registers no tools or allowlist entries until their feature implementation
-arrives.
+registers configured home tools and local memory tools; the chat coordinator
+catalog and approval UI remain M2-04 scope.
 
 The dispatcher rechecks policy/approval expiry after claiming execution and
 reports the recorded action state when a concurrent execution defeats a stale

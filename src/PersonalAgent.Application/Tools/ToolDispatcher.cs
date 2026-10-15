@@ -74,6 +74,17 @@ public sealed class ToolDispatcher : IToolDispatcher
             return Rejected("invalid_tool_request");
         }
 
+        if (request.ToolName.StartsWith("memory.", StringComparison.Ordinal))
+        {
+            var previous = await journal.GetAsync(CreateActionId(request.TurnId, request.CallId), cancellationToken);
+            if (previous is { MemoryInvalidated: true })
+            {
+                return previous.MemoryOwnerId == request.OwnerId
+                    ? Recorded(previous)
+                    : Rejected("authenticated_owner_required");
+            }
+        }
+
         if (!registry.TryGetRuntime(request.ToolName, out var registration) || registration is null)
         {
             return Rejected("unregistered_tool");
@@ -126,7 +137,8 @@ public sealed class ToolDispatcher : IToolDispatcher
             effectiveRisk,
             HashText(request.CurrentUserRequest),
             canonicalArguments,
-            draft.ObservationScope);
+            draft.ObservationScope,
+            draft.MemoryReferences);
         var serializedEnvelope = JsonSerializer.Serialize(envelope);
         var requestHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(serializedEnvelope)));
         var actionId = CreateActionId(request.TurnId, request.CallId);
@@ -908,7 +920,8 @@ public sealed class ToolDispatcher : IToolDispatcher
         }
     }
 
-    private static ActionId CreateActionId(TurnId turnId, string callId)
+    /// <summary>Derives the stable journal identity shared by a turn/tool-call proposal and its mutation receipt.</summary>
+    public static ActionId CreateActionId(TurnId turnId, string callId)
     {
         var material = Encoding.UTF8.GetBytes($"{turnId.Value:D}\n{callId}");
         var digest = SHA256.HashData(material);
@@ -1088,7 +1101,8 @@ public sealed class ToolDispatcher : IToolDispatcher
         ToolRiskClass RiskClass,
         string CurrentRequestHash,
         string CanonicalArguments,
-        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? ObservationScope = null);
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? ObservationScope = null,
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<PersonalAgent.Application.Memory.MemoryReference>? MemoryReferences = null);
 
     private sealed class FailureBudget
     {

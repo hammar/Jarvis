@@ -1,0 +1,464 @@
+using System.Text.Json;
+using Microsoft.Data.Sqlite;
+using PersonalAgent.Application;
+using PersonalAgent.Application.Approvals;
+using PersonalAgent.Application.Memory;
+using PersonalAgent.Application.Tools;
+using PersonalAgent.Application.Tools.Memory;
+using PersonalAgent.Domain;
+using PersonalAgent.Infrastructure.Persistence;
+using PersonalAgent.TestSupport;
+using Xunit;
+
+namespace PersonalAgent.IntegrationTests;
+
+[Trait("Category", "Integration")]
+public sealed class ConfirmedMemoryTests
+{
+    [Fact]
+    public async Task ExplicitSensitiveFactRequiresApprovalAndSurvivesRuntimeAndStoreLoss()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var request = await fixture.RequestAsync(new("create", Subject: "household", Key: "explicit medical note", Value: "synthetic private note"));
+        var pending = await fixture.Dispatcher.DispatchAsync(request, default);
+        Assert.Equal("AwaitingApproval", pending.Status);
+        Assert.Empty(await fixture.Memory.SearchAsync("owner", "synthetic", 10, default));
+        var preview = await fixture.Proposals.PreviewAsync("owner", pending.ActionId!.Value, default);
+        Assert.Equal("synthetic private note", preview.Command.Change.Value);
+        var result = await fixture.Proposals.ResolveAsync("owner", pending.ActionId.Value, preview.Approval.ExpectedVersion, true, default);
+        Assert.Equal("Succeeded", result.Status);
+        var receipt = JsonSerializer.Deserialize<MemoryReceipt>(result.ResultJson!)!;
+        var reopened = new SqliteConfirmedMemoryStore(new SqliteDatabase(fixture.Database.DatabasePath), fixture.Clock);
+        var fact = Assert.Single(await reopened.SearchAsync("owner", "synthetic", 10, default));
+        Assert.Equal(receipt.FactId, fact.Id);
+        Assert.Equal("LocalOnly", fact.PrivacyClass);
+        Assert.Equal("OwnerMessage", fact.SourceType);
+        Assert.True(fact.SourceAvailable);
+        Assert.NotNull(fact.SourceMessageId);
+        Assert.Equal(fixture.Clock.UtcNow, fact.CreatedAtUtc);
+        Assert.Equal(fixture.Clock.UtcNow, fact.UpdatedAtUtc);
+        Assert.Equal(result, await fixture.RestartedDispatcher().DispatchAsync(request, default));
+        await Assert.ThrowsAsync<PersistenceConcurrencyException>(async () =>
+            await fixture.Proposals.ResolveAsync("owner", pending.ActionId.Value, preview.Approval.ExpectedVersion, true, default));
+    }
+
+    [Fact]
+    public async Task ConflictsRequireExplicitResolutionAndRetainedFactsNeedDistinctContext()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var first = await fixture.CreateFactAsync("Example Blue");
+        var conflict = await fixture.RequestAsync(new("create", Subject: " BATHROOM ", Key: " PAINT ", Value: "Example Red"));
+        Assert.Equal("Failed", (await fixture.ApproveAsync(conflict)).Status);
+        Assert.Equal("Example Blue", (await fixture.Memory.GetAsync("owner", first.Id, default))!.Value);
+        var found = await fixture.Memory.FindConflictsAsync("owner", "bathroom", "paint", default);
+        var references = found.Select(fact => new MemoryConflictArguments(fact.Id.Value, fact.Version)).ToArray();
+        var retain = await fixture.RequestAsync(new("retain_both", Subject: "Bathroom", Key: "paint",
+            Value: "Example Red", Conflicts: references, DistinguishingContext: "ceiling"));
+        Assert.Equal("Succeeded", (await fixture.ApproveAsync(retain)).Status);
+        var both = await fixture.Memory.FindConflictsAsync("owner", "bathroom", "paint", default);
+        Assert.Equal(2, both.Count);
+        var sameContext = await fixture.RequestAsync(new("retain_both", Subject: "Bathroom", Key: "paint",
+            Value: "Example Green", Conflicts: both.Select(f => new MemoryConflictArguments(f.Id.Value, f.Version)).ToArray(),
+            DistinguishingContext: "CEILING"));
+        Assert.Equal("Failed", (await fixture.ApproveAsync(sameContext)).Status);
+        var supersede = await fixture.RequestAsync(new("supersede", Subject: "Bathroom", Key: "paint",
+            Value: "Example White", Conflicts: both.Select(f => new MemoryConflictArguments(f.Id.Value, f.Version)).ToArray()));
+        Assert.Equal("Succeeded", (await fixture.ApproveAsync(supersede)).Status);
+        var active = Assert.Single(await fixture.Memory.FindConflictsAsync("owner", "bathroom", "paint", default));
+        Assert.Equal("Example White", active.Value);
+        Assert.NotNull(active.SupersedesId);
+        Assert.Null(await fixture.Memory.GetAsync("owner", first.Id, default));
+        Assert.Empty(await fixture.Memory.SearchAsync("owner", "Blue", 10, default));
+    }
+
+    [Fact]
+    public async Task ChangedConflictSetCannotSlipBetweenReviewAndCommit()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var left = await fixture.RequestAsync(new("create", Subject: "bathroom", Key: "paint", Value: "left"));
+        var right = await fixture.RequestAsync(new("create", Subject: " BATHROOM", Key: "paint ", Value: "right"));
+        var leftPending = await fixture.Dispatcher.DispatchAsync(left, default);
+        var rightPending = await fixture.Dispatcher.DispatchAsync(right, default);
+        await fixture.Approvals.ResolveAsync(leftPending.ApprovalId!.Value, "owner", 1, true, default);
+        await fixture.Approvals.ResolveAsync(rightPending.ApprovalId!.Value, "owner", 1, true, default);
+        var results = await Task.WhenAll(
+            fixture.Dispatcher.DispatchAsync(left, default).AsTask(),
+            fixture.RestartedDispatcher().DispatchAsync(right, default).AsTask());
+        Assert.Single(results, result => result.Status == "Succeeded");
+        Assert.Single(results, result => result.Status == "Failed");
+        Assert.Single(await fixture.Memory.FindConflictsAsync("owner", "bathroom", "paint", default));
+    }
+
+    [Fact]
+    public async Task DeleteRedactsDerivedCopiesAndOldCallsCannotRestoreThem()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var created = await fixture.CreateFactAsync("private_blue_sentinel");
+        var get = await fixture.ReadRequestAsync("memory.get", new MemoryGetArguments(created.Id.Value));
+        var read = await fixture.Dispatcher.DispatchAsync(get, default);
+        Assert.Contains("private_blue_sentinel", read.ResultJson!, StringComparison.Ordinal);
+        var search = await fixture.ReadRequestAsync("memory.search", new MemorySearchArguments("private_blue_sentinel"));
+        Assert.Contains("private_blue_sentinel", (await fixture.Dispatcher.DispatchAsync(search, default)).ResultJson!, StringComparison.Ordinal);
+        var pendingUpdate = await fixture.RequestAsync(new("update", created.Id.Value, created.Version,
+            "bathroom", "paint", "private_blue_sentinel updated"));
+        var pending = await fixture.Dispatcher.DispatchAsync(pendingUpdate, default);
+        var deletion = await fixture.RequestAsync(new("delete", created.Id.Value, created.Version));
+        var deleted = await fixture.ApproveAsync(deletion);
+        Assert.Equal("Succeeded", deleted.Status);
+        Assert.Null(await fixture.Memory.GetAsync("owner", created.Id, default));
+        Assert.Empty(await fixture.Memory.SearchAsync("owner", "private_blue_sentinel", 10, default));
+        foreach (var request in new[] { get, search, pendingUpdate })
+        {
+            var replay = await fixture.RestartedDispatcher().DispatchAsync(request, default);
+            Assert.Equal("memory_result_invalidated", replay.ReasonCode);
+            Assert.Null(replay.ResultJson);
+        }
+        await Assert.ThrowsAsync<PersistenceConcurrencyException>(async () =>
+            await fixture.Proposals.PreviewAsync("owner", pending.ActionId!.Value, default));
+        await using var connection = await fixture.Database.OpenConnectionAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT COUNT(*) FROM actions WHERE canonical_arguments LIKE '%private_blue_sentinel%'
+                OR outcome_json LIKE '%private_blue_sentinel%';
+            """;
+        Assert.Equal(0L, (long)(await command.ExecuteScalarAsync())!);
+        command.CommandText = "SELECT COUNT(*) FROM memory_tombstones;";
+        Assert.Equal(1L, (long)(await command.ExecuteScalarAsync())!);
+        command.CommandText = "SELECT COUNT(*) FROM memory_facts_fts WHERE memory_facts_fts MATCH 'private_blue_sentinel';";
+        Assert.Equal(0L, (long)(await command.ExecuteScalarAsync())!);
+        Assert.Equal(deleted, await fixture.RestartedDispatcher().DispatchAsync(deletion, default));
+    }
+
+    [Fact]
+    public async Task DelayedReadPublicationCannotReintroduceDeletedContent()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var fact = await fixture.CreateFactAsync("late_result_secret");
+        var request = await fixture.ReadRequestAsync("memory.get", new MemoryGetArguments(fact.Id.Value));
+        var result = await fixture.Dispatcher.DispatchAsync(request, default);
+        var old = (await fixture.Journal.GetAsync(result.ActionId!.Value, default))!;
+        var deletion = await fixture.RequestAsync(new("delete", fact.Id.Value, fact.Version));
+        Assert.Equal("Succeeded", (await fixture.ApproveAsync(deletion)).Status);
+        var late = await fixture.Journal.UpdateStatusAsync(old.Id, "Succeeded", old.Version,
+            fixture.Clock.UtcNow, default, result);
+        Assert.True(late.MemoryInvalidated);
+        Assert.Null(late.Outcome!.ResultJson);
+
+        // Exercise first publication after deletion, when no result dependency was yet registered.
+        var another = await fixture.ReadRequestAsync("memory.get", new MemoryGetArguments(fact.Id.Value));
+        var raw = new ActionJournalEntry(ToolDispatcher.CreateActionId(another.TurnId, another.CallId),
+            "memory.get", JsonSerializer.Serialize(new { OwnerId = "owner" }), "synthetic-hash", "Prepared",
+            fixture.Clock.UtcNow, fixture.Clock.UtcNow, 1);
+        var prepared = await fixture.Journal.CreateAsync(raw, default);
+        var claimed = await fixture.Journal.UpdateStatusAsync(prepared.Id, "Executing", prepared.Version, fixture.Clock.UtcNow, default);
+        var staleResult = result with { ActionId = claimed.Id };
+        var invalidated = await fixture.Journal.UpdateStatusAsync(claimed.Id, "Succeeded", claimed.Version,
+            fixture.Clock.UtcNow, default, staleResult);
+        Assert.True(invalidated.MemoryInvalidated);
+        Assert.Equal("memory_result_invalidated", invalidated.Outcome!.ReasonCode);
+        Assert.Null(invalidated.Outcome.ResultJson);
+    }
+
+    [Fact]
+    public async Task EditInvalidatesOldEvidenceAndRejectsStaleVersionsWithoutLosingOtherFacts()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var first = await fixture.CreateFactAsync("original");
+        var other = await fixture.CreateFactAsync("unrelated", "kitchen");
+        var get = await fixture.ReadRequestAsync("memory.get", new MemoryGetArguments(first.Id.Value));
+        await fixture.Dispatcher.DispatchAsync(get, default);
+        var update = await fixture.RequestAsync(new("update", first.Id.Value, first.Version, "bathroom", "paint", "changed"));
+        Assert.Equal("Succeeded", (await fixture.ApproveAsync(update)).Status);
+        var current = (await fixture.Memory.GetAsync("owner", first.Id, default))!;
+        Assert.Equal(2, current.Version);
+        Assert.Equal("changed", current.Value);
+        Assert.Equal("memory_result_invalidated", (await fixture.Dispatcher.DispatchAsync(get, default)).ReasonCode);
+        var stale = await fixture.RequestAsync(new("delete", first.Id.Value, 1));
+        Assert.Equal("memory_result_invalidated", (await fixture.Dispatcher.DispatchAsync(stale, default)).ReasonCode);
+        Assert.NotNull(await fixture.Memory.GetAsync("owner", other.Id, default));
+        Assert.Empty(await fixture.Memory.SearchAsync("owner", "original", 10, default));
+    }
+
+    [Fact]
+    public async Task RejectionExpiryAndForgedSourceCannotCommit()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var rejected = await fixture.RequestAsync(new("create", Subject: "bathroom", Key: "paint", Value: "not saved"));
+        var pending = await fixture.Dispatcher.DispatchAsync(rejected, default);
+        var preview = await fixture.Proposals.PreviewAsync("owner", pending.ActionId!.Value, default);
+        Assert.Equal("Rejected", (await fixture.Proposals.ResolveAsync("owner", pending.ActionId.Value,
+            preview.Approval.ExpectedVersion, false, default)).Status);
+        var expired = await fixture.RequestAsync(new("create", Subject: "bathroom", Key: "paint", Value: "expired"));
+        pending = await fixture.Dispatcher.DispatchAsync(expired, default);
+        fixture.Clock.UtcNow += TimeSpan.FromMinutes(5);
+        Assert.Equal("Expired", (await fixture.Proposals.ResolveAsync("owner", pending.ActionId!.Value, 1, true, default)).Status);
+        Assert.Equal("memory_source_unavailable", (await fixture.Dispatcher.DispatchAsync(expired with
+        {
+            CallId = "forged",
+            CurrentUserRequest = "different request"
+        }, default)).ReasonCode);
+        Assert.Empty(await fixture.Memory.SearchAsync("owner", "paint", 10, default));
+        await Assert.ThrowsAsync<KeyNotFoundException>(async () =>
+            await fixture.Proposals.PreviewAsync("another-owner", pending.ActionId.Value, default));
+        await Assert.ThrowsAsync<PersistenceConcurrencyException>(async () =>
+            await fixture.Memory.CommitAsync(preview.Command, default));
+    }
+
+    [Fact]
+    public async Task ReceiptRecoversInterruptedSettlementWithoutRepeatingTheMutation()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var request = await fixture.RequestAsync(new("create", Subject: "bathroom", Key: "paint", Value: "once"));
+        var pending = await fixture.Dispatcher.DispatchAsync(request, default);
+        var preview = await fixture.Proposals.PreviewAsync("owner", pending.ActionId!.Value, default);
+        await fixture.Approvals.ResolveAsync(pending.ApprovalId!.Value, "owner", 1, true, default);
+        var entry = (await fixture.Journal.GetAsync(pending.ActionId.Value, default))!;
+        await fixture.Journal.UpdateStatusAsync(entry.Id, "Executing", entry.Version, fixture.Clock.UtcNow, default);
+        var receipt = await fixture.Memory.CommitAsync(preview.Command, default);
+        Assert.Equal(receipt, await fixture.Memory.CommitAsync(preview.Command, default));
+        var recovered = await fixture.RestartedDispatcher().DispatchAsync(request, default);
+        Assert.Equal("Succeeded", recovered.Status);
+        Assert.Equal(1, Assert.Single(await fixture.Memory.SearchAsync("owner", "once", 10, default)).Version);
+        Assert.Null(await fixture.Memory.GetReceiptAsync("other", receipt.ActionId, default));
+    }
+
+    [Fact]
+    public async Task LocalReadsFilterOwnerPrivacyAndFtsSyntaxBeforeApplyingLimit()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var allowed = await fixture.CreateFactAsync("bounded");
+        await fixture.SqlAsync("""
+            INSERT INTO memory_facts (id, owner_id, subject, fact_key, value, source_id, privacy_class,
+                created_at_utc, updated_at_utc, version)
+            SELECT lower(hex(randomblob(16))), 'other', subject, fact_key, value, source_id, privacy_class,
+                created_at_utc, updated_at_utc, version FROM memory_facts;
+            """);
+        Assert.Empty(await fixture.Memory.SearchAsync("owner", "bounded OR *", 1, default));
+        Assert.Single(await fixture.Memory.SearchAsync("owner", "bounded", 1, default));
+        Assert.Null(await fixture.Memory.GetAsync("other", allowed.Id, default));
+        Assert.Empty(await fixture.Memory.SearchAsync("owner", "!!!", 1, default));
+        await Assert.ThrowsAsync<ArgumentException>(async () => await fixture.Memory.SearchAsync(" ", "x", 1, default));
+        await Assert.ThrowsAsync<ArgumentException>(async () => await fixture.Memory.SearchAsync("owner", "", 1, default));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(async () => await fixture.Memory.SearchAsync("owner", "x", 0, default));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(async () => await fixture.Memory.SearchAsync("owner", new string('x', 513), 1, default));
+        await fixture.SqlAsync("UPDATE memory_facts SET privacy_class = 'Unknown';");
+        Assert.Empty(await fixture.Memory.SearchAsync("owner", "bounded", 10, default));
+        Assert.Null(await fixture.Memory.GetAsync("owner", allowed.Id, default));
+        await Assert.ThrowsAsync<PersistenceConcurrencyException>(async () =>
+            await fixture.Memory.FindConflictsAsync("owner", "bathroom", "paint", default));
+    }
+
+    [Fact]
+    public async Task TranscriptRemovalMakesSourceExplicitlyUnavailableWithoutDeletingFacts()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var fact = await fixture.CreateFactAsync("durable");
+        await fixture.SqlAsync("DELETE FROM conversations;");
+        var surviving = (await fixture.Memory.GetAsync("owner", fact.Id, default))!;
+        Assert.False(surviving.SourceAvailable);
+        Assert.Null(surviving.SourceMessageId);
+        Assert.Equal("OwnerMessage", surviving.SourceType);
+        Assert.Equal("durable", surviving.Value);
+        Assert.Null(await fixture.Memory.ReadSourceAsync("owner", new TurnId(Guid.NewGuid()), default));
+    }
+
+    [Fact]
+    public async Task ApprovedCommitRejectsChangedContentMissingSourceExpiryAndStaleFact()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var fact = await fixture.CreateFactAsync("original");
+        var request = await fixture.RequestAsync(new("update", fact.Id.Value, fact.Version, "bathroom", "paint", "replacement"));
+        var pending = await fixture.Dispatcher.DispatchAsync(request, default);
+        var preview = await fixture.Proposals.PreviewAsync("owner", pending.ActionId!.Value, default);
+        await fixture.Approvals.ResolveAsync(pending.ApprovalId!.Value, "owner", 1, true, default);
+        var entry = (await fixture.Journal.GetAsync(pending.ActionId.Value, default))!;
+        await fixture.Journal.UpdateStatusAsync(entry.Id, "Executing", entry.Version, fixture.Clock.UtcNow, default);
+        await Assert.ThrowsAsync<PersistenceConcurrencyException>(async () => await fixture.Memory.CommitAsync(
+            preview.Command with { Change = preview.Command.Change with { Value = "not approved" } }, default));
+        await Assert.ThrowsAsync<PersistenceConcurrencyException>(async () => await fixture.Memory.CommitAsync(
+            preview.Command with { OwnerId = "other" }, default));
+        var originalTime = fixture.Clock.UtcNow;
+        fixture.Clock.UtcNow += TimeSpan.FromMinutes(5);
+        await Assert.ThrowsAsync<PersistenceConcurrencyException>(async () => await fixture.Memory.CommitAsync(preview.Command, default));
+        fixture.Clock.UtcNow = originalTime;
+        await fixture.SqlAsync("UPDATE memory_facts SET version = version + 1;");
+        await Assert.ThrowsAsync<PersistenceConcurrencyException>(async () => await fixture.Memory.CommitAsync(preview.Command, default));
+        await fixture.SqlAsync("DELETE FROM messages;");
+        await Assert.ThrowsAsync<PersistenceConcurrencyException>(async () => await fixture.Memory.CommitAsync(preview.Command, default));
+        Assert.Equal("original", (await fixture.Memory.GetAsync("owner", fact.Id, default))!.Value);
+    }
+
+    [Fact]
+    public async Task VersionSixUpgradePreservesLegacyFactsAndHonestProvenance()
+    {
+        using var file = IsolatedDatabaseFile.Create();
+        var database = new SqliteDatabase(file.Path);
+        await using (var connection = await database.OpenConnectionAsync())
+        {
+            foreach (var resource in typeof(SqliteDatabase).Assembly.GetManifestResourceNames()
+                .Where(name => name.Contains(".Migrations.", StringComparison.Ordinal) && !name.Contains(".007-", StringComparison.Ordinal))
+                .Order(StringComparer.Ordinal))
+            {
+                await using var stream = typeof(SqliteDatabase).Assembly.GetManifestResourceStream(resource)!;
+                using var reader = new StreamReader(stream);
+                await using var apply = connection.CreateCommand();
+                apply.CommandText = await reader.ReadToEndAsync();
+                await apply.ExecuteNonQueryAsync();
+            }
+            await using var insert = connection.CreateCommand();
+            insert.CommandText = """
+                INSERT INTO memory_facts (id, subject, fact_key, value, source_id, privacy_class,
+                    created_at_utc, updated_at_utc, version)
+                VALUES ($id, 'legacy room', 'paint', 'preserved', 'message-legacy', 'Private', $now, $now, 4);
+                PRAGMA user_version = 6;
+                """;
+            insert.Parameters.AddWithValue("$id", Guid.NewGuid().ToString("D"));
+            insert.Parameters.AddWithValue("$now", new Clock().UtcNow.ToString("O"));
+            await insert.ExecuteNonQueryAsync();
+        }
+        await database.InitializeAsync();
+        var store = new SqliteConfirmedMemoryStore(database, new Clock());
+        var fact = Assert.Single(await store.SearchAsync("owner", "preserved", 10, default));
+        Assert.Equal("Legacy", fact.SourceType);
+        Assert.False(fact.SourceAvailable);
+        Assert.Equal("message-legacy", fact.SourceId);
+        Assert.Equal(4, fact.Version);
+    }
+
+    [Fact]
+    public async Task OverlargeConflictSetFailsExplicitlyRatherThanApprovingAPartialSnapshot()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        await fixture.CreateFactAsync("first");
+        await fixture.SqlAsync("""
+            WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x < 100)
+            INSERT INTO memory_facts (id, subject, fact_key, value, source_id, privacy_class,
+                created_at_utc, updated_at_utc, version)
+            SELECT lower(hex(randomblob(16))), f.subject, f.fact_key, f.value, f.source_id, f.privacy_class,
+                f.created_at_utc, f.updated_at_utc, f.version FROM n CROSS JOIN memory_facts f;
+            """);
+        await Assert.ThrowsAsync<PersistenceConcurrencyException>(async () =>
+            await fixture.Memory.FindConflictsAsync("owner", "bathroom", "paint", default));
+    }
+
+    [Theory]
+    [InlineData("""{"OwnerId":null}""")]
+    [InlineData("""{"OwnerId":"owner","MemoryReferences":null}""")]
+    public async Task MalformedMemoryJournalMetadataFailsWithoutLeavingAPartialAction(string envelope)
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var actionId = ActionId.New();
+        await Assert.ThrowsAsync<InvalidDataException>(async () => await fixture.Journal.CreateAsync(
+            new(actionId, "memory.get", envelope, "hash", "Prepared", fixture.Clock.UtcNow, fixture.Clock.UtcNow, 1), default));
+        Assert.Null(await fixture.Journal.GetAsync(actionId, default));
+    }
+
+    [Theory]
+    [InlineData("OwnerId")]
+    [InlineData("ToolName")]
+    [InlineData("CanonicalArguments")]
+    public async Task CorruptedApprovedEnvelopeCannotAuthorizeMemory(string property)
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var request = await fixture.RequestAsync(new("create", Subject: "room", Key: "paint", Value: "not committed"));
+        var pending = await fixture.Dispatcher.DispatchAsync(request, default);
+        var preview = await fixture.Proposals.PreviewAsync("owner", pending.ActionId!.Value, default);
+        await fixture.Approvals.ResolveAsync(pending.ApprovalId!.Value, "owner", 1, true, default);
+        var entry = (await fixture.Journal.GetAsync(pending.ActionId.Value, default))!;
+        await fixture.Journal.UpdateStatusAsync(entry.Id, "Executing", entry.Version, fixture.Clock.UtcNow, default);
+        var json = System.Text.Json.Nodes.JsonNode.Parse(entry.CanonicalArguments)!;
+        json[property] = property == "CanonicalArguments" ? "null" : "not-the-approved-binding";
+        await using var connection = await fixture.Database.OpenConnectionAsync();
+        await using var corrupt = connection.CreateCommand();
+        corrupt.CommandText = "UPDATE actions SET canonical_arguments = $value WHERE id = $id;";
+        corrupt.Parameters.AddWithValue("$value", json.ToJsonString());
+        corrupt.Parameters.AddWithValue("$id", entry.Id.Value.ToString("D"));
+        await corrupt.ExecuteNonQueryAsync();
+        if (property == "CanonicalArguments")
+        {
+            await Assert.ThrowsAsync<InvalidDataException>(async () => await fixture.Memory.CommitAsync(preview.Command, default));
+        }
+        else
+        {
+            await Assert.ThrowsAsync<PersistenceConcurrencyException>(async () => await fixture.Memory.CommitAsync(preview.Command, default));
+        }
+        Assert.Empty(await fixture.Memory.SearchAsync("owner", "committed", 10, default));
+    }
+
+    private sealed class Fixture : IDisposable
+    {
+        private readonly IsolatedDatabaseFile file = IsolatedDatabaseFile.Create();
+        internal SqliteDatabase Database { get; private set; } = null!;
+        internal Clock Clock { get; } = new();
+        internal SqliteConfirmedMemoryStore Memory { get; private set; } = null!;
+        internal SqliteActionJournalStore Journal { get; private set; } = null!;
+        internal ApprovalService Approvals { get; private set; } = null!;
+        internal ToolDispatcher Dispatcher { get; private set; } = null!;
+        internal MemoryProposalService Proposals => new(Memory, Journal, Approvals, Dispatcher);
+
+        internal static async Task<Fixture> CreateAsync()
+        {
+            var fixture = new Fixture();
+            fixture.Database = new(fixture.file.Path);
+            await fixture.Database.InitializeAsync();
+            fixture.Memory = new(fixture.Database, fixture.Clock);
+            fixture.Journal = new(fixture.Database);
+            fixture.Approvals = new(new SqliteApprovalStore(fixture.Database), fixture.Journal, fixture.Clock);
+            fixture.Dispatcher = fixture.RestartedDispatcher();
+            return fixture;
+        }
+
+        internal ToolDispatcher RestartedDispatcher() => new(
+            new ToolRegistry(MemoryToolRegistrations.Create(Memory)),
+            new ToolAllowlistPolicy("memory-v1", MemoryToolRegistrations.Permissions()),
+            Journal, Approvals, Clock, TimeSpan.FromSeconds(5));
+
+        internal async Task<ToolDispatchRequest> RequestAsync(MemoryChangeArguments args) =>
+            await ReadRequestAsync("memory.propose_change", args);
+
+        internal async Task<ToolDispatchRequest> ReadRequestAsync<T>(string tool, T args)
+        {
+            var conversations = new SqliteConversationStore(Database, Clock);
+            var conversation = ConversationId.New();
+            var turn = TurnId.New();
+            var text = "Explicit synthetic owner request";
+            await conversations.SubmitTurnAsync(new(turn, conversation, Guid.NewGuid().ToString(),
+                new string('a', 64), Guid.NewGuid(), text, Clock.UtcNow), default);
+            return new(turn, Guid.NewGuid().ToString(), tool, JsonSerializer.Serialize(args), "owner", text);
+        }
+
+        internal async Task<ToolDispatchResult> ApproveAsync(ToolDispatchRequest request)
+        {
+            var pending = await Dispatcher.DispatchAsync(request, default);
+            if (pending.Status != "AwaitingApproval")
+            {
+                return pending;
+            }
+            await Approvals.ResolveAsync(pending.ApprovalId!.Value, "owner", 1, true, default);
+            return await Dispatcher.DispatchAsync(request, default);
+        }
+
+        internal async Task<MemoryFact> CreateFactAsync(string value, string subject = "bathroom")
+        {
+            var request = await RequestAsync(new("create", Subject: subject, Key: "paint", Value: value));
+            var result = await ApproveAsync(request);
+            Assert.Equal("Succeeded", result.Status);
+            return (await Memory.GetAsync("owner", JsonSerializer.Deserialize<MemoryReceipt>(result.ResultJson!)!.FactId, default))!;
+        }
+
+        internal async Task SqlAsync(string sql)
+        {
+            await using var connection = await Database.OpenConnectionAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText = sql;
+            await command.ExecuteNonQueryAsync();
+        }
+
+        public void Dispose() => file.Dispose();
+    }
+
+    private sealed class Clock : IClock
+    {
+        public DateTimeOffset UtcNow { get; set; } = new(2026, 10, 15, 12, 0, 0, TimeSpan.Zero);
+    }
+}
