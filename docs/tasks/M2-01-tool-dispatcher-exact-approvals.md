@@ -202,8 +202,8 @@ R7/R8, both labelled "Previously missed"; both are retained below. Commit
 | M2-01-R21 (Previously missed) | High | An equivalent call passed its early uncertainty check then awaited its claim; orphan registration could win while queued recovery was cancelled, yet the fresh handler still sent. | Fixed in the follow-up after `3f2f4e0`: final synchronous admission after the durable claim/policy/expiry checks shares a short lock with every registration. A winning marker durably rejects the unsent action without clearing the orphan. Unit/SQLite paused-claim regressions prove zero fresh sends/observations, original-read/lowered-risk behavior and a permitted fresh send after known recovery. |
 | M2-01-R22 (Previously missed) | Medium | A delayed Executing snapshot re-registered uncertainty after completion, then cancelled behind another holder; terminal replay never reconciled the stale marker and blocked the rest of the turn. | Fixed in the follow-up after `e0962dc`: terminal replay refreshes under the canonical proposal gate and reconciles only that action's accounting. Unit/SQLite races cover same/policy-changed success/failure, another unresolved orphan, bounded remaining attempts and no replay send/observation; cancelled waits and failed refreshes preserve uncertainty. |
 | M2-01-R23 (Previously missed) | High | Replaying persisted Unknown on a fresh dispatcher counted a failure without seeding original write uncertainty, allowing an equivalent fresh-ID resend despite unresolved effects. | Fixed in the follow-up after `5773e76`: share strict original-envelope classification with Executing recovery and register Unknown write risk before the cancellable replay wait. Unit/SQLite cases cover normal/lowered risk, cancellation, failed refresh, read-only failure limits, malformed risk, repeated replay, unchanged durable state and zero extra replay send/observation. |
-| M2-01-R24 | High | A policy-only redispatch losing its invalidation CAS returned a new rejection instead of the complete terminal approval winner. | Fixed in the follow-up after `6d9e96c`: invalidate nonterminal snapshots before handling same-proposal winners through existing reconciliation; genuinely changed content still receives identity-reuse rejection. |
-| M2-01-R25 | High | A stale rejected/expired approval read could overwrite a different terminal winner using its fresh journal version. | Fixed in the follow-up after `6d9e96c`: settle only actions still AwaitingApproval; otherwise reconcile/return the durable winner without changing status, version or response. |
+| M2-01-R24 | High | A policy-only redispatch losing its invalidation CAS returned a new rejection instead of the complete terminal approval winner. | Fixed in `4d414c1`: invalidate nonterminal snapshots before handling same-proposal winners through existing reconciliation; genuinely changed content still receives identity-reuse rejection. |
+| M2-01-R25 | High | A stale rejected/expired approval read could overwrite a different terminal winner using its fresh journal version. | Fixed in `4d414c1`: settle only actions still AwaitingApproval; otherwise reconcile/return the durable winner without changing status, version or response. |
 
 R9 uniquely identifies review comment `4273196189`, which reused the R7 label
 already assigned to the distinct approval-expiry race. Its review was against
@@ -368,9 +368,22 @@ Coverage inputs are `artifacts/coverage/unit/20261015T021201Z-82884` and
 Dedicated local SDK/Aspire/browser commands were not rerun for this bounded
 Application-only follow-up; integration includes the actual SDK sources.
 The prior nine-command local evidence and passed parent CI remain historical,
-not current-head evidence. Required new-head CI and independent exact-commit
-review remain pending. No new schema, API, dependency, profile or UI changes
-are introduced.
+not current-head evidence. Required new-head CI remains pending. No new schema,
+API, dependency, profile or UI changes are introduced.
+
+Independent reviewer `review-terminal-winners` examined exact runtime revision
+`4d414c19f9b65dd73375be3deb11451c27b03371` against `6d9e96c`, the applicable
+specification, ADR 0005, implementation/tests/docs and complete R1-R25 ledger.
+No new significant finding/R26 was identified. The review verified the reordered
+policy-only winner path, guarded AwaitingApproval settlement/CAS, all twelve
+new cases, unchanged metadata/version assertions and honest two-store fixtures.
+It also inspected owner/context binding, pre-wait original risk, action-owned
+uncertainty, proposal-gate reconciliation, synchronized final admission, full
+response replay and legacy fallback. It was independent source review only:
+no test reruns, current-head CI, dedicated SDK/Aspire/browser execution,
+live-device or cross-process behavior established. All prior findings retain
+explicit dispositions; the review is not residual-risk acceptance or merge
+authorization.
 
 ### Exact-commit independent review
 
