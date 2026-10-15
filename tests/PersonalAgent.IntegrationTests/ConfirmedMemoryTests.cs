@@ -212,9 +212,11 @@ public sealed class ConfirmedMemoryTests
     }
 
     [Theory]
-    [InlineData("create")]
-    [InlineData("update")]
-    public async Task EquivalentMemoryFailuresShareTheTurnBudgetAcrossFreshCallIds(string operation)
+    [InlineData("create", false)]
+    [InlineData("create", true)]
+    [InlineData("update", false)]
+    [InlineData("update", true)]
+    public async Task EquivalentMemoryFailuresShareTheTurnBudgetAcrossFreshCallIds(string operation, bool hostCompletion)
     {
         using var fixture = await Fixture.CreateAsync();
         var first = await fixture.CreateFactAsync("walls");
@@ -224,10 +226,21 @@ public sealed class ConfirmedMemoryTests
             operation == "update" ? first.Version : 0, "bathroom", "paint", "not applied",
             DistinguishingContext: "walls");
         var template = await fixture.RequestAsync(args);
+        async Task<ToolDispatchResult> ApproveAsync(ToolDispatchRequest request)
+        {
+            if (!hostCompletion)
+            {
+                return await fixture.ApproveAsync(request);
+            }
+            var pending = await fixture.Dispatcher.DispatchAsync(request, default);
+            return pending.Status == "AwaitingApproval"
+                ? await fixture.Proposals.ResolveAsync("owner", pending.ActionId!.Value, 1, true, default)
+                : pending;
+        }
         for (var attempt = 0; attempt < 3; attempt++)
         {
             var request = template with { CallId = Guid.NewGuid().ToString() };
-            var result = await fixture.ApproveAsync(request);
+            var result = await ApproveAsync(request);
             Assert.Equal(attempt < 2 ? "Failed" : "Rejected", result.Status);
             Assert.Equal(attempt < 2 ? "memory_changed_review_again" : "equivalent_failure_limit", result.ReasonCode);
             Assert.Equal(result, await fixture.Dispatcher.DispatchAsync(request, default));
@@ -237,9 +250,9 @@ public sealed class ConfirmedMemoryTests
             CallId = Guid.NewGuid().ToString(),
             ArgumentsJson = JsonSerializer.Serialize(args with { Value = "a different proposal" })
         };
-        Assert.Equal("Failed", (await fixture.ApproveAsync(distinct)).Status);
+        Assert.Equal("Failed", (await ApproveAsync(distinct)).Status);
         fixture.Dispatcher.ReleaseTurn(template.TurnId);
-        Assert.Equal("Failed", (await fixture.ApproveAsync(template with { CallId = Guid.NewGuid().ToString() })).Status);
+        Assert.Equal("Failed", (await ApproveAsync(template with { CallId = Guid.NewGuid().ToString() })).Status);
         Assert.Equal(2, (await fixture.Memory.FindConflictsAsync("owner", "bathroom", "paint", default)).Count);
         Assert.Equal(first, await fixture.Memory.GetAsync("owner", first.Id, default));
     }

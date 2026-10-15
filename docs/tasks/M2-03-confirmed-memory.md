@@ -53,9 +53,9 @@ Implementation is committed and independently reviewed.
 Native macOS evidence after the review fix:
 `tools/validate.sh build` passes Release formatting/analyzers with zero
 warnings/errors; `architecture` passes 6 tests; `docs` passes link checks;
-`unit` passes 324 tests; `integration` passes 427 tests; `coverage` passes all
+`unit` passes 324 tests; `integration` passes 429 tests; `coverage` passes all
 existing and new critical thresholds with 99.8% changed executable lines
-(628/629). Coverage also runs the negative gate fixtures.
+(629/630). Coverage also runs the negative gate fixtures.
 
 The actual-runtime memory test initially exposed the pinned runtime's rejection
 of dotted tool names. The adapter now translates dots to underscores at the
@@ -123,6 +123,14 @@ SQLite cases, with no R7+ findings. It used existing Release binaries and did
 not independently establish binary/source correspondence or rerun broad gates.
 Conflict ordering and owner/source separation were inspected, not separately
 varied at runtime. Final runtime/CI evidence remains on PR #47.
+
+The R6 follow-up also exercises both direct redispatch and trusted
+`MemoryProposalService.ResolveAsync` for create/update retries. The latter
+reconstructs the explicit generated fact ID from the durable command; semantic
+normalization therefore recognizes the deterministic new-fact/action ID
+relationship rather than relying on an omitted optional argument. These four
+route/operation cases pass; final-head automated PR review supplements the
+earlier exact-commit review.
 
 Independent follow-up review of
 `6e1ea399b3721b49900973e576000d55b09e5ee3` against the original reviewed

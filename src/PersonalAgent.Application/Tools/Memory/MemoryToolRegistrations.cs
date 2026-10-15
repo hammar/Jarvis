@@ -120,7 +120,8 @@ public static class MemoryToolRegistrations
                         command.SourceMessageId,
                         Change = change with
                         {
-                            FactId = args.FactId is null ? default : change.FactId,
+                            FactId = change.Operation is not ("update" or "delete") && change.FactId.Value == actionId.Value
+                                ? default : change.FactId,
                             Conflicts = change.Conflicts.OrderBy(item => item.Id.Value).ToArray()
                         }
                     }),
