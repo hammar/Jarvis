@@ -92,6 +92,10 @@ context to retain both. The full conflict set is checked under SQLite's
 immediate transaction, including concurrent insertions.
 Editing a retained fact in place also binds its sibling versions and distinct
 qualifier; it does not replace the fact ID or overwrite its siblings.
+Equivalent-failure accounting uses a separate host-owned semantic argument
+key, excluding generated action/new-fact IDs but retaining mutation content,
+source and reviewed versions. Fresh call IDs do not reset the per-turn retry
+limit; exact approval, journal and receipt bindings remain call-specific.
 
 `SqliteConfirmedMemoryStore` commits facts and action-bound receipts together.
 Interrupted settlement observes a receipt, never repeats a mutation. Journal

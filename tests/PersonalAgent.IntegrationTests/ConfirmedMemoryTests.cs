@@ -211,6 +211,39 @@ public sealed class ConfirmedMemoryTests
         Assert.Null(await fixture.Memory.GetReceiptAsync("owner", entry.Id, default));
     }
 
+    [Theory]
+    [InlineData("create")]
+    [InlineData("update")]
+    public async Task EquivalentMemoryFailuresShareTheTurnBudgetAcrossFreshCallIds(string operation)
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var first = await fixture.CreateFactAsync("walls");
+        await fixture.ApproveAsync(await fixture.RequestAsync(new("retain_both", Subject: "bathroom", Key: "paint",
+            Value: "ceiling", Conflicts: [new(first.Id.Value, first.Version)], DistinguishingContext: "ceiling")));
+        var args = new MemoryChangeArguments(operation, operation == "update" ? first.Id.Value : null,
+            operation == "update" ? first.Version : 0, "bathroom", "paint", "not applied",
+            DistinguishingContext: "walls");
+        var template = await fixture.RequestAsync(args);
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            var request = template with { CallId = Guid.NewGuid().ToString() };
+            var result = await fixture.ApproveAsync(request);
+            Assert.Equal(attempt < 2 ? "Failed" : "Rejected", result.Status);
+            Assert.Equal(attempt < 2 ? "memory_changed_review_again" : "equivalent_failure_limit", result.ReasonCode);
+            Assert.Equal(result, await fixture.Dispatcher.DispatchAsync(request, default));
+        }
+        var distinct = template with
+        {
+            CallId = Guid.NewGuid().ToString(),
+            ArgumentsJson = JsonSerializer.Serialize(args with { Value = "a different proposal" })
+        };
+        Assert.Equal("Failed", (await fixture.ApproveAsync(distinct)).Status);
+        fixture.Dispatcher.ReleaseTurn(template.TurnId);
+        Assert.Equal("Failed", (await fixture.ApproveAsync(template with { CallId = Guid.NewGuid().ToString() })).Status);
+        Assert.Equal(2, (await fixture.Memory.FindConflictsAsync("owner", "bathroom", "paint", default)).Count);
+        Assert.Equal(first, await fixture.Memory.GetAsync("owner", first.Id, default));
+    }
+
     [Fact]
     public async Task DeleteRedactsDerivedCopiesAndOldCallsCannotRestoreThem()
     {

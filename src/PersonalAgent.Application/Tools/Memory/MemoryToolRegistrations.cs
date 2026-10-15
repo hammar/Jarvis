@@ -114,6 +114,16 @@ public static class MemoryToolRegistrations
                     source?.MessageId ?? request.ReplayMemorySourceId!.Value, change);
                 return ToolPreparationResult.Ready(new("memory.propose_change", "change", null, JsonSerializer.Serialize(command))
                 {
+                    EquivalentFailureArguments = JsonSerializer.Serialize(new
+                    {
+                        command.OwnerId,
+                        command.SourceMessageId,
+                        Change = change with
+                        {
+                            FactId = args.FactId is null ? default : change.FactId,
+                            Conflicts = change.Conflicts.OrderBy(item => item.Id.Value).ToArray()
+                        }
+                    }),
                     MemoryReferences = change.Conflicts.Append(new(change.FactId, change.ExpectedVersion)).ToArray()
                 });
             },

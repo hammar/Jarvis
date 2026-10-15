@@ -93,6 +93,9 @@ Review regressions cover editing a retained fact in place, escaped maximum-size
 FTS evidence with explicit truncation and matching dependencies, a deterministic
 two-dispatcher stale-receipt observation racing a commit, settlement-before-commit
 refusal, and deletion between the early replay check and terminal reconciliation.
+Same-turn create/update regressions use fresh call IDs to verify the third
+equivalent failed proposal is rejected, while exact replay is counted once,
+different content has a separate budget and turn release resets that budget.
 
 `ActualRuntimeRetrievesMaliciousMemoryAsEvidenceButCannotAcquireShellAuthority`
 uses the actual pinned runtime and a controlled OpenAI-compatible endpoint,

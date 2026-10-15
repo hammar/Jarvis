@@ -53,9 +53,9 @@ Implementation is committed and independently reviewed.
 Native macOS evidence after the review fix:
 `tools/validate.sh build` passes Release formatting/analyzers with zero
 warnings/errors; `architecture` passes 6 tests; `docs` passes link checks;
-`unit` passes 324 tests; `integration` passes 425 tests; `coverage` passes all
+`unit` passes 324 tests; `integration` passes 427 tests; `coverage` passes all
 existing and new critical thresholds with 99.8% changed executable lines
-(617/618). Coverage also runs the negative gate fixtures.
+(628/629). Coverage also runs the negative gate fixtures.
 
 The actual-runtime memory test initially exposed the pinned runtime's rejection
 of dotted tool names. The adapter now translates dots to underscores at the
@@ -64,11 +64,11 @@ Both runtime memory retrieval/denial and pre-provider collision checks pass.
 This is protocol compatibility mapping, not a dependency upgrade or an
 inferred owner acceptance of a dependency defect.
 
-After the R1 recovery fix, `sdk-contracts` passed the standalone actual-runtime
+After the R2-R5 fixes, `sdk-contracts` passed the standalone actual-runtime
 harness and 57 adapter contracts; `aspire-e2e` passes 8 scenarios;
 `browser-e2e` passes 29 scenarios and verifies that its deliberately failing
 browser probe fails; explicit `gate-self-test` passed. These runtime/E2E gates
-are being rerun after R2-R5; their final evidence is recorded on PR #47.
+are rerun after R6; their final evidence is recorded on PR #47.
 
 Linux CI results and exact run links are recorded in PR #47 and its required
 checks. The first run passed build, architecture, unit, integration, coverage,
@@ -96,6 +96,7 @@ matrix or establish live-model behavior.
 | M2-03-R3 | Medium | A stale missing-receipt recovery observation could settle Failed after a concurrent mutation committed. | Fixed: journal settlement checks receipts inside the immediate transaction that serializes with commit authorization; commit-first publishes the receipt as success and settlement-first prevents a later write. Two-dispatcher gated regression covers both publications; separate regression covers settlement-first. |
 | M2-03-R4 | Medium | Valid large escaped search results exceeded the journal response limit. | Fixed: serialized facts/citations/framing are budgeted below 900,000 characters, returning matching fact/reference subsets and explicit Truncated metadata. A 100-fact maximum-size backslash-value SQLite regression verifies publication, replay and deletion invalidation. |
 | M2-03-R5 | Medium | Invalidation during preparation caused terminal reconciliation to parse a redacted envelope. | Fixed: terminal reconciliation returns invalidated entries before envelope parsing. Deterministic deletion-between-journal-reads regression verifies a content-free invalidation response. |
+| M2-03-R6 | Medium | Call-generated action IDs in canonical commands gave equivalent memory failures separate retry budgets. | Fixed in the subsequent revision: a host-owned semantic failure key omits generated IDs, retains owner/source/content/reviewed versions and sorts conflict references. Same-turn create/update regressions reject the third equivalent call, count exact replay once, separate different content and verify turn-release reset. Exact journal/approval/receipt identities are unchanged. |
 
 R2-R5 were reported by automated PR review on `c9511ec` and repeated on
 `80a382f`; their thread roots are respectively 4285248818, 4285248922,
@@ -112,6 +113,11 @@ than a second gated dispatcher ordering. The review used existing Release
 binaries and did not independently rebuild or rerun broad gates/platforms.
 Final readiness still requires current-head CI/runtime gates and resolved PR
 threads; passing an automated review workflow alone is not a disposition.
+
+R6 was reported on `96642b4` in thread 4285597934. R2-R5 remained explicitly
+resolved in that review; they are not omitted or erased by this later round.
+R6's regression suite passes 29 memory SQLite cases; final full gate and
+independent exact-commit verification remain required for its revision.
 
 Independent follow-up review of
 `6e1ea399b3721b49900973e576000d55b09e5ee3` against the original reviewed

@@ -844,7 +844,7 @@ public sealed class ToolDispatcher : IToolDispatcher
             draft.ActionType,
             draft.Operation,
             draft.ResolvedEntityId,
-            Arguments = CanonicalizeObjectJson(draft.CanonicalArguments)
+            Arguments = CanonicalizeObjectJson(draft.EquivalentFailureArguments ?? draft.CanonicalArguments)
         }));
         return failureBudgets.GetOrAdd((request.TurnId, proposalKey), _ => new FailureBudget());
     }

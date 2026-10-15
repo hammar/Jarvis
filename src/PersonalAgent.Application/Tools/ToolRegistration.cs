@@ -35,6 +35,9 @@ public sealed record ToolActionDraft(
 
     /// <summary>Gets exact memory versions used by the proposal, enabling privacy-safe invalidation.</summary>
     public IReadOnlyList<PersonalAgent.Application.Memory.MemoryReference>? MemoryReferences { get; init; }
+
+    // Retry accounting must not include generated action/new-fact identities.
+    internal string? EquivalentFailureArguments { get; init; }
 }
 
 /// <summary>Describes whether a typed proposal is executable, needs clarification, or is invalid.</summary>
