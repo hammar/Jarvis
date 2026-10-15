@@ -49,7 +49,7 @@ context; M3-01 must invalidate cloud packets/consent on change/deletion.
 
 ## Completion and review ledger
 
-Implementation is committed; final runtime/platform evidence is in progress.
+Implementation is committed and independently reviewed.
 Native macOS evidence after the review fix:
 `tools/validate.sh build` passes Release formatting/analyzers with zero
 warnings/errors; `architecture` passes 6 tests; `docs` passes link checks;
@@ -64,10 +64,20 @@ Both runtime memory retrieval/denial and pre-provider collision checks pass.
 This is protocol compatibility mapping, not a dependency upgrade or an
 inferred owner acceptance of a dependency defect.
 
-SDK aggregate and Aspire/browser regressions passed before the recovery fix
-(57 SDK adapter tests and 8 Aspire scenarios plus browser/gate probe); they are
-being rerun on the reviewed fix. Linux CI is not yet claimed. No live models,
-cloud or devices were used.
+After the recovery fix, `sdk-contracts` passes the standalone actual-runtime
+harness and 57 adapter contracts; `aspire-e2e` passes 8 scenarios;
+`browser-e2e` passes 29 scenarios and verifies that its deliberately failing
+browser probe fails; explicit `gate-self-test` passes. Together with the
+commands above, every native macOS gate has passed on the reviewed code.
+
+Linux CI results and exact run links are recorded in PR #47 and its required
+checks. The first run passed build, architecture, unit, integration, coverage,
+SDK (Linux/macOS) and Aspire gates; its docs link checker encountered external
+GitHub HTTP 503 responses on two unchanged existing links. No exclusions or
+gate weakening were applied. Final readiness requires all required checks,
+including docs/browser, to pass on the submitted head.
+
+No live models, cloud or devices were used.
 Memory UI/chat end-to-end acceptance remains M2-04, and cloud invalidation
 remains M3-01; neither is represented as implemented by these tests.
 
