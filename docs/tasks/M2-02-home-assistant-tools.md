@@ -69,6 +69,9 @@ Initial implementation: `3afa27bbecb60f1598116b9d9b79e7573db19ae4`, based on
 R4's body-stream classification gap. Reviewed executable revision
 `500db05fc430c0536b8b94c241ec673d90356d2a` closes that gap and was independently
 reviewed against `444068b`, with no significant new finding in the bounded delta.
+Final executable revision `71b04f54f12ec97e721933cce721ce338bd76825` fixes the
+subsequently reported R6; independent review confirmed it against `fbaa120`
+(documentation-only after `500db05`) and carried forward all prior dispositions.
 Fetched main before publishing with
 no missing upstream commits.
 PR [#46](https://github.com/hammar/Jarvis/pull/46) retains final-head CI evidence
@@ -94,11 +97,11 @@ Native macOS / pinned .NET `10.0.401` evidence:
 
 Independent follow-up confirms both findings fixed at `a85e21e`, with no new
 significant finding in those fixes/tightly coupled regressions. Automated PR
-review subsequently added R3-R5 below. All five findings now have fixed,
+review subsequently added R3-R6 below. All six findings now have fixed,
 independently confirmed dispositions. Native code/coverage/runtime gates pass;
 readiness additionally requires the PR's current-head CI and resolved conversations.
-Subsequent automated review added R6 below; its fix and final validation/review
-must complete before readiness.
+R6's native validation and exact-commit review are complete; final-head CI
+remains a mandatory readiness condition rather than a waived gate.
 
 | Reference | Severity | Finding | Disposition and evidence |
 | --- | --- | --- | --- |
@@ -107,7 +110,7 @@ must complete before readiness.
 | M2-02-R3 | Medium | Previously missed: regex `$` accepted an entity ID ending in a newline. | Fixed in `444068b`, independently confirmed: absolute `\A`/`\z` anchors; newline/CRLF catalog rejection regressions pass. |
 | M2-02-R4 | Medium | Previously missed: every `HttpRequestException`, including permanent TLS failures, admitted a safe-read retry. Review of `444068b` retained the same finding for body I/O being rewritten to transient ResponseEnded. | Fixed in `500db05`, independently confirmed: send-boundary allowlist plus preserved native body-stream HTTP categories; unclassified I/O requires a typed transient socket cause. Eight added body-stream regressions prove attempt counts and safe failures; reviewer independently ran 28 related cases. |
 | M2-02-R5 | High | Previously missed: interrupted-write recovery ignored installation identity and could observe a replacement HA installation as false success. | Fixed in `444068b`, independently confirmed: optional persisted observation scope on host drafts/envelopes; home writes require connection/catalog scope, and mismatch records Unknown without observation or submission. Two-installation/reference regressions cover both write tools; unit tests prove legacy scopes fail closed and unscoped tools remain compatible. Code/coverage and native runtime/browser gates pass. |
-| M2-02-R6 | High | Previously missed: service HTTP 400 was treated as definitive no-application even though HA can report service-execution errors after side effects; a false Failed outcome permitted another equivalent write. | Fix conservatively keeps all unsuccessful submitted service responses Unknown, preserving safe authorization/missing-service reasons but never inferring rollback from status alone. Applied/unapplied 400 regressions cover both writes; other formerly definitive HTTP codes also get applied/unapplied one-submission/replay/uncertainty-budget assertions. Native build/integration/coverage/docs/SDK/Aspire gates pass; independent exact-commit review and final-head CI remain required. |
+| M2-02-R6 | High | Previously missed: service HTTP 400 was treated as definitive no-application even though HA can report service-execution errors after side effects; a false Failed outcome permitted another equivalent write. | Fixed in `71b04f54`, independently confirmed: all unsuccessful submitted service responses remain Unknown, preserving safe authorization/missing-service reasons but never inferring rollback from status alone. Applied/unapplied 400 regressions cover both writes; other formerly definitive HTTP codes also get applied/unapplied one-submission/replay/uncertainty-budget assertions through a restarted dispatcher. Native build/integration/coverage/docs/SDK/Aspire gates pass; reviewer independently passed all 102 HA cases. |
 
 Independent review examined `3afa27b` against the task/spec and full diff,
 source-traced both findings, and ran existing Release home-tool unit and
@@ -130,6 +133,11 @@ R1/R2/R3/R5 as fixed. It independently ran all 28 targeted transport,
 body-stream and real dropped-response cases against existing Release binaries
 (not a fresh reviewer rebuild). It found no significant new issue in that delta.
 Pending final-head CI and live HA/device behavior were not certified by review.
+Final R6 review examined `71b04f54` against `fbaa120`, independently verified
+upstream's post-invocation error mapping, and passed all 102 controlled HTTP/SQLite
+home cases using existing Release binaries (not a fresh reviewer rebuild).
+It confirmed R6 fixed, retained all prior fixed dispositions, and found no
+significant new issue in the bounded delta. CI/live behavior was not certified.
 
 Review-fix targeted command:
 `dotnet test tests/PersonalAgent.IntegrationTests -c Release --no-restore --filter FullyQualifiedName~HomeAssistantTests`
@@ -138,8 +146,8 @@ HTTP/SQLite checks passed 76 cases before adding R5 regressions. Bounded browser
 29/29 passing; it measured no three-minute inactivity hang. The original stopped
 invocation remains unverified. The standard browser gate subsequently passed
 29/29 and its deliberately failing enforcement probe at `a85e21e` and again at
-`444068b`. Native integration and SDK/Aspire checks cover the final narrow
-body-stream change. Its final-head browser evidence requires the CI browser
+`444068b`. Native integration and SDK/Aspire checks cover the final transport
+fixes (R4 body streams and R6 uncertain service errors). Final-head browser evidence requires the CI browser
 gate; no third native browser run is claimed.
 
 Linux CI at `a85e21e` passed build, architecture, unit, integration, coverage,
@@ -152,6 +160,10 @@ the next complete source run
 at `444068b` passed every required job, including both SDK platforms and docs,
 without changing those tests or weakening gates. The PR retains final-head CI
 results, which remain mandatory rather than substituting this earlier run.
+The subsequent documentation-head run
+[`38697080650`](https://github.com/hammar/Jarvis/actions/runs/38697080650)
+at `fbaa120` also passed every required job before the R6 fix was published.
+It likewise does not substitute for final-head CI on the R6 source.
 
 The R3-R5 follow-up uses the existing journal JSON envelope with an optional,
 null-omitted observation scope, not a migration or dispatcher redesign. Existing
