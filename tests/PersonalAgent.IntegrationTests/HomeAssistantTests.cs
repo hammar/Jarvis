@@ -304,22 +304,54 @@ public sealed class HomeAssistantTests
     }
 
     [Theory]
-    [InlineData(true, "Succeeded")]
-    [InlineData(false, "Unknown")]
+    [InlineData(503, true, false, "Succeeded")]
+    [InlineData(503, false, false, "Unknown")]
+    [InlineData(400, true, false, "Succeeded")]
+    [InlineData(400, false, false, "Unknown")]
+    [InlineData(400, true, true, "Succeeded")]
+    [InlineData(400, false, true, "Unknown")]
+    [InlineData(401, true, false, "Succeeded")]
+    [InlineData(401, false, false, "Unknown")]
+    [InlineData(403, true, false, "Succeeded")]
+    [InlineData(403, false, false, "Unknown")]
+    [InlineData(404, true, false, "Succeeded")]
+    [InlineData(404, false, false, "Unknown")]
+    [InlineData(405, true, false, "Succeeded")]
+    [InlineData(405, false, false, "Unknown")]
+    [InlineData(422, true, false, "Succeeded")]
+    [InlineData(422, false, false, "Unknown")]
     [Trait("Category", "Integration")]
-    public async Task UncertainWriteReconcilesOnlyByObservationAndNeverResends(bool apply, string expected)
+    public async Task UncertainWriteReconcilesOnlyByObservationAndNeverResends(int status, bool apply, bool thermostat, string expected)
     {
-        await using var fixture = await Fixture.StartAsync(new(AutomaticLightsEnabled: true, VerificationSeconds: 1, PollMilliseconds: 10));
-        fixture.Endpoint.Configure([], apply, 503);
-        var request = fixture.Request("home.set_light", """{"entity":"lamp","on":true}""", "turn on lamp");
+        await using var fixture = await Fixture.StartAsync(new(ThermostatEnabled: true, AutomaticLightsEnabled: true,
+            VerificationSeconds: 1, PollMilliseconds: 10));
+        fixture.Endpoint.Configure([], apply, status);
+        var request = thermostat
+            ? fixture.Request("home.set_temperature", """{"entity":"thermostat","temperature":22}""")
+            : fixture.Request("home.set_light", """{"entity":"lamp","on":true}""", "turn on lamp");
+        if (thermostat)
+        {
+            var pending = await fixture.Dispatcher.DispatchAsync(request, default);
+            var approval = await fixture.Approvals.GetAsync(pending.ApprovalId!.Value, default);
+            await fixture.Approvals.ResolveAsync(approval!.Id, "owner", approval.ExpectedVersion, true, default);
+        }
         var result = await fixture.Dispatcher.DispatchAsync(request, default);
         Assert.Equal(expected, result.Status);
         Assert.Equal(1, fixture.Endpoint.WriteCount);
+        Assert.True(fixture.Endpoint.ReadCount > 0);
         Assert.Contains("\"submission\":\"Unknown\"", result.ResultJson!, StringComparison.Ordinal);
-        Assert.Equal(result, await fixture.CreateDispatcher().DispatchAsync(request, default));
+        var restarted = fixture.CreateDispatcher();
+        Assert.Equal(result, await restarted.DispatchAsync(request, default));
         if (!apply)
         {
-            var next = await fixture.Dispatcher.DispatchAsync(request with { CallId = "next" }, default);
+            var nextRequest = request with { CallId = "next" };
+            var next = await restarted.DispatchAsync(nextRequest, default);
+            if (thermostat && next.Status == "AwaitingApproval")
+            {
+                var approval = await fixture.Approvals.GetAsync(next.ApprovalId!.Value, default);
+                await fixture.Approvals.ResolveAsync(approval!.Id, "owner", approval.ExpectedVersion, true, default);
+                next = await restarted.DispatchAsync(nextRequest, default);
+            }
             Assert.Equal("equivalent_write_outcome_unknown", next.ReasonCode);
         }
         Assert.Equal(1, fixture.Endpoint.WriteCount);
@@ -386,9 +418,10 @@ public sealed class HomeAssistantTests
         fixture.Endpoint.Configure([401], false, 401);
         var read = await fixture.Dispatch("home.get_state", """{"entity":"temperature"}""");
         var write = await fixture.Dispatch("home.set_light", """{"entity":"lamp","on":true}""", "turn on lamp");
+        Assert.Equal("Failed", read.Status);
+        Assert.Equal("Unknown", write.Status);
         foreach (var result in new[] { read, write })
         {
-            Assert.Equal("Failed", result.Status);
             Assert.DoesNotContain("synthetic-home-token", JsonSerializer.Serialize(result), StringComparison.Ordinal);
             var stored = await fixture.Journal.GetAsync(result.ActionId!.Value, default);
             Assert.DoesNotContain("synthetic-home-token", JsonSerializer.Serialize(stored), StringComparison.Ordinal);
@@ -745,19 +778,19 @@ public sealed class HomeAssistantTests
     }
 
     [Theory]
-    [InlineData(400, "home_service_rejected")]
+    [InlineData(400, "home_delivery_uncertain")]
     [InlineData(401, "home_unauthorized")]
     [InlineData(403, "home_unauthorized")]
-    [InlineData(404, "home_unknownentity")]
-    [InlineData(405, "home_service_rejected")]
-    [InlineData(422, "home_service_rejected")]
+    [InlineData(404, "home_service_not_found")]
+    [InlineData(405, "home_delivery_uncertain")]
+    [InlineData(422, "home_delivery_uncertain")]
     [Trait("Category", "Integration")]
-    public async Task DefinitiveServiceRejectionsAreDistinctAndNeverRetried(int status, string reason)
+    public async Task UnsuccessfulServiceResponsesRemainUncertainWithDistinctSafeReasonsAndNoRetry(int status, string reason)
     {
         await using var fixture = await Fixture.StartAsync();
         fixture.Endpoint.Configure([], false, status);
         var result = await fixture.Client.SetLightAsync("light.simulator_lamp", true, null, default);
-        Assert.Equal(HomeAssistantWriteStatus.Rejected, result.Status);
+        Assert.Equal(HomeAssistantWriteStatus.Unknown, result.Status);
         Assert.Equal(reason, result.ReasonCode);
         Assert.Equal(1, fixture.Endpoint.WriteCount);
         Assert.Equal(0, fixture.Endpoint.ReadCount);

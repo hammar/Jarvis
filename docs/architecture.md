@@ -20,6 +20,9 @@ Known pre-submission credential/cancellation/deadline failures return definitive
 not-submitted outcomes; only possible delivery becomes physical uncertainty.
 Writes submit once; bounded verification/recovery reads current state without
 proving causality, and unchanged state after possible submission remains Unknown.
+An unsuccessful service HTTP response also remains Unknown: HA service execution
+can return errors after side effects, without rollback guarantees. Only
+host-proven pre-submission failures are definitive no-application outcomes.
 Home write drafts persist an opaque connection/catalog observation scope in
 the existing journal envelope. Recovery after a scope change (including a legacy
 unscoped home action) records Unknown without reading a different installation.

@@ -19,6 +19,11 @@ Interrupted home actions also bind their original connection/catalog observation
 scope. An endpoint/reference/catalog change, or a legacy action without that
 scope, remains Unknown without querying a replacement installation. Retain the
 original journal; configuration changes are not evidence of physical success.
+Service HTTP errors (including 400) may be returned after a device effect and
+are not proof of rejection without application. Jarvis observes them without
+resubmission; an unchanged/unavailable state remains Unknown and blocks an
+equivalent write in that turn. Correct known local configuration/credential
+failures before submission rather than assuming a remote error rolled back.
 
 Optional live HA smoke evaluation is outside required CI and has not been run
 by M2-02 automation. Only after explicit owner consent, configure the endpoint,

@@ -141,18 +141,13 @@ public sealed class HomeAssistantRestClient : IHomeAssistantClient
                 {
                     return new(HomeAssistantWriteStatus.Accepted, null);
                 }
-                if (response.StatusCode is HttpStatusCode.BadRequest or HttpStatusCode.Unauthorized
-                    or HttpStatusCode.Forbidden or HttpStatusCode.NotFound or HttpStatusCode.MethodNotAllowed
-                    or HttpStatusCode.UnprocessableEntity)
+                // Service handlers can fail after side effects; an HTTP error is not rollback evidence.
+                return new(HomeAssistantWriteStatus.Unknown, response.StatusCode switch
                 {
-                    return new(HomeAssistantWriteStatus.Rejected, response.StatusCode switch
-                    {
-                        HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden => "home_unauthorized",
-                        HttpStatusCode.NotFound => "home_unknownentity",
-                        _ => "home_service_rejected"
-                    });
-                }
-                return new(HomeAssistantWriteStatus.Unknown, "home_delivery_uncertain");
+                    HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden => "home_unauthorized",
+                    HttpStatusCode.NotFound => "home_service_not_found",
+                    _ => "home_delivery_uncertain"
+                });
             }
             catch (HttpRequestException)
             {

@@ -66,7 +66,7 @@ Initial implementation: `3afa27bbecb60f1598116b9d9b79e7573db19ae4`, based on
 `f332e9e`. First independently reviewed fix revision:
 `a85e21e29820080ca80705be82fb4d800610fd7d`. Follow-up review examined
 `444068b8941b062110b48b46416938fa48dc9405`, confirming R3/R5 and retaining
-R4's body-stream classification gap. Final executable revision
+R4's body-stream classification gap. Reviewed executable revision
 `500db05fc430c0536b8b94c241ec673d90356d2a` closes that gap and was independently
 reviewed against `444068b`, with no significant new finding in the bounded delta.
 Fetched main before publishing with
@@ -84,10 +84,10 @@ Native macOS / pinned .NET `10.0.401` evidence:
 | `tools/validate.sh build` | Passed Release, formatting, analyzers and warnings-as-errors |
 | `tools/validate.sh architecture` | Passed, including explicit TestSupport/simulator edges and existing negative fixtures |
 | `tools/validate.sh unit` | Follow-up passed 315 discovered/passed |
-| `tools/validate.sh integration` | Final R4 fix passed 382 discovered/passed, including 88 HA cases and actual runtime regressions |
-| `tools/validate.sh coverage` | Final R4 fix passed: changed executable lines 98.6% (428/434); catalog/intent critical thresholds retained |
-| `tools/validate.sh sdk-contracts` | `500db05` passed 55 actual runtime contracts with discovery verified |
-| `tools/validate.sh aspire-e2e` | `500db05` passed 8 scenarios including four-tool managed HA HTTP/dispatcher approval integration, with discovery verified |
+| `tools/validate.sh integration` | R6 fix passed 396 discovered/passed, including 102 HA cases and actual runtime regressions |
+| `tools/validate.sh coverage` | R6 fix passed: changed executable lines 98.6% (424/430); catalog/intent critical thresholds retained |
+| `tools/validate.sh sdk-contracts` | R6 fix passed 55 actual runtime contracts with discovery verified |
+| `tools/validate.sh aspire-e2e` | R6 fix passed 8 scenarios including four-tool managed HA HTTP/dispatcher approval integration, with discovery verified |
 | `tools/validate.sh docs` | Passed internal Markdown links |
 | `tools/validate.sh browser-e2e` | `444068b` standard gate passed 29/29 and discovery; deliberately failing enforcement probe failed as required. First stopped invocation is not claimed passing |
 | Browser diagnostic with `--blame-hang --blame-hang-timeout 3m` | Historical 29/29 pass; does not substitute for standard script/probe or final-head CI |
@@ -97,6 +97,8 @@ significant finding in those fixes/tightly coupled regressions. Automated PR
 review subsequently added R3-R5 below. All five findings now have fixed,
 independently confirmed dispositions. Native code/coverage/runtime gates pass;
 readiness additionally requires the PR's current-head CI and resolved conversations.
+Subsequent automated review added R6 below; its fix and final validation/review
+must complete before readiness.
 
 | Reference | Severity | Finding | Disposition and evidence |
 | --- | --- | --- | --- |
@@ -105,6 +107,7 @@ readiness additionally requires the PR's current-head CI and resolved conversati
 | M2-02-R3 | Medium | Previously missed: regex `$` accepted an entity ID ending in a newline. | Fixed in `444068b`, independently confirmed: absolute `\A`/`\z` anchors; newline/CRLF catalog rejection regressions pass. |
 | M2-02-R4 | Medium | Previously missed: every `HttpRequestException`, including permanent TLS failures, admitted a safe-read retry. Review of `444068b` retained the same finding for body I/O being rewritten to transient ResponseEnded. | Fixed in `500db05`, independently confirmed: send-boundary allowlist plus preserved native body-stream HTTP categories; unclassified I/O requires a typed transient socket cause. Eight added body-stream regressions prove attempt counts and safe failures; reviewer independently ran 28 related cases. |
 | M2-02-R5 | High | Previously missed: interrupted-write recovery ignored installation identity and could observe a replacement HA installation as false success. | Fixed in `444068b`, independently confirmed: optional persisted observation scope on host drafts/envelopes; home writes require connection/catalog scope, and mismatch records Unknown without observation or submission. Two-installation/reference regressions cover both write tools; unit tests prove legacy scopes fail closed and unscoped tools remain compatible. Code/coverage and native runtime/browser gates pass. |
+| M2-02-R6 | High | Previously missed: service HTTP 400 was treated as definitive no-application even though HA can report service-execution errors after side effects; a false Failed outcome permitted another equivalent write. | Fix conservatively keeps all unsuccessful submitted service responses Unknown, preserving safe authorization/missing-service reasons but never inferring rollback from status alone. Applied/unapplied 400 regressions cover both writes; other formerly definitive HTTP codes also get applied/unapplied one-submission/replay/uncertainty-budget assertions. Native build/integration/coverage/docs/SDK/Aspire gates pass; independent exact-commit review and final-head CI remain required. |
 
 Independent review examined `3afa27b` against the task/spec and full diff,
 source-traced both findings, and ran existing Release home-tool unit and
@@ -154,6 +157,14 @@ The R3-R5 follow-up uses the existing journal JSON envelope with an optional,
 null-omitted observation scope, not a migration or dispatcher redesign. Existing
 unscoped tools preserve their serialized identity/recovery behavior. No schema or
 secret values change. Missing legacy home-write scope fails closed to Unknown.
+
+R6 evidence: reviewed the pinned upstream
+[HA service view](https://github.com/home-assistant/core/blob/5109b1dbae64a37e3431ba6dc52764aeb98c1ccf/homeassistant/components/api/__init__.py).
+Its service-call exception handling maps `ServiceValidationError` to 400 and
+propagates `Unauthorized` for 401 mapping after invoking the service, without a
+rollback guarantee. Therefore status-only rejection is not evidence of no
+application. Known host-side failures before `SendAsync` remain definitive;
+submitted failures reconcile by observation only.
 
 Unexercised: live HA/device delivery and physical causality, live model
 evaluation for automatic household writes, and M2-04 Web chat/approval UI flows.

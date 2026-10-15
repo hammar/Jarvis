@@ -30,7 +30,9 @@ Snapshots separately carry availability and source-age staleness.
 Service acceptance is not physical success. A possibly submitted write is
 Unknown and can only be observed, never automatically resent. Known pre-submission
 credential/deadline/cancellation failures return a definitive not-submitted
-result. Verification compares target power/brightness or thermostat setpoint, not room temperature,
+result. Unsuccessful service HTTP responses, including 400 and authorization
+errors, do not prove rollback; they remain Unknown with distinct safe reasons,
+followed only by observation. Verification compares target power/brightness or thermostat setpoint, not room temperature,
 and cannot establish which command caused an observed state. Security devices,
 wildcards, generic services, switches, covers and WebSockets are unsupported.
 Tests: `tools/validate.sh integration` and `tools/validate.sh aspire-e2e`.

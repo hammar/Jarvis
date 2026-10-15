@@ -209,6 +209,10 @@ loopback success; dropped-response tests exercise the actual HTTP transport.
 Two-installation/reference recovery tests assert durable Unknown with no reads
 or additional writes on a changed destination, for both write tools. Dispatcher
 unit tests cover legacy missing observation scopes and compatible unscoped tools.
+Applied/unapplied HTTP 400 cases cover both write tools; additional service
+error statuses prove that HTTP rejection alone cannot establish no application.
+Each submits once, observes only, replays exactly after restart, and blocks
+equivalent unresolved writes rather than spending a false known-failure retry.
 Synthetic token errors never appear in returned/persisted outcomes or captured
 HTTP endpoint logs.
 
