@@ -72,6 +72,12 @@ yet available from the chat page. Live automatic light writes and thermostat
 writes are disabled by default. See the
 [Home Assistant configuration](docs/development.md#home-assistant-configuration).
 
+M2-03 adds confirmed local memory, bounded FTS retrieval, explicit conflict
+resolution and deletion of derived copies. New memories are LocalOnly, and
+every mutation needs exact owner approval. Memory/approval UI and chat wiring
+remain M2-04 scope. See the [memory decision](docs/adr/0006-confirmed-memory.md)
+for provenance, invalidated replay and backup/deletion limitations.
+
 ## Validation
 
 Use `tools/validate.sh` on macOS/Linux. It relies on the pinned .NET SDK and

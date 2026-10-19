@@ -130,14 +130,19 @@ else if (profile is "Local" or "Hybrid"
 {
     throw new InvalidOperationException("Home Assistant partial configuration requires an explicit base URL.");
 }
-builder.Services.AddSingleton(services => new ToolRegistry(homeCatalog is null
-    ? Array.Empty<IToolRegistration>()
-    : HomeToolRegistrations.Create(homeCatalog, services.GetRequiredService<IHomeAssistantClient>(), homePolicyVersion!)));
+builder.Services.AddSingleton(services => new ToolRegistry(
+    (homeCatalog is null
+        ? Array.Empty<IToolRegistration>()
+        : HomeToolRegistrations.Create(homeCatalog, services.GetRequiredService<IHomeAssistantClient>(), homePolicyVersion!))
+    .Concat(PersonalAgent.Application.Tools.Memory.MemoryToolRegistrations.Create(
+        services.GetRequiredService<PersonalAgent.Application.Memory.IConfirmedMemoryStore>()))));
 builder.Services.AddSingleton<IToolRegistry>(services => services.GetRequiredService<ToolRegistry>());
 builder.Services.AddSingleton<IToolAuthorizationPolicy>(
     new ToolAllowlistPolicy(homePolicyVersion ?? "home-disabled",
-        homeCatalog?.Permissions() ?? Array.Empty<ToolPermission>()));
-builder.Services.AddSingleton<IMemoryStore, SqliteMemoryStore>();
+        (homeCatalog?.Permissions() ?? Array.Empty<ToolPermission>())
+        .Concat(PersonalAgent.Application.Tools.Memory.MemoryToolRegistrations.Permissions())));
+builder.Services.AddSingleton<PersonalAgent.Application.Memory.IConfirmedMemoryStore, SqliteConfirmedMemoryStore>();
+builder.Services.AddSingleton<PersonalAgent.Application.Memory.MemoryProposalService>();
 builder.Services.AddSingleton<IJobStore, SqliteJobStore>();
 builder.Services.AddSingleton<IActionJournalStore, SqliteActionJournalStore>();
 builder.Services.AddSingleton<IApprovalStore, SqliteApprovalStore>();

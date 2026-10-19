@@ -1,5 +1,33 @@
 # Operations
 
+## Memory deletion and recovery
+
+M2-03 registers local memory use cases/tools, but memory UI, HTTP operations
+and chat tool-catalog wiring arrive in M2-04. A proposal is not a saved fact:
+the exact change needs the owner's Approve/Reject decision. Editing it or
+changing its conflicting versions requires new review. Host code can complete
+an already-approved proposal after restart without an active model callback.
+
+Migration 007 is additive. Durable facts survive transcript/audit retention
+and disposable SDK loss; removed source messages are explicitly unavailable.
+New facts are LocalOnly. Existing Private facts remain local-readable, while
+unknown classifications fail closed.
+
+Deleting a fact removes active content and FTS entries, redacts dependent
+proposal/journal payloads and retains content-free version/action evidence.
+Old calls report `memory_result_invalidated`; do not reconstruct their old
+arguments or retry them to recover a payload. Changes also invalidate stale
+derived evidence. Unrelated action outcomes retain exact replay.
+
+Original user/assistant messages remain under conversation retention, and
+backups can contain older facts until removed under the backup policy.
+Logical deletion does not securely erase SQLite/WAL pages or already
+delivered answers. Offline restore can restore older facts/deletion state:
+restore a deliberately selected matched backup, not a presumed privacy purge.
+See [ADR 0006](adr/0006-confirmed-memory.md).
+
+## Host operation
+
 Aspire AppHost is a development orchestrator, not a production supervisor or
 always-on macOS service manager. Keep its dashboard local and authenticated.
 Use Simulator for credential-free development. Local and Hybrid require

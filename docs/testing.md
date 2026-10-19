@@ -81,6 +81,39 @@ unbounded transcripts or byte-identical Ollama GUI output.
 
 ## Coverage semantics
 
+### M2-03 memory scenarios
+
+`MemoryTests` exercises application validation, privacy/routes, evidence-only
+formatting, conflicts, host confirmation, malformed proposals and failure
+outcomes. `ConfirmedMemoryTests` uses real isolated SQLite with the production
+dispatcher/approval service: confirmation, supersede/retain-both, concurrent
+conflicts, deletion/redaction, delayed result publication, version conflicts,
+rejection/expiry, source removal and receipt-based crash recovery.
+Review regressions cover editing a retained fact in place, escaped maximum-size
+FTS evidence with explicit truncation and matching dependencies, a deterministic
+two-dispatcher stale-receipt observation racing a commit, settlement-before-commit
+refusal, and deletion between the early replay check and terminal reconciliation.
+Same-turn create/update regressions use fresh call IDs to verify the third
+equivalent failed proposal is rejected, while exact replay is counted once,
+different content has a separate budget and turn release resets that budget.
+The 100-fact boundary test rejects retain-both/new-group update growth to 101,
+allows in-place updates with 99 siblings and allows superseding all 100 facts.
+Qualifier searches cover creation, combined subject/key terms, qualifier-only
+updates and deletion against the rebuilt FTS index and synchronization triggers.
+
+`ActualRuntimeRetrievesMaliciousMemoryAsEvidenceButCannotAcquireShellAuthority`
+uses the actual pinned runtime and a controlled OpenAI-compatible endpoint,
+not a live model. It checks structured retrieval of adversarial stored text,
+the unavailable shell capability, unchanged memory and no inferred approval.
+No household/cloud credentials are involved.
+
+Exact-path 95% line / 90% branch gates cover `MemoryPolicy.cs`,
+`MemoryProposalService.cs`, `MemoryToolRegistrations.cs`,
+`SqliteConfirmedMemoryStore.cs` and `SqliteMemoryDependencies.cs`, in addition
+to the existing dispatcher, approval and journal gates. No thresholds are lowered.
+Memory UI and out-of-process feature acceptance remain M2-04 scope; running
+existing Aspire/browser regressions is not evidence of a memory UI.
+
 `tools/PersonalAgent.Validation` consumes VSTest TRX discovery results and
 Coverlet Cobertura output for line coverage and OpenCover output for individual
 branch outcomes. Missing reports, missing expected assemblies,

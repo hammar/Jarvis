@@ -36,6 +36,10 @@ response. This bounds stored application data, not a new model-token allowance.
 
 ## Consequences
 
+[ADR 0006](0006-confirmed-memory.md) defines the owner-approved exception:
+memory modification/deletion invalidates derived payloads and replay reports
+invalidation without re-execution. Other action outcomes remain unchanged.
+
 The action journal is the authoritative response source; a later details UI can
 follow event references without duplicating payloads. SQLite still cannot
 transact with a device. A crash after sending but before journaling remains

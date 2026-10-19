@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using PersonalAgent.Application.Memory;
 using PersonalAgent.Domain;
 
 namespace PersonalAgent.Application.Tools;
@@ -74,6 +75,28 @@ public sealed class ToolDispatcher : IToolDispatcher
             return Rejected("invalid_tool_request");
         }
 
+        if (request.ToolName.StartsWith("memory.", StringComparison.Ordinal))
+        {
+            var previous = await journal.GetAsync(CreateActionId(request.TurnId, request.CallId), cancellationToken);
+            if (previous is { MemoryInvalidated: true })
+            {
+                return previous.MemoryOwnerId == request.OwnerId
+                    ? Recorded(previous)
+                    : Rejected("authenticated_owner_required");
+            }
+            if (request.ToolName == "memory.propose_change"
+                && previous is { ActionType: "memory.propose_change", MemoryOwnerId: not null }
+                && previous.MemoryOwnerId == request.OwnerId
+                && (IsTerminal(previous.Status) || previous.Status == "Executing"))
+            {
+                using var stored = JsonDocument.Parse(previous.CanonicalArguments);
+                var command = JsonSerializer.Deserialize<ConfirmedMemoryCommand>(
+                    stored.RootElement.GetProperty("CanonicalArguments").GetString()!)
+                    ?? throw new InvalidDataException("Missing recorded memory command.");
+                request = request with { ReplayMemorySourceId = command.SourceMessageId };
+            }
+        }
+
         if (!registry.TryGetRuntime(request.ToolName, out var registration) || registration is null)
         {
             return Rejected("unregistered_tool");
@@ -124,9 +147,10 @@ public sealed class ToolDispatcher : IToolDispatcher
             draft.ResolvedEntityId,
             authorization.PolicyVersion,
             effectiveRisk,
-            HashText(request.CurrentUserRequest),
+            request.ReplayCurrentRequestHash ?? HashText(request.CurrentUserRequest),
             canonicalArguments,
-            draft.ObservationScope);
+            draft.ObservationScope,
+            draft.MemoryReferences);
         var serializedEnvelope = JsonSerializer.Serialize(envelope);
         var requestHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(serializedEnvelope)));
         var actionId = CreateActionId(request.TurnId, request.CallId);
@@ -765,7 +789,7 @@ public sealed class ToolDispatcher : IToolDispatcher
         ToolActionDraft draft,
         CancellationToken cancellationToken)
     {
-        if (!IsTerminal(action.Status))
+        if (action.MemoryInvalidated || !IsTerminal(action.Status))
         {
             return action;
         }
@@ -820,7 +844,7 @@ public sealed class ToolDispatcher : IToolDispatcher
             draft.ActionType,
             draft.Operation,
             draft.ResolvedEntityId,
-            Arguments = CanonicalizeObjectJson(draft.CanonicalArguments)
+            Arguments = CanonicalizeObjectJson(draft.EquivalentFailureArguments ?? draft.CanonicalArguments)
         }));
         return failureBudgets.GetOrAdd((request.TurnId, proposalKey), _ => new FailureBudget());
     }
@@ -853,14 +877,26 @@ public sealed class ToolDispatcher : IToolDispatcher
         ActionJournalEntry action,
         ToolDispatchResult outcome)
     {
-        var completed = await journal.UpdateStatusAsync(
-            action.Id,
-            outcome.Status,
-            action.Version,
-            clock.UtcNow.ToUniversalTime(),
-            CancellationToken.None,
-            outcome);
-        return Recorded(completed);
+        try
+        {
+            var completed = await journal.UpdateStatusAsync(
+                action.Id,
+                outcome.Status,
+                action.Version,
+                clock.UtcNow.ToUniversalTime(),
+                CancellationToken.None,
+                outcome);
+            return Recorded(completed);
+        }
+        catch (PersistenceConcurrencyException) when (action.ActionType == "memory.propose_change")
+        {
+            var current = await journal.GetAsync(action.Id, CancellationToken.None);
+            if (current is not null && (current.MemoryInvalidated || IsTerminal(current.Status)))
+            {
+                return Recorded(current);
+            }
+            throw;
+        }
     }
 
     private async ValueTask JournalUnknownBeforeThrowAsync(
@@ -908,7 +944,8 @@ public sealed class ToolDispatcher : IToolDispatcher
         }
     }
 
-    private static ActionId CreateActionId(TurnId turnId, string callId)
+    /// <summary>Derives the stable journal identity shared by a turn/tool-call proposal and its mutation receipt.</summary>
+    public static ActionId CreateActionId(TurnId turnId, string callId)
     {
         var material = Encoding.UTF8.GetBytes($"{turnId.Value:D}\n{callId}");
         var digest = SHA256.HashData(material);
@@ -1088,7 +1125,8 @@ public sealed class ToolDispatcher : IToolDispatcher
         ToolRiskClass RiskClass,
         string CurrentRequestHash,
         string CanonicalArguments,
-        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? ObservationScope = null);
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? ObservationScope = null,
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<PersonalAgent.Application.Memory.MemoryReference>? MemoryReferences = null);
 
     private sealed class FailureBudget
     {

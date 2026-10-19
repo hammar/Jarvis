@@ -176,7 +176,7 @@ public sealed class SqlitePersistenceTests
         Assert.Equal(saved, await reopened.GetRetentionAsync(defaults, CancellationToken.None));
         Assert.True(await reopened.IsConfiguredAsync(CancellationToken.None));
         await using var connection = await new SqliteDatabase(file.Path).OpenConnectionAsync();
-        Assert.Equal(6, await UserVersionAsync(connection));
+        Assert.Equal(7, await UserVersionAsync(connection));
     }
 
     [Fact]
@@ -370,7 +370,7 @@ public sealed class SqlitePersistenceTests
         Assert.False(existing.TitleIsManual);
         Assert.Equal(Now, existing.CreatedAtUtc);
         await using var migrated = await database.OpenConnectionAsync();
-        Assert.Equal(6, await UserVersionAsync(migrated));
+        Assert.Equal(7, await UserVersionAsync(migrated));
     }
 
     [Fact]
@@ -433,7 +433,7 @@ public sealed class SqlitePersistenceTests
         await using var foreignKeys = connection.CreateCommand();
         foreignKeys.CommandText = "PRAGMA foreign_keys;";
         Assert.Equal(1L, (long)(await foreignKeys.ExecuteScalarAsync())!);
-        Assert.Equal(6, await UserVersionAsync(connection));
+        Assert.Equal(7, await UserVersionAsync(connection));
     }
 
     [Fact]
@@ -454,7 +454,7 @@ public sealed class SqlitePersistenceTests
         Assert.Equal(messageId, messages[0].MessageId);
         Assert.Equal("before upgrade", messages[0].Content);
         await using var migrated = await database.OpenConnectionAsync();
-        Assert.Equal(6, await UserVersionAsync(migrated));
+        Assert.Equal(7, await UserVersionAsync(migrated));
         await using var table = migrated.CreateCommand();
         table.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'cloud_consents';";
         Assert.Equal(1L, (long)(await table.ExecuteScalarAsync())!);
@@ -2492,7 +2492,7 @@ public sealed class SqlitePersistenceTests
                 return true;
             });
         await using var connection = await first.OpenConnectionAsync();
-        Assert.Equal(6, await UserVersionAsync(connection));
+        Assert.Equal(7, await UserVersionAsync(connection));
     }
 
     private static async Task<T[]> RunConcurrentlyAsync<T>(params Func<Task<T>>[] operations)

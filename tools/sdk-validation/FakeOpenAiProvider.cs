@@ -24,6 +24,7 @@ internal sealed class FakeOpenAiProvider : IAsyncDisposable
     public int RequestCount => Volatile.Read(ref _requestCount);
     public ConcurrentQueue<CapturedRequest> Requests { get; } = new();
     public string RequestedTool { get; set; } = "read_only_lookup";
+    public Func<int, (string Name, string Arguments)>? ToolCallSelector { get; set; }
     public bool RepeatTool { get; set; }
     public int? UnsolicitedToolRequestNumber { get; set; }
     public bool FailInference { get; set; }
@@ -170,6 +171,7 @@ internal sealed class FakeOpenAiProvider : IAsyncDisposable
 
         if (((index == 1 || RepeatTool) && toolNames.Length > 0) || index == UnsolicitedToolRequestNumber)
         {
+            var selectedTool = ToolCallSelector?.Invoke(index) ?? (RequestedTool, "{\"key\":\"fixture-key\"}");
             await WriteJsonAsync(context.Response,
                 JsonSerializer.Serialize(new
                 {
@@ -179,7 +181,7 @@ internal sealed class FakeOpenAiProvider : IAsyncDisposable
                     model = "fixture-model",
                     choices = new[] { new { index = 0, message = new { role = "assistant", content = (string?)null,
                         tool_calls = new[] { new { id = $"call-jarvis-{index}", type = "function",
-                            function = new { name = RequestedTool, arguments = "{\"key\":\"fixture-key\"}" } } } },
+                            function = new { name = selectedTool.Item1, arguments = selectedTool.Item2 } } } },
                         finish_reason = "tool_calls" } },
                 }));
             return;

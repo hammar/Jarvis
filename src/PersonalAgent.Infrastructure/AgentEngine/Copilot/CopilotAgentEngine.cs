@@ -1271,7 +1271,7 @@ public sealed class CopilotAgentEngine : IAgentEngine, IEngineStateMaintenance
             throw new ArgumentOutOfRangeException(nameof(request), "The tool-call budget cannot be negative.");
         }
 
-        if (request.Tools is null || request.Tools.Select(tool => tool.Name).Distinct(StringComparer.Ordinal).Count() != request.Tools.Count)
+        if (request.Tools is null || request.Tools.Select(tool => tool.Name.Replace('.', '_')).Distinct(StringComparer.Ordinal).Count() != request.Tools.Count)
         {
             throw new ArgumentException("The turn tool catalog must contain unique tool names.", nameof(request));
         }
@@ -1354,7 +1354,7 @@ public sealed class CopilotAgentEngine : IAgentEngine, IEngineStateMaintenance
         }
 
         /// <inheritdoc />
-        public override string Name => definition.Name;
+        public override string Name => definition.Name.Replace('.', '_');
 
         /// <inheritdoc />
         public override string Description => "Host-registered capability; inputs are untrusted and validated by host policy.";
