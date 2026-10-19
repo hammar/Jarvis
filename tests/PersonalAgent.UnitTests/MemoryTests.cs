@@ -267,6 +267,30 @@ public sealed class MemoryTests
     }
 
     [Fact]
+    public async Task OwnerEnteredProposalReleasesItsDispatcherTurnAfterSuccessOrFailure()
+    {
+        var fixture = new Fixture();
+        var conversations = new ProposalConversations();
+        var dispatcher = new RecordingDispatcher();
+        var service = new MemoryProposalService(
+            fixture.Memory, fixture.Journal, fixture.Approvals, dispatcher, conversations, fixture.Clock);
+
+        var submission = await service.ProposeAsync(
+            "owner", conversations.Conversation.Id, Guid.NewGuid(), Create, default);
+
+        Assert.Equal("AwaitingApproval", submission.Result.Status);
+        Assert.Equal(conversations.Turn!.Id, Assert.Single(dispatcher.ReleasedTurns));
+
+        var failedConversations = new ProposalConversations();
+        var failedDispatcher = new RecordingDispatcher { ThrowOnDispatch = true };
+        var failedService = new MemoryProposalService(
+            fixture.Memory, fixture.Journal, fixture.Approvals, failedDispatcher, failedConversations, fixture.Clock);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => failedService.ProposeAsync(
+            "owner", failedConversations.Conversation.Id, Guid.NewGuid(), Create, default).AsTask());
+        Assert.Equal([failedConversations.Turn!.Id], failedDispatcher.ReleasedTurns);
+    }
+
+    [Fact]
     public async Task ChangedMemoryAndAbsentReceiptsReturnTruthfulFailureRatherThanSuccess()
     {
         var fixture = new Fixture();
@@ -444,5 +468,95 @@ public sealed class MemoryTests
     private sealed class Clock : IClock
     {
         public DateTimeOffset UtcNow => new(2026, 10, 15, 12, 0, 0, TimeSpan.Zero);
+    }
+
+    private sealed class RecordingDispatcher : IToolDispatcher
+    {
+        internal List<TurnId> ReleasedTurns { get; } = [];
+        internal bool ThrowOnDispatch { get; init; }
+
+        public void ReleaseTurn(TurnId turnId) => ReleasedTurns.Add(turnId);
+        public void ReleaseApproval(ActionId actionId) { }
+        public ValueTask<ToolDispatchResult> DispatchAsync(ToolDispatchRequest request, CancellationToken cancellationToken)
+        {
+            if (ThrowOnDispatch)
+            {
+                throw new InvalidOperationException("Synthetic dispatcher failure.");
+            }
+            return ValueTask.FromResult(new ToolDispatchResult("AwaitingApproval", null, null));
+        }
+    }
+
+    private sealed class ProposalConversations : IConversationStore
+    {
+        internal ConversationRecord Conversation { get; } = new(
+            ConversationId.New(), "owner", "memory", DateTimeOffset.UtcNow, DateTimeOffset.UtcNow);
+        internal ConversationTurn? Turn { get; private set; }
+
+        public ValueTask<ConversationRecord?> GetConversationAsync(
+            ConversationId conversationId, string ownerId, CancellationToken cancellationToken) =>
+            ValueTask.FromResult<ConversationRecord?>(
+                Conversation.Id == conversationId && ownerId == Conversation.OwnerId ? Conversation : null);
+
+        public ValueTask<SubmittedConversationTurn?> FindSubmittedTurnAsync(
+            ConversationId conversationId,
+            string clientRequestId,
+            string requestFingerprint,
+            CancellationToken cancellationToken,
+            string? requiredOwnerId = null) => ValueTask.FromResult<SubmittedConversationTurn?>(null);
+
+        public ValueTask<SubmittedConversationTurn> SubmitTurnAsync(
+            ConversationTurnSubmission submission, CancellationToken cancellationToken)
+        {
+            Turn = new(submission.TurnId, submission.ConversationId, TurnStatus.Received,
+                submission.CreatedAtUtc, submission.CreatedAtUtc, 1);
+            return ValueTask.FromResult(new SubmittedConversationTurn(Turn, submission.UserMessageId, false));
+        }
+
+        public ValueTask<ConversationTurn?> GetTurnAsync(TurnId turnId, CancellationToken cancellationToken) =>
+            ValueTask.FromResult(Turn?.Id == turnId ? Turn : null);
+
+        public ValueTask<ConversationTurn> UpdateTurnStatusAsync(
+            TurnId turnId,
+            TurnStatus status,
+            long expectedVersion,
+            DateTimeOffset updatedAtUtc,
+            CancellationToken cancellationToken)
+        {
+            Turn = Turn! with { Status = status, UpdatedAtUtc = updatedAtUtc, Version = expectedVersion + 1 };
+            return ValueTask.FromResult(Turn);
+        }
+
+        public ValueTask<ConversationRecord> CreateConversationAsync(
+            ConversationRecord conversation, CancellationToken cancellationToken) => throw new NotImplementedException();
+        public ValueTask<IReadOnlyList<ConversationRecord>> ReadRecentConversationsAsync(
+            string ownerId, int maximumConversations, CancellationToken cancellationToken) => throw new NotImplementedException();
+        public ValueTask<ConversationRecord?> RenameConversationAsync(
+            ConversationId conversationId, string ownerId, string title, DateTimeOffset updatedAtUtc,
+            CancellationToken cancellationToken) => throw new NotImplementedException();
+        public ValueTask<ConversationMessage> AppendMessageAsync(
+            ConversationMessage message, CancellationToken cancellationToken) => throw new NotImplementedException();
+        public ValueTask<IReadOnlyList<ConversationMessage>> ReadRecentAsync(
+            ConversationId conversationId, int maximumMessages, CancellationToken cancellationToken,
+            Guid? currentTaskMessageId = null) => throw new NotImplementedException();
+        public ValueTask<ConversationTurn> CreateTurnAsync(
+            TurnId turnId, ConversationId conversationId, TurnStatus status, DateTimeOffset createdAtUtc,
+            CancellationToken cancellationToken) => throw new NotImplementedException();
+        public ValueTask<ConversationTurn?> GetTurnForOwnerAsync(
+            TurnId turnId, string ownerId, CancellationToken cancellationToken) => throw new NotImplementedException();
+        public ValueTask<IReadOnlyList<ConversationTurn>> ReadRecentTurnsForOwnerAsync(
+            string ownerId, int maximumTurns, CancellationToken cancellationToken) => throw new NotImplementedException();
+        public ValueTask<IReadOnlyList<ConversationTurn>> ReadNonterminalTurnsAsync(
+            int maximumTurns, CancellationToken cancellationToken) => throw new NotImplementedException();
+        public ValueTask<PersistedTurnEvent> TransitionTurnAndAppendEventAsync(
+            TurnId turnId, TurnStatus status, long expectedVersion, DateTimeOffset updatedAtUtc,
+            string eventType, string payloadJson, DateTimeOffset occurredAtUtc,
+            CancellationToken cancellationToken) => throw new NotImplementedException();
+        public ValueTask<PersistedTurnEvent> AppendTurnEventAsync(
+            TurnId turnId, string eventType, string payloadJson, DateTimeOffset occurredAtUtc,
+            CancellationToken cancellationToken) => throw new NotImplementedException();
+        public ValueTask<IReadOnlyList<PersistedTurnEvent>> ReadTurnEventsAfterAsync(
+            TurnId turnId, long afterSequence, int maximumEvents, CancellationToken cancellationToken) =>
+            throw new NotImplementedException();
     }
 }

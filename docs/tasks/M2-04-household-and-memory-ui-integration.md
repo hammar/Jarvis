@@ -264,8 +264,9 @@ are in progress; the previous full-gate evidence above predates these changes.
 | M2-04-R12 | High | A stale action-history snapshot could register uncertainty after a matching write had already succeeded, blocking equivalent future writes. | Candidate uncertainty is provisionally seeded, then serialized through the proposal gate and refreshed from durable action state before retention. `HistorySeedingDoesNotResurrectUncertaintyAfterMatchingExecutionSucceeds` pauses the history read, completes the matching write, then resumes stale history and verifies the durable success is not converted to uncertainty. Full gates and exact-commit review remain required. |
 | M2-04-R13 | Medium | The ordinary Simulator model returned fixed text rather than deterministic tool calls, making the documented household/memory demo non-runnable without E2E-only injection. | The managed Simulator/E2E model now recognizes a small documented set of literal read/write/memory commands and emits only registered tool calls. Every call still passes the production authorization, explicit-intent, exact-approval, and memory provenance boundaries. `SimulatorDemoMapsDocumentedCommandsToBoundedRegisteredTools` and `WebChatRunsDocumentedSimulatorLightCommandWithoutFixtureInjection` verify the model protocol and full controlled Web/HA path. Local/Hybrid never launch the fixture; full gates and exact-commit review remain required. |
 | M2-04-R14 | Medium | Activity read the oldest bounded audit page and filtered afterward, omitting recent action/approval events. | Added a dedicated SQLite `ReadRecentActivityAsync` query that filters the requested event families before applying a newest-first bound; general audit reads retain their previous ordering. `AuditPageIncludesNewestEventsBeforeApplyingItsBoundedLimit` adds 205 unrelated events and 202 approval events, then verifies the newest bounded activity page. Full gates and exact-commit review remain required. |
+| M2-04-R15 | Medium | The typed owner-proposal path dispatched directly without releasing its dispatcher turn state, retaining per-turn failure-budget entries for process lifetime. | `MemoryProposalService.ProposeAsync` now calls `ReleaseTurn` in `finally` after dispatch and turn-status settlement, including dispatch exceptions. `OwnerEnteredProposalReleasesItsDispatcherTurnAfterSuccessOrFailure` verifies release both after an approval-required result and a thrown dispatch. Post-fix native validation passed; the independent exact-commit review below remains required. |
 
-### R10–R14 validation
+### R10–R14 validation baseline
 
 Final credential-free validation for the current follow-up source ran on native
 macOS with the pinned .NET SDK and isolated Simulator/SQLite data. The initial
@@ -285,9 +286,32 @@ and the refreshed unit and combined coverage gates passed.
 | `tools/validate.sh browser-e2e` | Passed; 34/34 Playwright scenarios; the deliberately failing browser gate probe was discovered and failed as expected. |
 | `tools/validate.sh docs` | Passed; all internal Markdown links resolve. |
 
-The full M2-01/02/03 finding ledgers remain recorded above and must be included
-in independent exact-commit review. That review of the current follow-up
-revision remains pending. No live Home Assistant credentials, private
-household data, cloud inference, or physical devices were used. Linux CI, live
-HA/provider availability, physical-effect causality, human observations, and
-assistive-technology certification remain unexercised.
+These results apply to `f574ef0a08d6b0cca1b50b449f746b8f88e2b244`, before R15,
+and are retained as the R10–R14 baseline.
+
+### Post-R15 validation
+
+The R15 fix was validated on native macOS with the pinned .NET SDK and isolated
+Simulator/SQLite data. `tools/validate.sh integration` passed 456/456 without
+coverage instrumentation. The combined coverage gate used the fresh 336/336
+unit report and the prior 456/456 integration coverage report from the R10–R14
+run; it did not claim that the standalone post-fix integration run generated
+coverage.
+
+| Command | Result |
+| --- | --- |
+| `tools/validate.sh build` | Passed; Release build, formatting/analyzers, zero warnings/errors. |
+| `tools/validate.sh architecture` | Passed; 6/6 discovered tests. |
+| `tools/validate.sh unit` | Passed; 336/336 discovered tests, including the R15 release regression. |
+| `tools/validate.sh integration` | Passed; 456/456 discovered tests, run without coverage instrumentation. |
+| `tools/validate.sh sdk-contracts` | Passed; actual pinned-runtime probes and 57/57 contract tests. |
+| `tools/validate.sh coverage` | Passed using current unit coverage and the preceding R10–R14 integration coverage report; changed executable lines 96.1% (819/852). Application 98.4% lines / 94.1% branches; Infrastructure 94.2% / 82.6%; ServiceDefaults 100% / 100%; Web 98.0% / 79.0%. |
+| `tools/validate.sh aspire-e2e` | Passed; 12/12 out-of-process scenarios. |
+| `tools/validate.sh browser-e2e` | Passed; 34/34 Playwright scenarios; the deliberately failing browser gate probe was discovered and failed as expected. |
+| `tools/validate.sh docs` | Passed; all internal Markdown links resolve. |
+
+An independent exact-commit review of the R15 fix and complete M2-01/02/03
+cumulative ledgers is still required. No live Home Assistant credentials,
+private household data, cloud inference, or physical devices were used. Linux
+CI, live HA/provider availability, physical-effect causality, human
+observations, and assistive-technology certification remain unexercised.

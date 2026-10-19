@@ -109,25 +109,32 @@ public sealed class MemoryProposalService(
                 createdAt,
                 ownerId), cancellationToken);
         }
-        var result = await dispatcher.DispatchAsync(new(
-            submission.Turn.Id,
-            requestId.ToString("N"),
-            "memory.propose_change",
-            JsonSerializer.Serialize(MemoryToolRegistrations.Arguments(change)),
-            ownerId,
-            sourceText), cancellationToken);
-        if (!submission.IsDuplicate)
+        try
         {
-            var turn = await conversations.GetTurnAsync(submission.Turn.Id, cancellationToken)
-                ?? throw new InvalidOperationException("The persisted memory proposal turn is unavailable.");
-            await conversations.UpdateTurnStatusAsync(
+            var result = await dispatcher.DispatchAsync(new(
                 submission.Turn.Id,
-                result.Status is "Failed" or "Rejected" ? TurnStatus.Failed : TurnStatus.Completed,
-                turn.Version,
-                clock.UtcNow,
-                cancellationToken);
+                requestId.ToString("N"),
+                "memory.propose_change",
+                JsonSerializer.Serialize(MemoryToolRegistrations.Arguments(change)),
+                ownerId,
+                sourceText), cancellationToken);
+            if (!submission.IsDuplicate)
+            {
+                var turn = await conversations.GetTurnAsync(submission.Turn.Id, cancellationToken)
+                    ?? throw new InvalidOperationException("The persisted memory proposal turn is unavailable.");
+                await conversations.UpdateTurnStatusAsync(
+                    submission.Turn.Id,
+                    result.Status is "Failed" or "Rejected" ? TurnStatus.Failed : TurnStatus.Completed,
+                    turn.Version,
+                    clock.UtcNow,
+                    cancellationToken);
+            }
+            return new(conversationId, result);
         }
-        return new(conversationId, result);
+        finally
+        {
+            dispatcher.ReleaseTurn(submission.Turn.Id);
+        }
     }
 
     /// <summary>Reads a pending exact proposal only for its authenticated owner.</summary>
