@@ -1,3 +1,5 @@
+using System.Collections.Concurrent;
+using System.Text;
 using System.Text.Json;
 using PersonalAgent.Application;
 using PersonalAgent.SimulatorEndpoints;
@@ -14,6 +16,7 @@ if (kind is not ("model" or "home-assistant"))
 var delayNextStreamResponse = 0;
 var delayNextStreamFrame = 0;
 var failStreamResponses = 0;
+var nextToolCalls = new ConcurrentQueue<SimulatorToolCall>();
 var delayedStreamStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 var firstDelayedFrameWritten = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 app.MapGet("/health/live", () => Results.Ok());
@@ -53,6 +56,30 @@ if (kind == "model")
             Interlocked.Exchange(ref failStreamResponses, 0);
             return Results.NoContent();
         });
+        app.MapPost("/fixture/control/next-tool-call", (SimulatorToolCall call) =>
+        {
+            if (string.IsNullOrWhiteSpace(call.Name) || call.Name.Length > 128
+                || string.IsNullOrWhiteSpace(call.Arguments) || call.Arguments.Length > 8192)
+            {
+                return Results.BadRequest();
+            }
+
+            try
+            {
+                using var arguments = JsonDocument.Parse(call.Arguments);
+                if (arguments.RootElement.ValueKind != JsonValueKind.Object)
+                {
+                    return Results.BadRequest();
+                }
+            }
+            catch (JsonException)
+            {
+                return Results.BadRequest();
+            }
+
+            nextToolCalls.Enqueue(call);
+            return Results.NoContent();
+        });
     }
 
     app.MapGet("/v1/models", () => Results.Json(new
@@ -68,6 +95,44 @@ if (kind == "model")
         using var request = await JsonDocument.ParseAsync(
             context.Request.Body,
             cancellationToken: context.RequestAborted);
+        if (nextToolCalls.TryDequeue(out var toolCall))
+        {
+            var responseJson = JsonSerializer.Serialize(new
+            {
+                id = $"chatcmpl-simulator-tool-{Guid.NewGuid():N}",
+                @object = "chat.completion",
+                created = 0,
+                model = "simulator-model",
+                choices = new[]
+                {
+                    new
+                    {
+                        index = 0,
+                        message = new
+                        {
+                            role = "assistant",
+                            content = (string?)null,
+                            tool_calls = new[]
+                            {
+                                new
+                                {
+                                    id = $"call-simulator-{Guid.NewGuid():N}",
+                                    type = "function",
+                                    function = new { name = toolCall.Name, arguments = toolCall.Arguments }
+                                }
+                            }
+                        },
+                        finish_reason = "tool_calls"
+                    }
+                }
+            });
+            var responseBytes = Encoding.UTF8.GetBytes(responseJson);
+            context.Response.ContentType = "application/json";
+            context.Response.ContentLength = responseBytes.Length;
+            await context.Response.Body.WriteAsync(responseBytes, context.RequestAborted);
+            return;
+        }
+
         if (request.RootElement.TryGetProperty("stream", out var stream) && stream.GetBoolean())
         {
             if (Volatile.Read(ref failStreamResponses) == 1)
@@ -186,3 +251,5 @@ internal sealed class SimulatorClock : IClock
 {
     public DateTimeOffset UtcNow => DateTimeOffset.UtcNow;
 }
+
+internal sealed record SimulatorToolCall(string Name, string Arguments);

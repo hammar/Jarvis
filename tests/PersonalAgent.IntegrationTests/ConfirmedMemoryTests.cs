@@ -43,6 +43,37 @@ public sealed class ConfirmedMemoryTests
     }
 
     [Fact]
+    public async Task OwnerWorkflowListsRedactedMemoryApprovalAndCompletesTheExactProposal()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var request = await fixture.RequestAsync(
+            new("create", Subject: "synthetic room", Key: "lamp", Value: "blue"));
+        var pending = await fixture.Dispatcher.DispatchAsync(request, default);
+        var workflow = fixture.ApprovalWorkflow();
+
+        var summaries = await workflow.ReadRecentAsync("owner", 10, default);
+        var summary = Assert.Single(summaries);
+        Assert.Equal("memory.propose_change", summary.ToolName);
+        Assert.Equal("AwaitingApproval", summary.ActionStatus);
+        Assert.DoesNotContain("OwnerId", summary.ArgumentsJson, StringComparison.Ordinal);
+        Assert.DoesNotContain("Explicit synthetic owner request", summary.ArgumentsJson, StringComparison.Ordinal);
+        Assert.Empty(await workflow.ReadRecentAsync("another-owner", 10, default));
+        await Assert.ThrowsAsync<KeyNotFoundException>(async () =>
+            await workflow.ResolveAsync("another-owner", pending.ApprovalId!.Value, 1, true, default));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(async () =>
+            await workflow.ReadRecentAsync("owner", 0, default));
+
+        var result = await workflow.ResolveAsync(
+            "owner", pending.ApprovalId!.Value, summary.Approval.ExpectedVersion, true, default);
+        Assert.Equal("Succeeded", result.Status);
+        Assert.Single(await fixture.Memory.SearchAsync("owner", "synthetic room lamp", 10, default));
+        Assert.Single(await fixture.Memory.ReadActiveAsync("owner", 10, default));
+        Assert.Equal("Succeeded", Assert.Single(await workflow.ReadRecentAsync("owner", 10, default)).ActionStatus);
+        await Assert.ThrowsAsync<PersistenceConcurrencyException>(async () =>
+            await workflow.ResolveAsync("owner", pending.ApprovalId.Value, summary.Approval.ExpectedVersion, true, default));
+    }
+
+    [Fact]
     public async Task ConflictsRequireExplicitResolutionAndRetainedFactsNeedDistinctContext()
     {
         using var fixture = await Fixture.CreateAsync();
@@ -680,6 +711,7 @@ public sealed class ConfirmedMemoryTests
         internal Clock Clock { get; } = new();
         internal SqliteConfirmedMemoryStore Memory { get; private set; } = null!;
         internal SqliteActionJournalStore Journal { get; private set; } = null!;
+        internal SqliteApprovalStore ApprovalStore { get; private set; } = null!;
         internal ApprovalService Approvals { get; private set; } = null!;
         internal ToolDispatcher Dispatcher { get; private set; } = null!;
         internal MemoryProposalService Proposals => new(Memory, Journal, Approvals, Dispatcher);
@@ -691,10 +723,14 @@ public sealed class ConfirmedMemoryTests
             await fixture.Database.InitializeAsync();
             fixture.Memory = new(fixture.Database, fixture.Clock);
             fixture.Journal = new(fixture.Database);
-            fixture.Approvals = new(new SqliteApprovalStore(fixture.Database), fixture.Journal, fixture.Clock);
+            fixture.ApprovalStore = new(fixture.Database);
+            fixture.Approvals = new(fixture.ApprovalStore, fixture.Journal, fixture.Clock);
             fixture.Dispatcher = fixture.RestartedDispatcher();
             return fixture;
         }
+
+        internal ApprovalWorkflowService ApprovalWorkflow() =>
+            new(ApprovalStore, Journal, Approvals, Dispatcher, Memory, Proposals);
 
         internal ToolDispatcher RestartedDispatcher(IActionJournalStore? journal = null) => new(
             new ToolRegistry(MemoryToolRegistrations.Create(Memory)),
@@ -763,6 +799,8 @@ public sealed class ConfirmedMemoryTests
         internal Func<string, Task>? AfterStatus { get; init; }
         public ValueTask<ActionJournalEntry> CreateAsync(ActionJournalEntry entry, CancellationToken token) =>
             inner.CreateAsync(entry, token);
+        public ValueTask<IReadOnlyList<ActionJournalEntry>> ReadRecentForOwnerAsync(string ownerId, int maximumActions, CancellationToken token) =>
+            inner.ReadRecentForOwnerAsync(ownerId, maximumActions, token);
         public async ValueTask<ActionJournalEntry?> GetAsync(ActionId id, CancellationToken token)
         {
             var result = await inner.GetAsync(id, token);

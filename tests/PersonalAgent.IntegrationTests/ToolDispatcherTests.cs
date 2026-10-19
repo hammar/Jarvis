@@ -1,6 +1,7 @@
 using System.Text.Json;
 using PersonalAgent.Application;
 using PersonalAgent.Application.Approvals;
+using PersonalAgent.Application.Memory;
 using PersonalAgent.Application.Tools;
 using PersonalAgent.Domain;
 using PersonalAgent.Infrastructure.Persistence;
@@ -73,6 +74,54 @@ public sealed class ToolDispatcherTests
         var persisted = await fixture.Journal.GetAsync(first.ActionId!.Value, CancellationToken.None);
         Assert.Contains("CurrentRequestHash", persisted!.CanonicalArguments, StringComparison.Ordinal);
         Assert.DoesNotContain("Turn on the porch light", persisted.CanonicalArguments, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task OwnerWorkflowReviewsAndExecutesOnlyTheExactApprovedHomeAction()
+    {
+        using var fixture = await Fixture.CreateAsync(ToolRiskClass.ApprovalRequired);
+        var conversationStore = new SqliteConversationStore(fixture.Database, fixture.Clock);
+        var conversationId = ConversationId.New();
+        await conversationStore.CreateConversationAsync(new(
+            conversationId,
+            "owner",
+            "Approval workflow",
+            fixture.Clock.UtcNow,
+            fixture.Clock.UtcNow), CancellationToken.None);
+        await conversationStore.SubmitTurnAsync(new(
+            PorchRequest.TurnId,
+            conversationId,
+            Guid.NewGuid().ToString(),
+            new string('a', 64),
+            Guid.NewGuid(),
+            PorchRequest.CurrentUserRequest!,
+            fixture.Clock.UtcNow,
+            RequiredOwnerId: "owner"), CancellationToken.None);
+
+        var pending = await fixture.Dispatcher.DispatchAsync(PorchRequest, CancellationToken.None);
+        Assert.Equal("AwaitingApproval", pending.Status);
+        var workflow = fixture.ApprovalWorkflow();
+        var summary = Assert.Single(await workflow.ReadRecentAsync("owner", 10, CancellationToken.None));
+        Assert.Equal("home.set_light", summary.ToolName);
+        Assert.Equal("light.porch", summary.EntityId);
+        Assert.Equal("turn_on", summary.Operation);
+        Assert.DoesNotContain("OwnerId", summary.ArgumentsJson, StringComparison.Ordinal);
+        Assert.DoesNotContain(PorchRequest.CurrentUserRequest!, summary.ArgumentsJson, StringComparison.Ordinal);
+        Assert.Empty(await workflow.ReadRecentAsync("another-owner", 10, CancellationToken.None));
+
+        var result = await workflow.ResolveAsync(
+            "owner", pending.ApprovalId!.Value, summary.Approval.ExpectedVersion, true, CancellationToken.None);
+
+        Assert.True(result.Status == "Succeeded", $"{result.Status}: {result.ReasonCode}");
+        Assert.Equal(1, fixture.ExecutionCount);
+        Assert.Equal(1, fixture.VerificationCount);
+        Assert.Single(await fixture.Journal.ReadRecentForOwnerAsync("owner", 10, CancellationToken.None));
+        Assert.Empty(await fixture.Journal.ReadRecentForOwnerAsync("another-owner", 10, CancellationToken.None));
+        Assert.Equal("Succeeded", Assert.Single(await workflow.ReadRecentAsync("owner", 10, CancellationToken.None)).ActionStatus);
+        await Assert.ThrowsAsync<PersistenceConcurrencyException>(async () =>
+            await workflow.ResolveAsync(
+                "owner", pending.ApprovalId.Value, summary.Approval.ExpectedVersion, true, CancellationToken.None));
     }
 
     [Fact]
@@ -1270,6 +1319,7 @@ public sealed class ToolDispatcherTests
             Func<ToolArguments, ToolActionDraft, ToolExecutionOutcome, CancellationToken, ValueTask<ToolVerificationOutcome>>? verification)
         {
             this.file = file;
+            Database = database;
             Journal = new SqliteActionJournalStore(database);
             ApprovalStore = new SqliteApprovalStore(database);
             Clock = new MutableClock(Start);
@@ -1296,6 +1346,7 @@ public sealed class ToolDispatcherTests
 
         public SqliteActionJournalStore Journal { get; }
         public SqliteApprovalStore ApprovalStore { get; }
+        public SqliteDatabase Database { get; }
         public ApprovalService Approvals { get; }
         public MutableClock Clock { get; }
         public MutablePolicy Policy { get; }
@@ -1338,6 +1389,13 @@ public sealed class ToolDispatcherTests
         public ToolDispatcher CreateRestartedDispatcher(IActionJournalStore? journal = null) =>
             new(registry, Policy, journal ?? Journal, Approvals, Clock, TimeSpan.FromSeconds(1));
 
+        public ApprovalWorkflowService ApprovalWorkflow()
+        {
+            var memories = new SqliteConfirmedMemoryStore(Database, Clock);
+            var proposals = new MemoryProposalService(memories, Journal, Approvals, Dispatcher);
+            return new(ApprovalStore, Journal, Approvals, Dispatcher, memories, proposals);
+        }
+
         public void Dispose() => file.Dispose();
 
         private ValueTask<ToolPreparationResult> Prepare(
@@ -1353,7 +1411,7 @@ public sealed class ToolDispatcherTests
 
             var entityId = arguments.Entity == "porch-lamp" ? "light.porch" : arguments.Entity;
             var operation = arguments.On ? "turn_on" : "turn_off";
-            var canonicalArguments = JsonSerializer.Serialize(new { entityId, on = arguments.On });
+            var canonicalArguments = JsonSerializer.Serialize(new { Entity = entityId, On = arguments.On });
             return ValueTask.FromResult(ToolPreparationResult.Ready(
                 new ToolActionDraft(
                     "home.set_light",
@@ -1412,6 +1470,10 @@ public sealed class ToolDispatcherTests
     {
         public ValueTask<ActionJournalEntry> CreateAsync(ActionJournalEntry entry, CancellationToken cancellationToken) =>
             inner.CreateAsync(entry, cancellationToken);
+
+        public ValueTask<IReadOnlyList<ActionJournalEntry>> ReadRecentForOwnerAsync(
+            string ownerId, int maximumActions, CancellationToken cancellationToken) =>
+            inner.ReadRecentForOwnerAsync(ownerId, maximumActions, cancellationToken);
 
         public async ValueTask<ActionJournalEntry?> GetAsync(ActionId id, CancellationToken cancellationToken)
         {

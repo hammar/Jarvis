@@ -5,6 +5,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Channels;
+using PersonalAgent.Application.Tools;
 using PersonalAgent.Domain;
 
 namespace PersonalAgent.Application.TurnCoordination;
@@ -13,6 +14,7 @@ namespace PersonalAgent.Application.TurnCoordination;
 public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
 {
     private const int RecoveryPageSize = 1000;
+    private const int MaximumToolCallsPerTurn = 8;
     private static readonly TimeSpan ShutdownTimeout = TimeSpan.FromSeconds(15);
     private static readonly TimeSpan TerminalPersistenceTimeout = TimeSpan.FromSeconds(5);
     private readonly IConversationStore conversations;
@@ -20,6 +22,7 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
     private readonly IModelRouter router;
     private readonly IContextBuilder contextBuilder;
     private readonly IAgentEngine engine;
+    private readonly IToolRegistry toolRegistry;
     private readonly IClock clock;
     private readonly LocalTurnCoordinatorOptions options;
     private readonly string hostInstructions;
@@ -44,6 +47,7 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
     /// <param name="router">Application LocalOnly routing policy.</param>
     /// <param name="contextBuilder">Application bounded local context builder.</param>
     /// <param name="engine">Isolated inference engine; its provider must be explicit.</param>
+    /// <param name="toolRegistry">Immutable host-registered tool definitions available to local turns.</param>
     /// <param name="clock">UTC clock used for durable observations.</param>
     /// <param name="options">Validated queue, request ID, and deadline limits.</param>
     /// <param name="hostInstructions">Host-authored instructions; never accepted from model output.</param>
@@ -53,6 +57,7 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
         IModelRouter router,
         IContextBuilder contextBuilder,
         IAgentEngine engine,
+        IToolRegistry toolRegistry,
         IClock clock,
         LocalTurnCoordinatorOptions options,
         string hostInstructions)
@@ -62,6 +67,7 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
         this.router = router ?? throw new ArgumentNullException(nameof(router));
         this.contextBuilder = contextBuilder ?? throw new ArgumentNullException(nameof(contextBuilder));
         this.engine = engine ?? throw new ArgumentNullException(nameof(engine));
+        this.toolRegistry = toolRegistry ?? throw new ArgumentNullException(nameof(toolRegistry));
         this.clock = clock ?? throw new ArgumentNullException(nameof(clock));
         this.options = options ?? throw new ArgumentNullException(nameof(options));
         this.options.Validate();
@@ -605,7 +611,7 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
                     ProviderKind.Local,
                     item.Request.Text,
                     hostInstructions,
-                    Array.Empty<AgentToolDefinition>(),
+                    toolRegistry.Definitions,
                     item.UserMessageId),
                 routingCancellation.Token);
             lock (lifecycleLock)
@@ -636,9 +642,9 @@ public sealed class LocalTurnCoordinator : ILocalTurnCoordinator
                 ProviderKind.Local,
                 hostInstructions,
                 context,
-                Array.Empty<AgentToolDefinition>(),
+                toolRegistry.Definitions,
                 remainingDeadline,
-                MaximumToolCalls: 0,
+                MaximumToolCalls: MaximumToolCallsPerTurn,
                 RouteReasonCode: route.ReasonCode,
                 HostShutdownToken: item.ShutdownCancellation.Token,
                 DeadlineCancellationToken: item.DeadlineCancellation.Token,

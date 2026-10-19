@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
@@ -9,7 +10,10 @@ using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.RateLimiting;
 using System.Threading.RateLimiting;
 using PersonalAgent.Application;
+using PersonalAgent.Application.Approvals;
+using PersonalAgent.Application.Memory;
 using PersonalAgent.Application.TurnCoordination;
+using PersonalAgent.Application.Tools.Home;
 using PersonalAgent.Domain;
 
 namespace PersonalAgent.Web;
@@ -122,6 +126,155 @@ internal static class ChatApi
                 updatedAtUtc = turn.UpdatedAtUtc
             }));
         });
+        api.MapGet("/actions", async (
+            HttpContext context,
+            IActionJournalStore journal,
+            CancellationToken ct) =>
+        {
+            var owner = OwnerHttpSecurity.GetOwnerId(context.User)!;
+            var actions = await journal.ReadRecentForOwnerAsync(owner, 100, ct);
+            return Results.Ok(actions.Select(action => new
+            {
+                actionId = action.Id.Value,
+                actionType = action.ActionType,
+                status = action.Status switch
+                {
+                    "Succeeded" => "Verified",
+                    "Failed" => "Failed",
+                    "Unknown" => "Unknown",
+                    "AwaitingApproval" => "Awaiting approval",
+                    "Rejected" => "Rejected",
+                    "Expired" => "Expired",
+                    _ => action.Status
+                },
+                reasonCode = action.Outcome?.ReasonCode,
+                updatedAtUtc = action.UpdatedAtUtc,
+                memoryInvalidated = action.MemoryInvalidated
+            }));
+        });
+        api.MapGet("/approvals", async (
+            HttpContext context,
+            ApprovalWorkflowService workflow,
+            CancellationToken ct) =>
+        {
+            var owner = OwnerHttpSecurity.GetOwnerId(context.User)!;
+            return Results.Ok(await workflow.ReadRecentAsync(owner, 100, ct));
+        });
+        api.MapPost("/approvals/{id:guid}/decision", async (
+            Guid id,
+            ApprovalDecisionRequest request,
+            HttpContext context,
+            IAntiforgery antiforgery,
+            ApprovalWorkflowService workflow,
+            IAuditStore audit,
+            IClock clock,
+            CancellationToken ct) =>
+        {
+            if (!await OwnerHttpSecurity.ValidateCsrfAsync(antiforgery, context, ct))
+            {
+                return Results.Problem(statusCode: StatusCodes.Status400BadRequest, title: "Invalid request token.");
+            }
+            if (request.ExpectedVersion is null or < 1 || request.Approved is null)
+            {
+                return Results.Problem(statusCode: StatusCodes.Status400BadRequest, title: "An approval version and decision are required.");
+            }
+
+            var owner = OwnerHttpSecurity.GetOwnerId(context.User)!;
+            var approvalId = new ApprovalId(id);
+            await audit.AppendAsync(new(
+                Guid.NewGuid(),
+                "approval.decision_requested",
+                id.ToString("D"),
+                JsonSerializer.Serialize(new { expectedVersion = request.ExpectedVersion, approved = request.Approved }),
+                clock.UtcNow), ct);
+            try
+            {
+                var result = await workflow.ResolveAsync(
+                    owner, approvalId, request.ExpectedVersion.Value, request.Approved.Value, ct);
+                await audit.AppendAsync(new(
+                    Guid.NewGuid(),
+                    "approval.decision_completed",
+                    id.ToString("D"),
+                    JsonSerializer.Serialize(new { status = result.Status, actionId = result.ActionId?.Value }),
+                    clock.UtcNow), ct);
+                return Results.Ok(result);
+            }
+            catch (KeyNotFoundException)
+            {
+                return Results.NotFound();
+            }
+            catch (PersistenceConcurrencyException)
+            {
+                return Results.Conflict(new { title = "The approval changed or is no longer available." });
+            }
+        });
+        api.MapGet("/memory", async (
+            string? query,
+            int? limit,
+            HttpContext context,
+            IConfirmedMemoryStore memories,
+            CancellationToken ct) =>
+        {
+            var maximum = limit ?? 100;
+            if (maximum is < 1 or > 100 || query?.Length > 512)
+            {
+                return Results.Problem(statusCode: StatusCodes.Status400BadRequest, title: "Memory search bounds are invalid.");
+            }
+
+            var owner = OwnerHttpSecurity.GetOwnerId(context.User)!;
+            var facts = string.IsNullOrWhiteSpace(query)
+                ? await memories.ReadActiveAsync(owner, maximum, ct)
+                : await memories.SearchAsync(owner, query, maximum, ct);
+            return Results.Ok(facts);
+        });
+        api.MapGet("/memory/{id:guid}", async (
+            Guid id,
+            HttpContext context,
+            IConfirmedMemoryStore memories,
+            CancellationToken ct) =>
+        {
+            var fact = await memories.GetAsync(
+                OwnerHttpSecurity.GetOwnerId(context.User)!, new MemoryFactId(id), ct);
+            return fact is null ? Results.NotFound() : Results.Ok(fact);
+        });
+        api.MapGet("/household", (HomeUiStatus home) =>
+        {
+            var catalog = home.Catalog;
+            if (catalog is null)
+            {
+                return Results.Ok(new
+                {
+                    configured = false,
+                    connectionStatus = "not-configured",
+                    connectionProbe = "not-run",
+                    entities = Array.Empty<object>()
+                });
+            }
+
+            var entities = catalog.Entities.Select(entity => new
+            {
+                entity.EntityId,
+                entity.FriendlyName,
+                entity.Area,
+                entity.Unit,
+                operations = catalog.Permissions()
+                    .Where(permission => permission.EntityId == entity.EntityId)
+                    .Select(permission => permission.Operation)
+                    .ToArray()
+            }).ToArray();
+            return Results.Ok(new
+            {
+                configured = true,
+                connectionStatus = "configured",
+                connectionProbe = "not-run",
+                entities
+            });
+        });
+        api.MapGet("/audit", async (
+            IAuditStore audit,
+            IClock clock,
+            CancellationToken ct) =>
+            Results.Ok(await audit.ReadSinceAsync(clock.UtcNow.AddDays(-30), 200, ct)));
         api.MapPost("/conversations", async (
             HttpContext context,
             CreateConversationRequest request,
@@ -429,7 +582,10 @@ internal static class ChatApi
     internal sealed record CreateConversationRequest(string? Title);
     internal sealed record RenameConversationRequest(string? Title);
     internal sealed record SubmitTurnRequest(string RequestId, string Text);
+    internal sealed record ApprovalDecisionRequest(long? ExpectedVersion, bool? Approved);
 }
+
+internal sealed record HomeUiStatus(HomeEntityCatalog? Catalog);
 
 internal static class OwnerAuthenticationRegistration
 {

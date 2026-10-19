@@ -1106,6 +1106,16 @@ public interface IActionJournalStore
     /// <returns>The entry, or <see langword="null"/> when absent.</returns>
     ValueTask<ActionJournalEntry?> GetAsync(ActionId id, CancellationToken cancellationToken);
 
+    /// <summary>Reads a bounded page of recent actions bound to one authenticated owner.</summary>
+    /// <param name="ownerId">Authenticated owner identity used to filter canonical action envelopes.</param>
+    /// <param name="maximumActions">Maximum number of entries, from 1 through 100.</param>
+    /// <param name="cancellationToken">Token that cancels the read.</param>
+    /// <returns>Most recently updated owner-bound actions.</returns>
+    ValueTask<IReadOnlyList<ActionJournalEntry>> ReadRecentForOwnerAsync(
+        string ownerId,
+        int maximumActions,
+        CancellationToken cancellationToken);
+
     /// <summary>Compare-and-swaps action status and its optional complete response atomically, without external execution.</summary>
     /// <param name="id">Action identifier.</param>
     /// <param name="status">Next journal status.</param>
@@ -1158,6 +1168,16 @@ public interface IApprovalStore
     /// <param name="cancellationToken">Token that cancels the read.</param>
     /// <returns>The request, or <see langword="null"/> when absent.</returns>
     ValueTask<ApprovalStorageRecord?> GetAsync(ApprovalId id, CancellationToken cancellationToken);
+
+    /// <summary>Reads a bounded page of approval requests for one authenticated owner.</summary>
+    /// <param name="ownerId">Owner identity used to filter the request.</param>
+    /// <param name="maximumRequests">Maximum number of records, from 1 through 100.</param>
+    /// <param name="cancellationToken">Token that cancels the read.</param>
+    /// <returns>Most recently created owner-bound requests.</returns>
+    ValueTask<IReadOnlyList<ApprovalStorageRecord>> ReadRecentForOwnerAsync(
+        string ownerId,
+        int maximumRequests,
+        CancellationToken cancellationToken);
 
     /// <summary>Resolves a still-pending, unexpired request once using owner and version checks.</summary>
     /// <param name="id">Approval identifier.</param>

@@ -74,6 +74,41 @@ public sealed class SqliteApprovalStore : IApprovalStore
     }
 
     /// <inheritdoc />
+    public async ValueTask<IReadOnlyList<ApprovalStorageRecord>> ReadRecentForOwnerAsync(
+        string ownerId, int maximumRequests, CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(ownerId);
+        if (ownerId.Length > 128)
+        {
+            throw new ArgumentException("Owner identifiers cannot exceed 128 characters.", nameof(ownerId));
+        }
+
+        if (maximumRequests is < 1 or > 100)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maximumRequests));
+        }
+
+        await using var connection = await database.OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT id, action_id, owner_id, status, created_at_utc, expires_at_utc, resolved_at_utc, version
+            FROM approval_requests
+            WHERE owner_id = $owner
+            ORDER BY created_at_utc DESC, id
+            LIMIT $limit;
+            """;
+        command.Parameters.AddWithValue("$owner", ownerId);
+        command.Parameters.AddWithValue("$limit", maximumRequests);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        var records = new List<ApprovalStorageRecord>();
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            records.Add(ReadRecord(reader));
+        }
+        return records;
+    }
+
+    /// <inheritdoc />
     public async ValueTask<ApprovalStorageRecord> ResolveAsync(
         ApprovalId id,
         string ownerId,

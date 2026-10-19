@@ -112,6 +112,104 @@ public sealed class AspireSimulatorTests(SimulatorHostFixture fixture)
             JsonDocument.Parse(home).RootElement[0].GetProperty("entityId").GetString());
     }
 
+    [Fact]
+    [Trait("Category", "AspireE2E")]
+    public async Task OwnerUiApisExposeOnlyBoundedMemoryApprovalsAndAllowlistedHouseholdStatus()
+    {
+        using var approvalsResponse = await fixture.WebClient.GetAsync("/api/approvals");
+        using var memoryResponse = await fixture.WebClient.GetAsync("/api/memory?limit=10");
+        using var householdResponse = await fixture.WebClient.GetAsync("/api/household");
+        using var actionsResponse = await fixture.WebClient.GetAsync("/api/actions");
+        using var auditResponse = await fixture.WebClient.GetAsync("/api/audit");
+        using var approvals = JsonDocument.Parse(await approvalsResponse.Content.ReadAsStringAsync());
+        using var memory = JsonDocument.Parse(await memoryResponse.Content.ReadAsStringAsync());
+        using var household = JsonDocument.Parse(await householdResponse.Content.ReadAsStringAsync());
+        using var actions = JsonDocument.Parse(await actionsResponse.Content.ReadAsStringAsync());
+        using var audit = JsonDocument.Parse(await auditResponse.Content.ReadAsStringAsync());
+
+        Assert.Equal(HttpStatusCode.OK, approvalsResponse.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, memoryResponse.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, householdResponse.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, actionsResponse.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, auditResponse.StatusCode);
+        Assert.Empty(approvals.RootElement.EnumerateArray());
+        Assert.Empty(memory.RootElement.EnumerateArray());
+        Assert.Empty(actions.RootElement.EnumerateArray());
+        Assert.True(audit.RootElement.GetArrayLength() <= 200);
+        Assert.True(household.RootElement.GetProperty("configured").GetBoolean());
+        Assert.Equal("not-run", household.RootElement.GetProperty("connectionProbe").GetString());
+        var entities = household.RootElement.GetProperty("entities").EnumerateArray().ToArray();
+        Assert.Contains(entities, entity =>
+            entity.GetProperty("entityId").GetString() == "light.simulator_lamp");
+        Assert.DoesNotContain(entities, entity =>
+            entity.GetProperty("entityId").GetString() == "lock.forbidden");
+
+        using var invalidLimit = await fixture.WebClient.GetAsync("/api/memory?limit=101");
+        Assert.Equal(HttpStatusCode.BadRequest, invalidLimit.StatusCode);
+
+        using var invalidDecision = new HttpRequestMessage(
+            HttpMethod.Post,
+            $"/api/approvals/{Guid.NewGuid():D}/decision")
+        {
+            Content = JsonContent.Create(new { expectedVersion = 1, approved = true })
+        };
+        invalidDecision.Headers.Add("X-CSRF-TOKEN", "invalid-request-token");
+        using var rejectedDecision = await fixture.WebClient.SendAsync(invalidDecision);
+        Assert.Equal(HttpStatusCode.BadRequest, rejectedDecision.StatusCode);
+    }
+
+    [Fact]
+    [Trait("Category", "AspireE2E")]
+    public async Task WebChatDispatchesAllowedSimulatedLightThroughProductionComposition()
+    {
+        var isolated = new SimulatorHostFixture();
+        await isolated.InitializeAsync();
+        try
+        {
+            using var initialCounts = JsonDocument.Parse(
+                await isolated.HomeAssistantClient.GetStringAsync("/fixture/control/counts"));
+            var writesBefore = initialCounts.RootElement.GetProperty("writes").GetInt32();
+
+            using var created = await isolated.WebClient.PostAsJsonAsync("/api/conversations", new { title = "" });
+            Assert.Equal(HttpStatusCode.Created, created.StatusCode);
+            using var createdBody = JsonDocument.Parse(await created.Content.ReadAsStringAsync());
+            var conversationId = createdBody.RootElement.GetProperty("id").GetProperty("value").GetGuid();
+            using var toolCall = await isolated.ModelClient.PostAsJsonAsync(
+                "/fixture/control/next-tool-call",
+                new { name = "home.set_light", arguments = """{"entity":"light.simulator_lamp","on":true}""" });
+            Assert.Equal(HttpStatusCode.NoContent, toolCall.StatusCode);
+            using var submitted = await isolated.WebClient.PostAsJsonAsync(
+                $"/api/conversations/{conversationId:D}/turns",
+                new { requestId = Guid.NewGuid().ToString("D"), text = "Turn on simulator lamp" });
+            Assert.Equal(HttpStatusCode.Accepted, submitted.StatusCode);
+            using var submittedBody = JsonDocument.Parse(await submitted.Content.ReadAsStringAsync());
+            var turnId = submittedBody.RootElement.GetProperty("turnId").GetProperty("value").GetGuid();
+
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+            using var eventsResponse = await isolated.WebClient.GetAsync(
+                $"/api/turns/{turnId:D}/events", HttpCompletionOption.ResponseHeadersRead, timeout.Token);
+            eventsResponse.EnsureSuccessStatusCode();
+            var events = await eventsResponse.Content.ReadAsStringAsync(timeout.Token);
+            Assert.True(events.Contains("event: TurnCompleted", StringComparison.Ordinal), events);
+            Assert.Contains("event: ToolProposed", events, StringComparison.Ordinal);
+            Assert.Contains("event: ToolCompleted", events, StringComparison.Ordinal);
+
+            using var actionsResponse = await isolated.WebClient.GetAsync("/api/actions");
+            actionsResponse.EnsureSuccessStatusCode();
+            using var actions = JsonDocument.Parse(await actionsResponse.Content.ReadAsStringAsync());
+            var action = Assert.Single(actions.RootElement.EnumerateArray());
+            Assert.Equal("Verified", action.GetProperty("status").GetString());
+            Assert.DoesNotContain("synthetic-home-token", action.GetRawText(), StringComparison.Ordinal);
+            using var counts = JsonDocument.Parse(
+                await isolated.HomeAssistantClient.GetStringAsync("/fixture/control/counts"));
+            Assert.Equal(writesBefore + 1, counts.RootElement.GetProperty("writes").GetInt32());
+        }
+        finally
+        {
+            await isolated.DisposeAsync();
+        }
+    }
+
     [Theory]
     [InlineData(65_536, false, HttpStatusCode.Unauthorized)]
     [InlineData(65_537, false, HttpStatusCode.RequestEntityTooLarge)]

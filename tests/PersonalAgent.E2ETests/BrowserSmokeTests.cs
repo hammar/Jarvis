@@ -1,4 +1,5 @@
 using Microsoft.Playwright;
+using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Xunit;
@@ -1940,6 +1941,206 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
         }
 
         await page.Context.Tracing.StopAsync();
+    }
+
+    [Fact]
+    [Trait("Category", "BrowserE2E")]
+    public async Task HouseholdMemoryApprovalAndActivitySurfacesReflowAndKeepKeyboardFocusVisible()
+    {
+        var isolated = new SimulatorHostFixture();
+        await isolated.InitializeAsync();
+        try
+        {
+            using var playwright = await Playwright.CreateAsync();
+            await using var browser = await playwright.Chromium.LaunchAsync(
+                new BrowserTypeLaunchOptions { Headless = true });
+            var page = await browser.NewPageAsync(new BrowserNewPageOptions
+            {
+                ViewportSize = new ViewportSize { Width = 390, Height = 844 }
+            });
+            await page.GotoAsync(isolated.WebClient.BaseAddress!.ToString());
+            await page.GetByLabel("Passphrase").FillAsync(SimulatorHostFixture.OwnerPassphrase);
+            await page.Locator("#auth-submit").ClickAsync();
+            await page.WaitForFunctionAsync("() => !authenticationInFlight && !document.getElementById('chat').hidden");
+            await page.RouteAsync("**/api/status", route => route.FulfillAsync(new RouteFulfillOptions
+            {
+                Status = 503,
+                ContentType = "application/problem+json",
+                Body = """{"title":"Controlled status failure."}"""
+            }));
+            await page.ReloadAsync();
+            await page.GetByRole(AriaRole.Alert)
+                .Filter(new LocatorFilterOptions { HasText = "Controlled status failure." }).WaitForAsync();
+            Assert.True(await page.Locator("#chat").IsVisibleAsync());
+
+            await page.GetByRole(AriaRole.Button, new PageGetByRoleOptions { Name = "Approvals" }).ClickAsync();
+            await page.Locator("#approvals-status").GetByText("0 pending approvals").WaitForAsync();
+            Assert.Contains("No recent approval", await page.Locator("#approval-list").InnerTextAsync(), StringComparison.Ordinal);
+
+            await page.GetByRole(AriaRole.Button, new PageGetByRoleOptions { Name = "Memory" }).ClickAsync();
+            await page.Locator("#memory-status").GetByText("0 active facts").WaitForAsync();
+            Assert.Contains("No active remembered facts", await page.Locator("#memory-list").InnerTextAsync(), StringComparison.Ordinal);
+            Assert.True(await page.GetByLabel("Ask Jarvis to remember, edit, or forget a fact").IsVisibleAsync());
+
+            await page.GetByRole(AriaRole.Button, new PageGetByRoleOptions { Name = "Household" }).ClickAsync();
+            await page.GetByText("connection probe: not-run", new PageGetByTextOptions { Exact = false }).WaitForAsync();
+            Assert.Contains("light.simulator_lamp", await page.Locator("#household-list").InnerTextAsync(), StringComparison.Ordinal);
+            Assert.DoesNotContain("synthetic-home-token", await page.Locator("#household").InnerTextAsync(), StringComparison.Ordinal);
+
+            await page.GetByRole(AriaRole.Button, new PageGetByRoleOptions { Name = "Activity" }).ClickAsync();
+            await page.Locator("#activity-status").GetByText("Recent local action outcomes").WaitForAsync();
+            Assert.True(await page.Locator("#activity").IsVisibleAsync());
+            Assert.True(await page.EvaluateAsync<bool>("document.documentElement.scrollWidth <= window.innerWidth"));
+
+            await page.Locator("#settings-button").FocusAsync();
+            await page.Keyboard.PressAsync("Tab");
+            Assert.Equal("activity-button", await page.EvaluateAsync<string>("document.activeElement.id"));
+            Assert.NotEqual("none", await page.EvaluateAsync<string>(
+                "getComputedStyle(document.activeElement).outlineStyle"));
+
+            var surfaces = new[]
+            {
+                ("#approvals-button", "#approvals-status", "0 pending approvals", "approvals.png"),
+                ("#memory-button", "#memory-status", "0 active facts", "memory.png"),
+                ("#household-button", "#household-status", "connection probe: not-run", "household.png"),
+                ("#activity-button", "#activity-status", "Recent local action outcomes", "activity.png")
+            };
+            var workspaceRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../"));
+            var screenshotDirectory = Path.GetFullPath(Path.Combine(
+                workspaceRoot,
+                Environment.GetEnvironmentVariable("JARVIS_M204_SCREENSHOTS") ?? Path.Combine("artifacts", "m204")));
+            foreach (var width in new[] { 1440, 768, 390, 320 })
+            {
+                await page.SetViewportSizeAsync(width, 844);
+                foreach (var (button, status, expected, screenshotName) in surfaces)
+                {
+                    await page.Locator(button).ClickAsync();
+                    await page.Locator(status).GetByText(expected, new LocatorGetByTextOptions
+                    {
+                        Exact = false
+                    }).WaitForAsync();
+                    if (width == 1440 || (width == 390 && button == "#household-button"))
+                    {
+                        if (width == 390)
+                        {
+                            await page.EvaluateAsync(
+                                "const actions = document.querySelector('.sidebar-actions'); actions.scrollLeft = actions.scrollWidth - actions.clientWidth");
+                            await page.Mouse.MoveAsync(380, 240);
+                        }
+                        Directory.CreateDirectory(screenshotDirectory);
+                        var fileName = width == 390 ? "household-mobile-390.png" : screenshotName;
+                        await page.ScreenshotAsync(new PageScreenshotOptions
+                        {
+                            Path = Path.Combine(screenshotDirectory, fileName),
+                            FullPage = true
+                        });
+                    }
+                    Assert.True(await page.EvaluateAsync<bool>(
+                        "document.documentElement.scrollWidth <= window.innerWidth"),
+                        $"Workspace surface {button} overflows at {width}px.");
+                }
+            }
+
+            var longSubject = new string('s', 180);
+            var longValue = new string('v', 420);
+            var longEntityId = $"sensor.{new string('e', 180)}";
+            var longFriendlyName = new string('n', 180);
+            await page.RouteAsync("**/api/memory**", route => route.FulfillAsync(new RouteFulfillOptions
+            {
+                Status = 200,
+                ContentType = "application/json",
+                Body = $$"""[{"id":{"value":"11111111-1111-1111-1111-111111111111"},"subject":"{{longSubject}}","key":"{{longSubject}}","value":"{{longValue}}","version":1,"sourceType":"Legacy","sourceAvailable":false,"updatedAtUtc":"2025-01-01T00:00:00Z"}]"""
+            }));
+            await page.RouteAsync("**/api/household", route => route.FulfillAsync(new RouteFulfillOptions
+            {
+                Status = 200,
+                ContentType = "application/json",
+                Body = $$"""{"configured":true,"connectionStatus":"configured","connectionProbe":"not-run","entities":[{"entityId":"{{longEntityId}}","friendlyName":"{{longFriendlyName}}","area":null,"unit":"°C","operations":[]}]}"""
+            }));
+            await page.SetViewportSizeAsync(320, 844);
+            await page.Locator("#memory-button").ClickAsync();
+            await page.Locator("#memory-status").GetByText("1 active fact shown").WaitForAsync();
+            Assert.Contains(longValue, await page.Locator("#memory-list").InnerTextAsync(), StringComparison.Ordinal);
+            Assert.True(await page.EvaluateAsync<bool>("document.documentElement.scrollWidth <= window.innerWidth"));
+
+            await page.Locator("#household-button").ClickAsync();
+            await page.Locator("#household-status").GetByText("connection probe: not-run").WaitForAsync();
+            Assert.Contains(longEntityId, await page.Locator("#household-list").InnerTextAsync(), StringComparison.Ordinal);
+            Assert.True(await page.EvaluateAsync<bool>("document.documentElement.scrollWidth <= window.innerWidth"));
+            await page.UnrouteAsync("**/api/status");
+        }
+        finally
+        {
+            await isolated.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "BrowserE2E")]
+    public async Task MemoryProposalRequiresExactOwnerApprovalBeforeItAppearsAsAFact()
+    {
+        var isolated = new SimulatorHostFixture();
+        await isolated.InitializeAsync();
+        try
+        {
+            using var playwright = await Playwright.CreateAsync();
+            await using var browser = await playwright.Chromium.LaunchAsync(
+                new BrowserTypeLaunchOptions { Headless = true });
+            var page = await browser.NewPageAsync();
+            await page.GotoAsync(isolated.WebClient.BaseAddress!.ToString());
+            await page.GetByLabel("Passphrase").FillAsync(SimulatorHostFixture.OwnerPassphrase);
+            await page.Locator("#auth-submit").ClickAsync();
+            await page.WaitForFunctionAsync("() => !authenticationInFlight && !document.getElementById('chat').hidden");
+            await page.Locator("#new-conversation").ClickAsync();
+            await page.WaitForFunctionAsync("() => conversationId !== '' && !conversationCreationInFlight");
+
+            using var scriptedTool = await isolated.ModelClient.PostAsJsonAsync(
+                "/fixture/control/next-tool-call",
+                new
+                {
+                    name = "memory_propose_change",
+                    arguments = """{"Operation":"create","Subject":"synthetic room","Key":"lamp","Value":"blue","ExpectedVersion":0,"Conflicts":[]}"""
+                });
+            Assert.Equal(System.Net.HttpStatusCode.NoContent, scriptedTool.StatusCode);
+            await page.GetByLabel("Message").FillAsync("Remember that the synthetic room lamp is blue.");
+            await page.Locator("#send-turn").ClickAsync();
+            await page.WaitForFunctionAsync("() => activeTurnId === '' && !turnSubmissionInFlight");
+
+            await page.GetByRole(AriaRole.Button, new PageGetByRoleOptions { Name = "Approvals" }).ClickAsync();
+            await page.Locator("#approval-list").GetByText(
+                "Tool: memory.propose_change",
+                new LocatorGetByTextOptions { Exact = false }).WaitForAsync();
+            await page.Locator("#approval-list details summary").ClickAsync();
+            var preview = await page.Locator("#approval-list").InnerTextAsync();
+            Assert.Contains("Pending", preview, StringComparison.Ordinal);
+            Assert.Contains("synthetic room", preview, StringComparison.Ordinal);
+            Assert.DoesNotContain("OwnerId", preview, StringComparison.Ordinal);
+            var decisionResponseTask = page.WaitForResponseAsync(response =>
+                response.Url.Contains("/api/approvals/", StringComparison.Ordinal)
+                && response.Request.Method == "POST");
+            await page.GetByRole(AriaRole.Button, new PageGetByRoleOptions { Name = "Approve exact action" }).ClickAsync();
+            var decisionResponse = await decisionResponseTask;
+            var decisionBody = await decisionResponse.TextAsync();
+            var decisionRequest = decisionResponse.Request.PostData;
+            Assert.True(decisionResponse.Status == 200, $"{decisionBody} Request: {decisionRequest}");
+            await page.WaitForFunctionAsync(
+                """
+                () => {
+                    const status = document.getElementById("approvals-status").textContent;
+                    return !status.includes("Submitting approval") && !status.includes("Loading owner approvals");
+                }
+                """);
+            var decisionStatus = await page.Locator("#approvals-status").InnerTextAsync();
+            Assert.Contains("0 pending approvals", decisionStatus, StringComparison.Ordinal);
+
+            await page.GetByRole(AriaRole.Button, new PageGetByRoleOptions { Name = "Memory" }).ClickAsync();
+            await page.Locator("#memory-list").GetByText("synthetic room · lamp").WaitForAsync();
+            Assert.Contains("blue", await page.Locator("#memory-list").InnerTextAsync(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            await isolated.DisposeAsync();
+        }
     }
 
     [Fact]

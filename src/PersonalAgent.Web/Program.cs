@@ -130,6 +130,7 @@ else if (profile is "Local" or "Hybrid"
 {
     throw new InvalidOperationException("Home Assistant partial configuration requires an explicit base URL.");
 }
+builder.Services.AddSingleton(new HomeUiStatus(homeCatalog));
 builder.Services.AddSingleton(services => new ToolRegistry(
     (homeCatalog is null
         ? Array.Empty<IToolRegistration>()
@@ -147,6 +148,7 @@ builder.Services.AddSingleton<IJobStore, SqliteJobStore>();
 builder.Services.AddSingleton<IActionJournalStore, SqliteActionJournalStore>();
 builder.Services.AddSingleton<IApprovalStore, SqliteApprovalStore>();
 builder.Services.AddSingleton<IApprovalService, ApprovalService>();
+builder.Services.AddSingleton<ApprovalWorkflowService>();
 builder.Services.AddSingleton<IAuditStore, SqliteAuditStore>();
 builder.Services.AddSingleton<SqliteBackupRestoreService>();
 builder.Services.AddSingleton<ISecretResolver, EnvironmentSecretResolver>();
@@ -179,6 +181,7 @@ builder.Services.AddSingleton<ILocalTurnCoordinator, LocalTurnCoordinator>(servi
         services.GetRequiredService<IModelRouter>(),
         services.GetRequiredService<IContextBuilder>(),
         services.GetRequiredService<IAgentEngine>(),
+        services.GetRequiredService<IToolRegistry>(),
         services.GetRequiredService<IClock>(),
         services.GetRequiredService<LocalTurnCoordinatorOptions>(),
         LocalChatPrompt.Instructions));

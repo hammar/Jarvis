@@ -19,6 +19,11 @@ let conversationRenameGeneration = 0;
 let lastRenamedConversation = null;
 let eventSource = null;
 let bootstrapRequired = false;
+const workspaceViews = ["conversation", "settings", "activity", "approvals", "memory", "household"];
+
+function hideWorkspaceViews() {
+    for (const id of workspaceViews) document.getElementById(id).hidden = true;
+}
 
 function showError(message) {
     errorBox.textContent = message;
@@ -202,10 +207,291 @@ async function openConversation(id) {
     document.getElementById("conversation-title-input").value = conversationTitle;
     document.getElementById("rename-form").hidden = true;
     renderMessages(data.messages);
-    document.getElementById("settings").hidden = true;
-    document.getElementById("activity").hidden = true;
+    hideWorkspaceViews();
     document.getElementById("conversation").hidden = false;
 }
+
+async function createConversation() {
+    if (activeTurnId || turnSubmissionInFlight || conversationCreationInFlight) return;
+    clearError();
+    conversationCreationInFlight = true;
+    ++conversationSelectionGeneration;
+    setTurnNavigationLocked(true);
+    document.getElementById("send-turn").disabled = true;
+    try {
+        const created = await api("/api/conversations", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ title: "" })
+        });
+        await openConversation(created.id.value || created.id);
+        await loadConversations();
+    } finally {
+        conversationCreationInFlight = false;
+        const locked = activeTurnId !== "" || turnSubmissionInFlight;
+        setTurnNavigationLocked(locked);
+        document.getElementById("send-turn").disabled = locked || conversationRenameInFlight;
+    }
+}
+
+function beginWorkspaceView(id) {
+    const generation = ++conversationSelectionGeneration;
+    hideWorkspaceViews();
+    document.getElementById(id).hidden = false;
+    clearError();
+    return generation;
+}
+
+function isCurrentView(generation) {
+    return generation === conversationSelectionGeneration;
+}
+
+function createActivityEntry(title, detail, className = "") {
+    const entry = document.createElement("li");
+    if (className) entry.className = className;
+    const heading = document.createElement("strong");
+    heading.textContent = title;
+    entry.append(heading);
+    if (detail) {
+        const description = document.createElement("p");
+        description.textContent = detail;
+        entry.append(description);
+    }
+    return entry;
+}
+
+function setListMessage(list, message) {
+    list.replaceChildren(createActivityEntry(message, ""));
+}
+
+async function openApprovals() {
+    const generation = beginWorkspaceView("approvals");
+    const status = document.getElementById("approvals-status");
+    const list = document.getElementById("approval-list");
+    status.textContent = "Loading owner approvals…";
+    setListMessage(list, "Loading approvals…");
+    try {
+        const approvals = await api("/api/approvals");
+        if (!isCurrentView(generation)) return;
+        list.replaceChildren();
+        const pending = approvals.filter(item =>
+            item.approval.status === "Pending" && item.actionStatus === "AwaitingApproval");
+        if (approvals.length === 0) {
+            setListMessage(list, "No recent approval requests.");
+        } else {
+            for (const item of approvals) {
+                const approval = item.approval;
+                const expiresAt = new Date(approval.expiresAtUtc);
+                const expired = Number.isNaN(expiresAt.getTime()) || expiresAt.getTime() <= Date.now();
+                const isPending = approval.status === "Pending" && item.actionStatus === "AwaitingApproval";
+                const details = [
+                    `Tool: ${item.toolName}`,
+                    `Operation: ${item.operation}`,
+                    item.entityId ? `Entity: ${item.entityId}` : "",
+                    `Action status: ${item.actionStatus}`,
+                    `Approval status: ${approval.status}`,
+                    `Expires: ${Number.isNaN(expiresAt.getTime()) ? approval.expiresAtUtc : expiresAt.toLocaleString()}`
+                ].filter(Boolean).join(" · ");
+                const entry = createActivityEntry(`${item.actionType} · ${item.actionId.value || item.actionId}`, details,
+                    "approval-card");
+                entry.dataset.status = item.actionStatus;
+                const args = document.createElement("details");
+                const summary = document.createElement("summary");
+                summary.textContent = "Review exact action details";
+                const pre = document.createElement("pre");
+                pre.textContent = item.argumentsJson;
+                args.append(summary, pre);
+                entry.append(args);
+
+                if (isPending && !expired && !activeTurnId && !turnSubmissionInFlight) {
+                    const actions = document.createElement("div");
+                    actions.className = "activity-actions";
+                    for (const [label, approved] of [["Approve exact action", true], ["Reject", false]]) {
+                        const button = document.createElement("button");
+                        button.type = "button";
+                        button.className = approved ? "button button-primary" : "button button-secondary";
+                        button.textContent = label;
+                        button.addEventListener("click", async () => {
+                            button.disabled = true;
+                            status.textContent = `${approved ? "Submitting approval" : "Rejecting"}…`;
+                            try {
+                                const result = await api(
+                                    `/api/approvals/${encodeURIComponent(approval.id.value || approval.id)}/decision`,
+                                    {
+                                        method: "POST",
+                                        headers: { "Content-Type": "application/json" },
+                                        body: JSON.stringify({ expectedVersion: approval.expectedVersion, approved })
+                                    });
+                                if (!isCurrentView(generation)) return;
+                                const outcome = result.status || result.Status || "Recorded";
+                                status.textContent = approved
+                                    ? `Approval decision recorded. Durable action outcome: ${outcome}. Check Activity before retrying.`
+                                    : `Rejection recorded. Durable action outcome: ${outcome}.`;
+                                await openApprovals();
+                            } catch (error) {
+                                if (!isCurrentView(generation)) return;
+                                status.textContent = error.status === 409
+                                    ? "This approval changed or expired. The list has been refreshed; review it again."
+                                    : `Decision could not be confirmed: ${error.message}. Check Activity before retrying.`;
+                                if (error.status === 409) await openApprovals();
+                                else button.disabled = false;
+                            }
+                        });
+                        actions.append(button);
+                    }
+                    entry.append(actions);
+                } else if (isPending && expired) {
+                    const expiry = document.createElement("p");
+                    expiry.className = "approval-expiry";
+                    expiry.textContent = "Expired or expiry could not be verified; this request cannot be approved from the UI.";
+                    entry.append(expiry);
+                } else if (isPending) {
+                    const busy = document.createElement("p");
+                    busy.className = "approval-expiry";
+                    busy.textContent = "Finish the active assistant turn before deciding this request.";
+                    entry.append(busy);
+                }
+                list.append(entry);
+            }
+        }
+        status.textContent = `${pending.length} pending approval${pending.length === 1 ? "" : "s"}. Approval is limited to the exact displayed request.`;
+    } catch (error) {
+        if (!isCurrentView(generation)) return;
+        status.textContent = `Approvals could not be loaded: ${error.message}`;
+        setListMessage(list, "Approval data is unavailable. No action was taken.");
+    }
+}
+
+async function openMemory() {
+    const generation = beginWorkspaceView("memory");
+    const status = document.getElementById("memory-status");
+    status.textContent = "Loading active remembered facts…";
+    await loadMemory("", generation);
+}
+
+async function loadMemory(query, generation = conversationSelectionGeneration) {
+    const list = document.getElementById("memory-list");
+    try {
+        const encodedQuery = query ? `?query=${encodeURIComponent(query)}` : "";
+        const facts = await api(`/api/memory${encodedQuery}`);
+        if (!isCurrentView(generation)) return;
+        list.replaceChildren();
+        if (facts.length === 0) {
+            setListMessage(list, query ? "No matching active facts." : "No active remembered facts.");
+        }
+        for (const fact of facts) {
+            const entry = createActivityEntry(`${fact.subject} · ${fact.key}`, "", "memory-card");
+            const value = document.createElement("p");
+            value.className = "fact-value";
+            value.textContent = fact.value;
+            const metadata = document.createElement("p");
+            metadata.className = "memory-metadata";
+            metadata.textContent = [
+                `ID ${fact.id.value || fact.id}`,
+                `Version ${fact.version}`,
+                fact.sourceType === "OwnerMessage" ? "Source: owner message" : "Source: imported/legacy",
+                fact.sourceAvailable ? "Original source available" : "Original source unavailable",
+                `Updated ${new Date(fact.updatedAtUtc).toLocaleString()}`
+            ].join(" · ");
+            entry.append(value, metadata);
+
+            const edit = document.createElement("button");
+            edit.type = "button";
+            edit.className = "button button-secondary";
+            edit.textContent = "Propose an edit";
+            edit.addEventListener("click", () => {
+                document.getElementById("memory-request").value =
+                    `Please propose an update to memory fact ${fact.id.value || fact.id} (version ${fact.version}). ` +
+                    `Keep its subject "${fact.subject}" and key "${fact.key}". I want its value to be: `;
+                document.getElementById("memory-request").focus();
+            });
+            const remove = document.createElement("button");
+            remove.type = "button";
+            remove.className = "button button-secondary";
+            remove.textContent = "Propose forgetting";
+            remove.addEventListener("click", async () => {
+                document.getElementById("memory-request").value =
+                    `Please propose forgetting memory fact ${fact.id.value || fact.id} at version ${fact.version}.`;
+                document.getElementById("memory-request").focus();
+            });
+            const actions = document.createElement("div");
+            actions.className = "activity-actions";
+            actions.append(edit, remove);
+            entry.append(actions);
+            list.append(entry);
+        }
+        document.getElementById("memory-status").textContent =
+            `${facts.length} active fact${facts.length === 1 ? "" : "s"} shown. Changes require an exact owner approval.`;
+    } catch (error) {
+        if (!isCurrentView(generation)) return;
+        document.getElementById("memory-status").textContent = `Memory could not be loaded: ${error.message}`;
+        setListMessage(list, "Memory is unavailable. No facts were changed.");
+    }
+}
+
+async function openHousehold() {
+    const generation = beginWorkspaceView("household");
+    const status = document.getElementById("household-status");
+    const list = document.getElementById("household-list");
+    status.textContent = "Loading allowlisted household resources…";
+    setListMessage(list, "Loading household status…");
+    try {
+        const home = await api("/api/household");
+        if (!isCurrentView(generation)) return;
+        status.textContent = home.configured
+            ? `Home Assistant is configured; connection probe: ${home.connectionProbe}. This does not confirm live connectivity.`
+            : "Home Assistant is not configured; household actions are unavailable.";
+        list.replaceChildren();
+        if (!home.entities.length) setListMessage(list, "No allowlisted entities are available.");
+        for (const entity of home.entities) {
+            const operations = entity.operations.length ? entity.operations.join(", ") : "No operations enabled";
+            list.append(createActivityEntry(
+                `${entity.friendlyName || entity.entityId}`,
+                `${entity.entityId}${entity.area ? ` · ${entity.area}` : ""}${entity.unit ? ` · ${entity.unit}` : ""} · Allowed operations: ${operations}`,
+                "household-card"));
+        }
+    } catch (error) {
+        if (!isCurrentView(generation)) return;
+        status.textContent = `Household status could not be loaded: ${error.message}`;
+        setListMessage(list, "No household action was attempted.");
+    }
+}
+
+document.getElementById("approvals-button").addEventListener("click", openApprovals);
+document.getElementById("memory-button").addEventListener("click", openMemory);
+document.getElementById("household-button").addEventListener("click", openHousehold);
+
+document.getElementById("memory-search-form").addEventListener("submit", async event => {
+    event.preventDefault();
+    const generation = conversationSelectionGeneration;
+    document.getElementById("memory-status").textContent = "Searching active local facts…";
+    await loadMemory(document.getElementById("memory-query").value.trim(), generation);
+});
+
+document.getElementById("memory-request-form").addEventListener("submit", async event => {
+    event.preventDefault();
+    if (activeTurnId || turnSubmissionInFlight || conversationCreationInFlight) {
+        document.getElementById("memory-status").textContent =
+            "Finish or cancel the active assistant turn before starting a memory proposal.";
+        return;
+    }
+    const request = document.getElementById("memory-request").value.trim();
+    if (!request) return;
+    document.getElementById("memory-status").textContent = "Preparing a chat request; no memory is changed yet.";
+    clearError();
+    try {
+        if (!conversationId) await createConversation();
+        if (!conversationId) throw new Error("Create a conversation before proposing a memory change.");
+        hideWorkspaceViews();
+        document.getElementById("conversation").hidden = false;
+        const prompt = document.getElementById("prompt");
+        prompt.value = `Please propose this memory change for my review; do not save it without my approval: ${request}`;
+        document.getElementById("memory-request").value = "";
+        document.getElementById("turn-form").requestSubmit();
+    } catch (error) {
+        document.getElementById("memory-status").textContent = `Could not prepare the memory request: ${error.message}`;
+    }
+});
 
 document.getElementById("rename-conversation").addEventListener("click", () => {
     if (!conversationId || activeTurnId || turnSubmissionInFlight) return;
@@ -306,7 +592,6 @@ async function showChat() {
         activeTurnConversationId = pendingTurnSubmission.conversationId;
         conversationId = activeTurnConversationId;
         document.getElementById("conversation-title").textContent = "Recovering conversation";
-        document.getElementById("conversation").hidden = false;
         setTurnNavigationLocked(true);
         document.getElementById("send-turn").disabled = true;
         document.getElementById("cancel-turn").hidden = false;
@@ -314,9 +599,9 @@ async function showChat() {
     authSection.hidden = true;
     chatSection.hidden = false;
     profile.textContent = "Checking your local assistant session.";
-    document.getElementById("settings").hidden = true;
-    document.getElementById("activity").hidden = true;
+    hideWorkspaceViews();
     if (activeTurnId) {
+        document.getElementById("conversation").hidden = false;
         let reconnect = true;
         try {
             await refreshStatus();
@@ -421,27 +706,10 @@ document.getElementById("auth-form").addEventListener("submit", async event => {
 });
 
 document.getElementById("new-conversation").addEventListener("click", async () => {
-    if (activeTurnId || turnSubmissionInFlight || conversationCreationInFlight) return;
-    clearError();
-    conversationCreationInFlight = true;
-    ++conversationSelectionGeneration;
-    setTurnNavigationLocked(true);
-    document.getElementById("send-turn").disabled = true;
     try {
-        const created = await api("/api/conversations", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ title: "" })
-        });
-        await openConversation(created.id.value || created.id);
-        await loadConversations();
+        await createConversation();
     } catch (error) {
         showError(error.message);
-    } finally {
-        conversationCreationInFlight = false;
-        const locked = activeTurnId !== "" || turnSubmissionInFlight;
-        setTurnNavigationLocked(locked);
-        document.getElementById("send-turn").disabled = locked || conversationRenameInFlight;
     }
 });
 
@@ -635,20 +903,17 @@ document.getElementById("prompt").addEventListener("keydown", event => {
 
 async function openSettings() {
     if (activeTurnId || turnSubmissionInFlight || conversationCreationInFlight) return;
-    const selectionGeneration = ++conversationSelectionGeneration;
-    clearError();
+    const selectionGeneration = beginWorkspaceView("settings");
     try {
         const settings = await api("/api/settings");
-        if (selectionGeneration !== conversationSelectionGeneration ||
-            activeTurnId || turnSubmissionInFlight || conversationCreationInFlight) return;
+        if (!isCurrentView(selectionGeneration)) return;
         document.getElementById("conversation-days").value = settings.conversationDays;
         document.getElementById("audit-days").value = settings.auditDays;
         document.getElementById("settings-status").textContent = "Local profile settings. Provider keys are not displayed.";
-        document.getElementById("settings").hidden = false;
-        document.getElementById("activity").hidden = true;
-        document.getElementById("conversation").hidden = true;
     } catch (error) {
-        if (selectionGeneration === conversationSelectionGeneration) showError(error.message);
+        if (isCurrentView(selectionGeneration)) {
+            document.getElementById("settings-status").textContent = `Settings could not be loaded: ${error.message}`;
+        }
     }
 }
 
@@ -679,25 +944,67 @@ document.getElementById("retention-form").addEventListener("submit", saveRetenti
 
 async function openActivity() {
     if (activeTurnId || turnSubmissionInFlight || conversationCreationInFlight) return;
-    const selectionGeneration = ++conversationSelectionGeneration;
-    clearError();
-    try {
-        const turns = await api("/api/activity");
-        if (selectionGeneration !== conversationSelectionGeneration ||
-            activeTurnId || turnSubmissionInFlight || conversationCreationInFlight) return;
-        const list = document.getElementById("activity-list");
-        list.replaceChildren();
-        for (const item of turns) {
-            const entry = document.createElement("li");
-            entry.textContent = `Local turn ${item.turnId.value || item.turnId} · ${item.status} · updated ${new Date(item.updatedAtUtc).toLocaleString()}`;
-            list.append(entry);
+    const selectionGeneration = beginWorkspaceView("activity");
+    const lists = {
+        actions: document.getElementById("action-list"),
+        audit: document.getElementById("audit-list"),
+        turns: document.getElementById("activity-list")
+    };
+    for (const [key, list] of Object.entries(lists)) setListMessage(list, `Loading ${key}…`);
+    const responses = await Promise.allSettled([
+        api("/api/actions"),
+        api("/api/audit"),
+        api("/api/activity")
+    ]);
+    if (!isCurrentView(selectionGeneration)) return;
+    const renderFailure = (list, result, label) => {
+        if (result.status === "rejected") {
+            setListMessage(list, `${label} could not be loaded: ${result.reason.message}`);
+            return true;
         }
-        document.getElementById("activity").hidden = false;
-        document.getElementById("settings").hidden = true;
-        document.getElementById("conversation").hidden = true;
-    } catch (error) {
-        if (selectionGeneration === conversationSelectionGeneration) showError(error.message);
+        return false;
+    };
+    let failed = false;
+
+    if (!renderFailure(lists.actions, responses[0], "Action outcomes")) {
+        lists.actions.replaceChildren();
+        if (responses[0].value.length === 0) setListMessage(lists.actions, "No recent action outcomes.");
+        for (const item of responses[0].value) {
+            const title = `${item.actionType} · ${item.status}`;
+            const detail = [
+                item.reasonCode ? `Reason: ${item.reasonCode}` : "",
+                `Updated ${new Date(item.updatedAtUtc).toLocaleString()}`,
+                item.memoryInvalidated ? "Sensitive action content invalidated" : ""
+            ].filter(Boolean).join(" · ");
+            lists.actions.append(createActivityEntry(title, detail));
+        }
+    } else failed = true;
+
+    if (!renderFailure(lists.audit, responses[1], "Audit history")) {
+        lists.audit.replaceChildren();
+        const entries = responses[1].value.filter(item =>
+            item.eventType.startsWith("approval.") || item.eventType.startsWith("action."));
+        if (entries.length === 0) setListMessage(lists.audit, "No recent approval or action decisions.");
+        for (const item of entries) {
+            lists.audit.append(createActivityEntry(
+                item.eventType,
+                `${item.subjectId || "Local event"} · ${new Date(item.occurredAtUtc).toLocaleString()}`));
+        }
+    } else failed = true;
+
+    if (!renderFailure(lists.turns, responses[2], "Recent turns")) {
+        lists.turns.replaceChildren();
+        if (responses[2].value.length === 0) setListMessage(lists.turns, "No recent turns.");
+        for (const item of responses[2].value) {
+            lists.turns.append(createActivityEntry(
+                `Local turn ${item.turnId.value || item.turnId} · ${item.status}`,
+                `Updated ${new Date(item.updatedAtUtc).toLocaleString()}`));
+        }
     }
+    failed ||= responses[2].status === "rejected";
+    document.getElementById("activity-status").textContent =
+        failed ? "Some activity sources could not be loaded. Failed entries are identified above." :
+            "Recent local action outcomes, decisions, and turns. Prompt and provider payloads are not shown.";
 }
 
 document.getElementById("activity-button").addEventListener("click", openActivity);

@@ -42,6 +42,15 @@ public interface IConfirmedMemoryStore
 {
     /// <summary>Reads the originating owner message for a trusted turn, or null when unavailable or not owned.</summary>
     ValueTask<ConversationMessage?> ReadSourceAsync(string ownerId, TurnId turnId, CancellationToken cancellationToken);
+    /// <summary>Reads a bounded page of active local facts for the authenticated owner.</summary>
+    /// <param name="ownerId">Authenticated owner identity.</param>
+    /// <param name="maximumFacts">Maximum number of facts, from 1 through 100.</param>
+    /// <param name="cancellationToken">Token that cancels the read.</param>
+    /// <returns>Active local facts in most-recently-updated order.</returns>
+    ValueTask<IReadOnlyList<MemoryFact>> ReadActiveAsync(
+        string ownerId,
+        int maximumFacts,
+        CancellationToken cancellationToken);
     /// <summary>Searches active permitted local facts; query is at most 512 characters and limit 1-100.</summary>
     ValueTask<IReadOnlyList<MemoryFact>> SearchAsync(string ownerId, string query, int limit, CancellationToken cancellationToken);
     /// <summary>Reads one permitted local fact, or null without revealing another owner's existence.</summary>

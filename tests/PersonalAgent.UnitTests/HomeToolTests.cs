@@ -211,6 +211,10 @@ public sealed class HomeToolTests
             return ValueTask.FromResult(entries[entry.Id]);
         }
         public ValueTask<ActionJournalEntry?> GetAsync(ActionId id, CancellationToken token) => ValueTask.FromResult(entries.GetValueOrDefault(id));
+        public ValueTask<IReadOnlyList<ActionJournalEntry>> ReadRecentForOwnerAsync(string ownerId, int maximumActions, CancellationToken token) =>
+            ValueTask.FromResult<IReadOnlyList<ActionJournalEntry>>(entries.Values
+                .Where(entry => entry.CanonicalArguments.Contains(ownerId, StringComparison.Ordinal))
+                .OrderByDescending(entry => entry.UpdatedAtUtc).Take(maximumActions).ToArray());
         public ValueTask<ActionJournalEntry> UpdateStatusAsync(ActionId id, string status, long expectedVersion,
             DateTimeOffset time, CancellationToken token, ToolDispatchResult? outcome = null)
         {
@@ -229,6 +233,10 @@ public sealed class HomeToolTests
             return ValueTask.FromResult(entry);
         }
         public ValueTask<ApprovalStorageRecord?> GetAsync(ApprovalId id, CancellationToken token) => ValueTask.FromResult(entries.GetValueOrDefault(id));
+        public ValueTask<IReadOnlyList<ApprovalStorageRecord>> ReadRecentForOwnerAsync(string ownerId, int maximumRequests, CancellationToken token) =>
+            ValueTask.FromResult<IReadOnlyList<ApprovalStorageRecord>>(entries.Values
+                .Where(entry => entry.OwnerId == ownerId)
+                .OrderByDescending(entry => entry.CreatedAtUtc).Take(maximumRequests).ToArray());
         public ValueTask<ApprovalStorageRecord> ResolveAsync(ApprovalId id, string ownerId, string status, long expectedVersion,
             DateTimeOffset time, CancellationToken token)
         {

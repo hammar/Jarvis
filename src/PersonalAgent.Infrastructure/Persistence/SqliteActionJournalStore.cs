@@ -94,6 +94,44 @@ public sealed class SqliteActionJournalStore : IActionJournalStore
     }
 
     /// <inheritdoc />
+    public async ValueTask<IReadOnlyList<ActionJournalEntry>> ReadRecentForOwnerAsync(
+        string ownerId, int maximumActions, CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(ownerId);
+        if (ownerId.Length > 128)
+        {
+            throw new ArgumentOutOfRangeException(nameof(ownerId));
+        }
+        if (maximumActions is < 1 or > 100)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maximumActions));
+        }
+
+        await using var connection = await database.OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT id, action_type, canonical_arguments, request_hash, status,
+                   created_at_utc, updated_at_utc, version, outcome_json, memory_invalidated, memory_owner_id
+            FROM actions
+            WHERE memory_owner_id = $owner
+               OR json_extract(
+                    CASE WHEN json_valid(canonical_arguments) THEN canonical_arguments ELSE '{}' END,
+                    '$.OwnerId') = $owner
+            ORDER BY updated_at_utc DESC, id
+            LIMIT $limit;
+            """;
+        command.Parameters.AddWithValue("$owner", ownerId);
+        command.Parameters.AddWithValue("$limit", maximumActions);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        var entries = new List<ActionJournalEntry>();
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            entries.Add(ReadEntry(reader));
+        }
+        return entries;
+    }
+
+    /// <inheritdoc />
     public async ValueTask<ActionJournalEntry> UpdateStatusAsync(
         ActionId id,
         string status,

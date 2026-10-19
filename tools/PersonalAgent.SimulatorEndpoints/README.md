@@ -9,6 +9,12 @@ credentials or devices. It accepts only the synthetic token
 `JARVIS_SIMULATOR_CONTROLS_ENABLED=true` enables E2E-only controls:
 `POST /fixture/control/configure` takes `ReadFailures`, `ApplyWrites` and
 `WriteStatus`; `GET /fixture/control/counts` reports request counts.
+The model fixture also accepts a bounded one-shot
+`POST /fixture/control/next-tool-call` with a registered model-facing tool name
+and JSON-object arguments, allowing E2E tests to exercise the real Web/SDK/
+dispatcher composition. The scripted response is consumed by one completion
+request; malformed controls are rejected and the host still enforces its
+registered-tool and authorization policies.
 AppHost enables this only for E2E. Integration tests link the endpoint helper
 for real loopback HTTP tests with controlled callbacks; these callbacks are
 not remotely available in live profiles or model arguments.

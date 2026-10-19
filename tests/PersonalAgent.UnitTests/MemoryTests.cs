@@ -297,6 +297,8 @@ public sealed class MemoryTests
         internal bool HideReceipt { get; set; }
         private MemoryReceipt? receipt;
         public ValueTask<ConversationMessage?> ReadSourceAsync(string ownerId, TurnId turnId, CancellationToken cancellationToken) => ValueTask.FromResult(Source);
+        public ValueTask<IReadOnlyList<MemoryFact>> ReadActiveAsync(string ownerId, int maximumFacts, CancellationToken cancellationToken) =>
+            ValueTask.FromResult<IReadOnlyList<MemoryFact>>(Facts.Take(maximumFacts).ToArray());
         public ValueTask<IReadOnlyList<MemoryFact>> SearchAsync(string ownerId, string query, int limit, CancellationToken cancellationToken) => ValueTask.FromResult(Facts);
         public ValueTask<MemoryFact?> GetAsync(string ownerId, MemoryFactId id, CancellationToken cancellationToken) => ValueTask.FromResult(Facts.SingleOrDefault(fact => fact.Id == id));
         public ValueTask<IReadOnlyList<MemoryFact>> FindConflictsAsync(string ownerId, string subject, string key, CancellationToken cancellationToken) => ValueTask.FromResult(Facts);
@@ -323,6 +325,10 @@ public sealed class MemoryTests
             return ValueTask.FromResult(Entries[entry.Id]);
         }
         public ValueTask<ActionJournalEntry?> GetAsync(ActionId id, CancellationToken cancellationToken) => ValueTask.FromResult(Entries.GetValueOrDefault(id));
+        public ValueTask<IReadOnlyList<ActionJournalEntry>> ReadRecentForOwnerAsync(string ownerId, int maximumActions, CancellationToken cancellationToken) =>
+            ValueTask.FromResult<IReadOnlyList<ActionJournalEntry>>(Entries.Values
+                .Where(entry => entry.MemoryOwnerId == ownerId)
+                .OrderByDescending(entry => entry.UpdatedAtUtc).Take(maximumActions).ToArray());
         public ValueTask<ActionJournalEntry> UpdateStatusAsync(ActionId id, string status, long expectedVersion, DateTimeOffset updatedAtUtc,
             CancellationToken cancellationToken, ToolDispatchResult? outcome = null)
         {

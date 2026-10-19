@@ -111,8 +111,35 @@ Exact-path 95% line / 90% branch gates cover `MemoryPolicy.cs`,
 `MemoryProposalService.cs`, `MemoryToolRegistrations.cs`,
 `SqliteConfirmedMemoryStore.cs` and `SqliteMemoryDependencies.cs`, in addition
 to the existing dispatcher, approval and journal gates. No thresholds are lowered.
-Memory UI and out-of-process feature acceptance remain M2-04 scope; running
-existing Aspire/browser regressions is not evidence of a memory UI.
+### M2-04 household and memory surfaces
+
+`AspireSimulatorTests.OwnerUiApisExposeOnlyBoundedMemoryApprovalsAndAllowlistedHouseholdStatus`
+checks the authenticated API against the controlled Aspire composition: the
+new bounded lists are empty for a clean fixture, Home Assistant reports
+`not-run` rather than claiming connectivity, only allowlisted entities appear,
+memory limits are enforced, and an invalid antiforgery token cannot submit an
+approval decision.
+`AspireSimulatorTests.WebChatDispatchesAllowedSimulatedLightThroughProductionComposition`
+scripts one bounded light command into the test-only model fixture and sends it
+through the real Web chat, Copilot SDK adapter, coordinator, dispatcher, and
+managed Home Assistant process. It checks the SSE tool lifecycle and terminal
+event, verified journal status, and exactly one write to the isolated
+simulator. The response is controlled by an E2E-only fixture endpoint; it does
+not establish live model behavior or physical-device causality.
+`BrowserSmokeTests.HouseholdMemoryApprovalAndActivitySurfacesReflowAndKeepKeyboardFocusVisible`
+signs in through Playwright, forces a controlled `/api/status` failure, then
+verifies the owner surfaces still load and render empty-state/status content
+and the simulator allowlist. It checks keyboard focus visibility and asserts
+no horizontal overflow on Approvals, Memory, Household, and Activity at 1440,
+768, 390, and 320 CSS pixels. It also renders a 180-character fact/entity name
+and 420-character fact value at 320px from a controlled read-API display fixture.
+It captures the four controlled desktop surfaces and the 390-pixel household
+view for the task record (default output `artifacts/m204`, override with
+`JARVIS_M204_SCREENSHOTS`). This is controlled responsive/navigation evidence,
+not a complete M2 acceptance matrix, WCAG conformance claim, or screen-reader
+certification. Live HA, physical effects, and interactive assistive-technology
+observations are not exercised; the status failure is a UI boundary simulation,
+not a live model/provider outage.
 
 `tools/PersonalAgent.Validation` consumes VSTest TRX discovery results and
 Coverlet Cobertura output for line coverage and OpenCover output for individual
@@ -283,6 +310,9 @@ E2E is a separate pass gate, not in-process coverage. See the
 | Windows data directories reject ACL access for other identities | `SqlitePersistenceTests.WindowsDatabaseRejectsDirectoriesGrantingAccessToOtherUsers` |
 | Turn state/version survive restart and nonterminal recovery reads are bounded | `SqlitePersistenceTests.NonterminalTurnStateAndVersionCanBeRecoveredAfterRestart` |
 | Durable request ID retries return the original turn and conflicting reuse fails after reopening SQLite | `SqlitePersistenceTests.TurnSubmissionIsAtomicAndDeduplicatedAcrossStoreReopen` |
+| Owner UI APIs bound memory reads, return only allowlisted household status, and reject missing/invalid consent protection | `AspireSimulatorTests.OwnerUiApisExposeOnlyBoundedMemoryApprovalsAndAllowlistedHouseholdStatus` |
+| A controlled exact-eligible light command traverses the actual Web/SDK/coordinator/dispatcher composition and performs exactly one simulator write | `AspireSimulatorTests.WebChatDispatchesAllowedSimulatedLightThroughProductionComposition` |
+| Approval, memory, household, and activity surfaces render empty/status states without horizontal overflow at desktop/tablet/mobile widths, with visible keyboard focus | `BrowserSmokeTests.HouseholdMemoryApprovalAndActivitySurfacesReflowAndKeepKeyboardFocusVisible` |
 | Turn completion atomically stores one final assistant message and terminal event | `SqlitePersistenceTests.TerminalCompletionPersistsItsFinalAssistantMessageAtomicallyOnce`, `LocalTurnCoordinatorTests.CoordinatorPersistsOneCompletedAnswerAndReturnsDuplicateRequest` |
 | Typed registration and dispatch enforce strict JSON, exact policy, deterministic identities, approvals, pre-send cancellation, and honest unknown outcomes at the Application unit boundary | `ToolAuthorizationPolicyTests.ToolRegistrationAndRegistryRejectInvalidNamesSchemasAndDuplicates`, `ToolAuthorizationPolicyTests.ToolRegistrationEnforcesCallbackAndPreparationContracts`, `ToolAuthorizationPolicyTests.AllowlistRejectsEveryOverlongOrEmptyExactPermissionComponent`, `ToolDispatcherUnitTests.DispatcherValidatesRequestsAndNeverJournalsClarificationOrMalformedArguments`, `ToolDispatcherUnitTests.DispatcherSeparatesCallIdentityAndRejectsChangedContentUnderAnExistingIdentity`, `ToolDispatcherUnitTests.ApprovalTransitionsRejectForeignOrInvalidDecisionsAndPersistExpiry`, `ToolDispatcherUnitTests.DispatchRacesAndCorruptJournalEntriesCannotCauseExecution`, `ToolDispatcherUnitTests.InvalidAdapterStatusesAreJournaledUnknownBeforeSurfacingTheContractError` |
 | Unregistered, malformed, ambiguous, unsupported, and disallowed tool requests never execute | `ToolDispatcherTests.UnknownMalformedAmbiguousAndDisallowedCallsNeverExecute`, `ToolDispatcherTests.UnsupportedRiskAndUnauthenticatedActionsAreDenied` |

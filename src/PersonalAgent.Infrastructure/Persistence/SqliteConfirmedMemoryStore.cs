@@ -37,6 +37,24 @@ public sealed partial class SqliteConfirmedMemoryStore(SqliteDatabase database, 
     }
 
     /// <inheritdoc />
+    public async ValueTask<IReadOnlyList<MemoryFact>> ReadActiveAsync(
+        string ownerId, int maximumFacts, CancellationToken cancellationToken)
+    {
+        MemoryPolicy.ValidateOwner(ownerId);
+        if (maximumFacts is < 1 or > 100)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maximumFacts));
+        }
+
+        await using var connection = await database.OpenConnectionAsync(cancellationToken);
+        return await ReadAsync(connection, null, ownerId, """
+            WHERE f.owner_id = $owner AND f.validity_status = 'Active'
+              AND f.privacy_class IN ('LocalOnly', 'Private')
+            ORDER BY f.updated_at_utc DESC, f.id LIMIT $limit
+            """, cancellationToken, ("$limit", maximumFacts));
+    }
+
+    /// <inheritdoc />
     public async ValueTask<IReadOnlyList<MemoryFact>> SearchAsync(
         string ownerId, string query, int limit, CancellationToken cancellationToken)
     {

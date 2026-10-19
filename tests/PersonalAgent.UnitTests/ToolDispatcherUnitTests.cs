@@ -2785,6 +2785,18 @@ public sealed class ToolDispatcherUnitTests
             return entry;
         }
 
+        public ValueTask<IReadOnlyList<ActionJournalEntry>> ReadRecentForOwnerAsync(
+            string ownerId, int maximumActions, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            lock (gate)
+            {
+                return ValueTask.FromResult<IReadOnlyList<ActionJournalEntry>>(entries.Values
+                    .Where(entry => entry.CanonicalArguments.Contains(ownerId, StringComparison.Ordinal))
+                    .OrderByDescending(entry => entry.UpdatedAtUtc).Take(maximumActions).ToArray());
+            }
+        }
+
         public async ValueTask<ActionJournalEntry> UpdateStatusAsync(
             ActionId id,
             string status,
@@ -2910,6 +2922,18 @@ public sealed class ToolDispatcherUnitTests
             }
 
             return entry;
+        }
+
+        public ValueTask<IReadOnlyList<ApprovalStorageRecord>> ReadRecentForOwnerAsync(
+            string ownerId, int maximumRequests, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            lock (gate)
+            {
+                return ValueTask.FromResult<IReadOnlyList<ApprovalStorageRecord>>(entries.Values
+                    .Where(entry => entry.OwnerId == ownerId)
+                    .OrderByDescending(entry => entry.CreatedAtUtc).Take(maximumRequests).ToArray());
+            }
         }
 
         public async ValueTask<ApprovalStorageRecord> ResolveAsync(

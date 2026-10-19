@@ -137,6 +137,12 @@ endpoint URL. The AppHost does not resolve or print secret values. macOS uses
 native Ollama as an external endpoint; no Apple GPU/container assumption is
 made.
 
+The owner UI offers Approvals, Memory, Household, and Activity alongside
+Chat and Settings. Simulator displays only its controlled Home Assistant
+allowlist and marks the connection probe `not-run`; it does not require or
+forward household credentials. Memory edits/deletions begin as chat proposals
+and remain unchanged until the exact owner-reviewed proposal is approved.
+
 Bare loopback Ollama origins (with no path or `/`) are normalized to the
 OpenAI-compatible `/v1` API base. Explicit API paths, such as `/v1` or a
 custom proxy prefix, are preserved. Controlled integration tests execute the

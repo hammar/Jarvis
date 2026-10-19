@@ -2,8 +2,9 @@
 
 ## Memory deletion and recovery
 
-M2-03 registers local memory use cases/tools, but memory UI, HTTP operations
-and chat tool-catalog wiring arrive in M2-04. A proposal is not a saved fact:
+M2-03 registers local memory use cases/tools; M2-04 provides owner-only
+memory, approval, household, and Activity surfaces and chat proposal entry.
+A proposal is not a saved fact:
 the exact change needs the owner's Approve/Reject decision. Editing it or
 changing its conflicting versions requires new review. Host code can complete
 an already-approved proposal after restart without an active model callback.

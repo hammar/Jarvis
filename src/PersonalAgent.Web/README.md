@@ -69,6 +69,16 @@ profile; normal Simulator, Local, and Hybrid hosts generate a fresh token.
   performs explicit bounded cancellation.
 - `GET /api/settings`, `PUT /api/settings/retention`,
   authenticated `GET /health/ready`, and public `GET /health/live`.
+- Authenticated owner-only `GET /api/actions`, `GET /api/approvals`,
+  `POST /api/approvals/{id}/decision`, `GET /api/memory`,
+  `GET /api/memory/{id}`, `GET /api/household`, and `GET /api/audit`.
+  Approval decisions require the expected approval version and the same
+  antiforgery protection as other cookie-authenticated mutations. Action and
+  approval lists are bounded and owner-filtered; previews omit host identity,
+  source request and secret material. The household view reports the resolved
+  allowlist and explicitly says `connectionProbe: not-run`; configuration is
+  not evidence of current connectivity. Memory edits and deletion are chat
+  proposals, and facts change only after the exact proposal is approved.
 
 Before sending a turn, the browser temporarily stores its text, conversation,
 and request ID in tab-scoped `sessionStorage`. This lets an owner safely retry
@@ -134,7 +144,8 @@ SSE reads persisted events in pages of up to 100, drains terminal backlogs
 before closing, and does not hold a worker while waiting for
 inference.
 
-The root page has Chat, Settings, and Activity surfaces. Its Soft editorial
+The root page has Chat, Approvals, Memory, Household, Settings, and Activity
+surfaces. Its Soft editorial
 presentation uses locally available system sans-serif controls, system-serif
 headings/assistant message prose, warm paper surfaces, charcoal text and a restrained
 terracotta accent. Its dark color-scheme variant uses warm charcoal surfaces
@@ -155,9 +166,11 @@ retain lifecycle/error notices without announcing a partial answer as final.
 Announcements use that turn's stream, not the latest conversation message,
 which could belong to a concurrent request in another tab. Durable history
 still replaces the visible streaming view after completion.
-Browser coverage measures light/dark authentication, chat, settings and activity
-at narrow/desktop widths and 200% CSS zoom, with reduced-motion emulation;
-it does not certify real screen-reader speech or native browser zoom controls.
+Browser coverage measures light/dark authentication, chat, settings and
+activity at narrow/desktop widths and 200% CSS zoom, with reduced-motion
+emulation. The M2-04 smoke test separately exercises approvals, memory and
+household at a narrow viewport. Neither measure certifies real screen-reader
+speech or native browser zoom controls.
 
 The chat composer sends when Enter is pressed and inserts a newline with
 Shift+Enter. Modified Enter chords and IME composition are not intercepted.
