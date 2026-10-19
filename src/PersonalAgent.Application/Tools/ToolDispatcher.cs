@@ -27,6 +27,7 @@ public sealed class ToolDispatcher : IToolDispatcher
     private readonly ConcurrentDictionary<(TurnId Turn, string Proposal), FailureBudget> failureBudgets = new();
     private readonly Dictionary<ActionId, (TurnId Turn, string Proposal)> approvalBudgets = [];
     private readonly Dictionary<TurnId, int> activeDispatchesByTurn = [];
+    private readonly HashSet<TurnId> releasedTurnsWithActiveDispatches = [];
     private readonly object failureBudgetLifecycleGate = new();
 
     /// <summary>Creates the host tool dispatcher.</summary>
@@ -62,6 +63,11 @@ public sealed class ToolDispatcher : IToolDispatcher
     {
         lock (failureBudgetLifecycleGate)
         {
+            if (activeDispatchesByTurn.ContainsKey(turnId))
+            {
+                releasedTurnsWithActiveDispatches.Add(turnId);
+            }
+
             foreach (var pair in failureBudgets.Where(pair => pair.Key.Turn == turnId).ToArray())
             {
                 pair.Value.TurnReleased = true;
@@ -1039,7 +1045,16 @@ public sealed class ToolDispatcher : IToolDispatcher
     private FailureBudget GetFailureBudget(ToolDispatchRequest request, ToolActionDraft draft)
     {
         var proposalKey = GetProposalKey(request, draft);
-        return failureBudgets.GetOrAdd((request.TurnId, proposalKey), _ => new FailureBudget());
+        lock (failureBudgetLifecycleGate)
+        {
+            var budget = failureBudgets.GetOrAdd((request.TurnId, proposalKey), _ => new FailureBudget());
+            if (releasedTurnsWithActiveDispatches.Contains(request.TurnId))
+            {
+                budget.TurnReleased = true;
+            }
+
+            return budget;
+        }
     }
 
     private void BeginDispatch(TurnId turnId)
@@ -1063,6 +1078,7 @@ public sealed class ToolDispatcher : IToolDispatcher
             if (active == 1)
             {
                 activeDispatchesByTurn.Remove(turnId);
+                releasedTurnsWithActiveDispatches.Remove(turnId);
                 foreach (var pair in failureBudgets.Where(pair => pair.Key.Turn == turnId).ToArray())
                 {
                     RemoveReleasedBudgetIfIdle(pair.Key, pair.Value);

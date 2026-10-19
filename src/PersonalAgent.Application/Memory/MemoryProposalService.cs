@@ -192,13 +192,28 @@ public sealed class MemoryProposalService(
         {
             throw new PersistenceConcurrencyException("The original request is no longer available.");
         }
-        return await dispatcher.DispatchAsync(new(turnId,
+        var result = await dispatcher.DispatchAsync(new(turnId,
             envelope.RootElement.GetProperty("CallId").GetString()!, "memory.propose_change",
             JsonSerializer.Serialize(MemoryToolRegistrations.Arguments(command.Change)), ownerId, source?.Content)
         {
             ReplayCurrentRequestHash = source is null
                 ? envelope.RootElement.GetProperty("CurrentRequestHash").GetString() : null
         }, cancellationToken);
+        if (result.Status != "Executing"
+            && await IsSourceTurnTerminalAsync(ownerId, turnId, cancellationToken))
+        {
+            dispatcher.ReleaseTurn(turnId);
+        }
+        return result;
+    }
+
+    internal async ValueTask<bool> IsSourceTurnTerminalAsync(
+        string ownerId,
+        TurnId turnId,
+        CancellationToken cancellationToken)
+    {
+        var turn = await conversations.GetTurnForOwnerAsync(turnId, ownerId, cancellationToken);
+        return turn?.Status is TurnStatus.Completed or TurnStatus.Failed or TurnStatus.Cancelled or TurnStatus.Interrupted;
     }
 
     private async ValueTask<(ActionJournalEntry, ConfirmedMemoryCommand)> ReadAsync(

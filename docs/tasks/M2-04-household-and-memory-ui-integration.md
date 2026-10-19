@@ -571,3 +571,54 @@ and provider availability, physical-effect causality, human observations,
 and assistive-technology certification remain unexercised. No live Home
 Assistant credentials, private household data, cloud inference, or
 physical-device writes were used.
+
+### Independent review follow-up: R44–R48
+
+Independent review of `5ef9f845fa86e6fb45296b885f777f6710dc846c` found five
+additional recovery/lifecycle issues. The R44–R48 fixes and focused
+regressions are in the current follow-up; full validation and a new
+exact-commit review remain pending.
+
+| Reference | Severity | Finding | Follow-up disposition |
+| --- | --- | --- | --- |
+| M2-04-R44 | Medium | A valid but incomplete action envelope could deserialize with a missing `TurnId`; `Guid.Parse` then threw `ArgumentNullException`, bypassing per-action recovery reporting and breaking the owner actions API. | `ReadEnvelope` now validates required envelope fields, GUID and risk enum before recovery. `IncompleteExecutingActionEnvelopeReportsRecoveryIssueWithoutBreakingOwnerList` verifies an attributed malformed row yields `invalid_action_journal` while remaining actions stay readable and no write is retried. |
+| M2-04-R45 | Medium | `ReleaseTurn` could run while a dispatch was still preparing, before its failure budget existed; the late-created budget was not marked released and could remain in memory after the final dispatch lease ended. | Track released turns while active dispatch leases remain and mark any subsequently-created budget released under the same lifecycle lock. `TurnReleaseDuringPreparationCleansBudgetCreatedByActiveDispatch` pauses preparation across turn release and asserts the budget is removed after dispatch completion. |
+| M2-04-R46 | Medium | An expired Pending approval whose action had already been Rejected was sent through approval expiry settlement, which requires `AwaitingApproval`; the concurrency catch then rethrew while the approval remained Pending, making the whole owner list unavailable. | Expiry settlement is now limited to actions still `AwaitingApproval`. `ChangedProposalWhileApprovalIsPendingInvalidatesTheAction` now reads the owner list after the approval expires and verifies the terminal action remains visible without breaking the list. |
+| M2-04-R47 | Medium | Household recovery compared the pre-dispatch immutable `Executing` snapshot after dispatch, so terminal recovery could skip `ReleaseTurn` and retain a restarted dispatcher’s failure budget. | Re-read the durable action after dispatch before releasing the turn. `ApprovalListRecoversInterruptedApprovedHomeActionByObservationOnly` now verifies the terminal recovery leaves no failure budget. |
+| M2-04-R48 | Medium | Resuming an approved household or memory action after restart allocated a new turn budget without releasing it after terminal completion; cleanup must still preserve active dispatches and sibling approval holds. | Release the household turn after terminal dispatch and release memory-completion turns in `MemoryProposalService`; existing dispatch-lease and pending-approval holds remain authoritative. Restart-resume tests cover both action types, and sibling-approval regressions verify equivalent-write uncertainty remains protected. |
+
+Before the final run, the R44–R45 focused integration regressions passed 2/2
+and the R44 malformed-envelope unit cases passed 5/5. The refreshed full
+validation below covers the combined R44–R48 changes and the approval
+coverage additions.
+
+### R44–R48 final validation
+
+The current source was validated on native macOS with .NET SDK `10.0.401`,
+isolated Simulator/SQLite data, and no live Home Assistant credentials,
+private household data, cloud inference, or physical-device writes.
+`origin/main` was fetched; the branch is 12 commits ahead and 0 behind.
+
+| Command | Result |
+| --- | --- |
+| `tools/validate.sh build` | Passed; Release build, formatting/analyzers, zero warnings/errors. |
+| `tools/validate.sh architecture` | Passed; 6/6 discovered tests. |
+| `tools/validate.sh unit` | Passed; 361/361 discovered tests. |
+| `tools/validate.sh integration` | Passed; 478/478 discovered tests. |
+| `tools/validate.sh sdk-contracts` | Passed; actual pinned-runtime probes and 57/57 contract tests. |
+| `tools/validate.sh coverage` | Passed; changed executable lines 96.6% (1068/1106). Application 98.4% lines / 93.5% branches; Infrastructure 94.2% / 82.9%; ServiceDefaults 100% / 100%; Web 97.8% / 78.0%; all unit-only, runtime, and critical-module thresholds met. |
+| `tools/validate.sh aspire-e2e` | Passed; 15/15 out-of-process scenarios. |
+| `tools/validate.sh browser-e2e` | Passed; 36/36 Playwright scenarios. The deliberately failing browser probe was discovered and failed as expected. |
+| `tools/validate.sh docs` | Passed; all internal Markdown links resolve. |
+| `git diff --check` | Passed. |
+
+The coverage gate initially reported 88.6% branch coverage for the exact
+M2-01 approval lifecycle module. Added unit scenarios for already-resolved
+approval records, missing durable actions during resolution/settlement, and
+idempotent terminal settlement; coverage now passes without changing any
+threshold. The complete R44–R48 behavior has not yet received an independent
+exact-commit review, and GitHub checks have not run against the follow-up
+revision. The existing R46–R48 review threads still need replies and
+resolution after the validated change is pushed. Linux CI, live Home
+Assistant/provider availability, physical-effect causality, human
+observations, and assistive-technology certification remain unexercised.

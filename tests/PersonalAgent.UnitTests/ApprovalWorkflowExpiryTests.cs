@@ -1,3 +1,5 @@
+using System.Reflection;
+using System.Text.Json.Nodes;
 using PersonalAgent.Application;
 using PersonalAgent.Application.Approvals;
 using PersonalAgent.Application.Memory;
@@ -263,6 +265,39 @@ public sealed class ApprovalWorkflowExpiryTests
         Assert.Empty(fixture.Dispatcher.ReleasedTurns);
     }
 
+    [Theory]
+    [InlineData("FormatVersion", "2")]
+    [InlineData("TurnId", null)]
+    [InlineData("CallId", "\"\"")]
+    [InlineData("OwnerId", "\"\"")]
+    [InlineData("ToolName", "\"\"")]
+    public async Task UnapprovedExecutingRecoveryReportsIncompleteActionEnvelope(
+        string property,
+        string? replacementJson)
+    {
+        var fixture = new Fixture(actionStatus: "Executing");
+        var envelope = JsonNode.Parse(fixture.Journal.Entry.CanonicalArguments)?.AsObject()
+            ?? throw new InvalidOperationException("The action envelope was not valid JSON.");
+        if (replacementJson is null)
+        {
+            envelope.Remove(property);
+        }
+        else
+        {
+            envelope[property] = JsonNode.Parse(replacementJson);
+        }
+        fixture.Journal.Entry = fixture.Journal.Entry with { CanonicalArguments = envelope.ToJsonString() };
+        fixture.Journal.RecentActions = [fixture.Journal.Entry];
+
+        var issues = await fixture.Workflow.RecoverUnapprovedExecutingActionsAsync("owner", default);
+
+        Assert.Equal([new ActionRecoveryIssue(fixture.Journal.Entry.Id, "invalid_action_journal")], issues);
+        Assert.Equal("Executing", fixture.Journal.Entry.Status);
+        Assert.Empty(fixture.Dispatcher.ReleasedApprovals);
+        Assert.Empty(fixture.Dispatcher.ReleasedTurns);
+        Assert.Equal(0, fixture.Dispatcher.Dispatches);
+    }
+
     [Fact]
     public async Task UnapprovedExecutingRecoveryNeverCompletesMemoryProposals()
     {
@@ -356,7 +391,8 @@ public sealed class ApprovalWorkflowExpiryTests
                 Approvals,
                 Dispatcher,
                 Memories,
-                new MemoryProposalService(null!, null!, null!, null!, null!, Clock),
+                new MemoryProposalService(
+                    null!, null!, null!, null!, TerminalConversationStore.Create(), Clock),
                 Clock);
         }
 
@@ -386,6 +422,29 @@ public sealed class ApprovalWorkflowExpiryTests
             {
                 MemoryOwnerId = tool == "memory.propose_change" ? memoryOwner ?? "owner" : null
             };
+        }
+    }
+
+    public class TerminalConversationStore : DispatchProxy
+    {
+        public static IConversationStore Create() =>
+            Create<IConversationStore, TerminalConversationStore>();
+
+        protected override object? Invoke(MethodInfo? targetMethod, object?[]? args)
+        {
+            if (targetMethod?.Name == nameof(IConversationStore.GetTurnForOwnerAsync))
+            {
+                var turnId = (TurnId)args![0]!;
+                return ValueTask.FromResult<ConversationTurn?>(new(
+                    turnId,
+                    ConversationId.New(),
+                    TurnStatus.Interrupted,
+                    Now,
+                    Now,
+                    1));
+            }
+
+            throw new NotSupportedException($"Unexpected conversation-store call: {targetMethod?.Name}.");
         }
     }
 

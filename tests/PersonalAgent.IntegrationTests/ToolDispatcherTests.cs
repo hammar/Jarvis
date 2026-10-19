@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using PersonalAgent.Application;
 using PersonalAgent.Application.Approvals;
 using PersonalAgent.Application.Memory;
@@ -16,6 +17,14 @@ public sealed class ToolDispatcherTests
     private static readonly ToolDispatchRequest PorchRequest =
         new(new TurnId(Guid.Parse("35D3D0CC-3B47-45C6-84A3-3DCE5E03C34F")), "call-1", "home.set_light",
             """{"Entity":"light.porch","On":true}""", "owner", "Turn on the porch light");
+
+    private static int FailureBudgetCount(ToolDispatcher dispatcher)
+    {
+        var budgets = typeof(ToolDispatcher)
+            .GetField("failureBudgets", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .GetValue(dispatcher)!;
+        return (int)budgets.GetType().GetProperty("Count")!.GetValue(budgets)!;
+    }
 
     [Fact]
     [Trait("Category", "Integration")]
@@ -136,13 +145,16 @@ public sealed class ToolDispatcherTests
             pending.ApprovalId!.Value, "owner", summary.Approval.ExpectedVersion, true, default);
         Assert.Equal("Approved", approval.Status);
         Assert.Equal("AwaitingApproval", (await fixture.Journal.GetAsync(pending.ActionId!.Value, default))!.Status);
+        await fixture.MarkTurnTerminalAsync(PorchRequest.TurnId);
 
-        var restartedWorkflow = fixture.ApprovalWorkflow(fixture.CreateRestartedDispatcher());
+        var restartedDispatcher = fixture.CreateRestartedDispatcher();
+        var restartedWorkflow = fixture.ApprovalWorkflow(restartedDispatcher);
         var approvedSummary = Assert.Single(await restartedWorkflow.ReadRecentAsync("owner", 10, default));
         var resumed = await restartedWorkflow.ResolveAsync(
             "owner", pending.ApprovalId.Value, approvedSummary.Approval.ExpectedVersion, true, default);
 
         Assert.Equal("Succeeded", resumed.Status);
+        Assert.Equal(0, FailureBudgetCount(restartedDispatcher));
         Assert.Equal(1, fixture.ExecutionCount);
         Assert.Equal(1, fixture.VerificationCount);
         Assert.Equal(resumed, await restartedWorkflow.ResolveAsync(
@@ -215,8 +227,6 @@ public sealed class ToolDispatcherTests
             "owner", first.ApprovalId!.Value, firstSummary.Approval.ExpectedVersion, true, default);
         Assert.Equal("Unknown", firstOutcome.Status);
         Assert.Equal(1, fixture.ExecutionCount);
-
-        fixture.Dispatcher.ReleaseTurn(PorchRequest.TurnId);
 
         var siblingSummary = (await workflow.ReadRecentAsync("owner", 10, default))
             .Single(summary => summary.ActionId == sibling.ActionId);
@@ -298,8 +308,6 @@ public sealed class ToolDispatcherTests
         Assert.DoesNotContain(
             (await fixture.Journal.ReadRecentForOwnerAsync("owner", 100, default)),
             entry => entry.Id == first.ActionId);
-
-        fixture.Dispatcher.ReleaseTurn(PorchRequest.TurnId);
 
         var restartedDispatcher = fixture.CreateRestartedDispatcher();
         var restartedWorkflow = fixture.ApprovalWorkflow(restartedDispatcher);
@@ -538,8 +546,14 @@ public sealed class ToolDispatcherTests
     {
         using var fixture = await Fixture.CreateAsync(ToolRiskClass.ApprovalRequired);
         var pending = await fixture.CreatePendingHomeApprovalAsync(PorchRequest);
+        var action = await fixture.Journal.GetAsync(pending.ActionId!.Value, CancellationToken.None)
+            ?? throw new InvalidOperationException("The action was not journaled.");
+        var envelope = JsonNode.Parse(action.CanonicalArguments)?.AsObject()
+            ?? throw new InvalidOperationException("The action envelope was not valid JSON.");
+        envelope["OwnerId"] = storedOwner;
+        envelope["ToolName"] = toolName;
         await fixture.SqlAsync(
-            $"UPDATE actions SET canonical_arguments = '{{\"OwnerId\":\"{storedOwner}\",\"ToolName\":\"{toolName}\"}}' " +
+            $"UPDATE actions SET canonical_arguments = '{envelope.ToJsonString()}' " +
             $"WHERE id = '{pending.ActionId!.Value.Value:D}';");
         var workflow = fixture.ApprovalWorkflow();
 
@@ -1190,7 +1204,9 @@ public sealed class ToolDispatcherTests
             ?? throw new InvalidOperationException("The approved action was not journaled.");
         await fixture.Journal.UpdateStatusAsync(
             executing.Id, "Executing", executing.Version, fixture.Clock.UtcNow, CancellationToken.None);
-        var restartedWorkflow = fixture.ApprovalWorkflow(fixture.CreateRestartedDispatcher());
+        await fixture.MarkTurnTerminalAsync(PorchRequest.TurnId);
+        var restartedDispatcher = fixture.CreateRestartedDispatcher();
+        var restartedWorkflow = fixture.ApprovalWorkflow(restartedDispatcher);
 
         var summary = Assert.Single(await restartedWorkflow.ReadRecentAsync("owner", 10, CancellationToken.None));
 
@@ -1200,6 +1216,7 @@ public sealed class ToolDispatcherTests
         Assert.Equal(0, fixture.ExecutionCount);
         Assert.Equal(1, fixture.VerificationCount);
         Assert.Equal(approval.ExpectedVersion, summary.Approval.ExpectedVersion);
+        Assert.Equal(0, FailureBudgetCount(restartedDispatcher));
     }
 
     [Theory]
@@ -1493,6 +1510,7 @@ public sealed class ToolDispatcherTests
             ?? throw new InvalidOperationException("The action was not journaled.");
         await fixture.Journal.UpdateStatusAsync(
             action.Id, "Executing", action.Version, fixture.Clock.UtcNow, CancellationToken.None);
+        await fixture.MarkTurnTerminalAsync(request.TurnId);
         await fixture.SqlAsync($"DELETE FROM approval_requests WHERE action_id = '{action.Id.Value:D}';");
 
         ToolDispatcher dispatcher;
@@ -1626,6 +1644,29 @@ public sealed class ToolDispatcherTests
 
     [Fact]
     [Trait("Category", "Integration")]
+    public async Task IncompleteExecutingActionEnvelopeReportsRecoveryIssueWithoutBreakingOwnerList()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var completed = await fixture.Dispatcher.DispatchAsync(
+            PorchRequest with { TurnId = TurnId.New(), CallId = "incomplete-orphan" }, CancellationToken.None);
+        var action = await fixture.Journal.GetAsync(completed.ActionId!.Value, CancellationToken.None)
+            ?? throw new InvalidOperationException("The action was not journaled.");
+        await fixture.Journal.UpdateStatusAsync(
+            action.Id, "Executing", action.Version, fixture.Clock.UtcNow, CancellationToken.None);
+        await fixture.SqlAsync(
+            $"UPDATE actions SET canonical_arguments = '{{\"OwnerId\":\"owner\",\"ToolName\":\"home.set_light\"}}' WHERE id = '{action.Id.Value:D}';");
+
+        var issues = await fixture.ApprovalWorkflow()
+            .RecoverUnapprovedExecutingActionsAsync("owner", CancellationToken.None);
+        var recent = await fixture.Journal.ReadRecentForOwnerAsync("owner", 100, CancellationToken.None);
+
+        Assert.Contains(issues, issue => issue.ActionId == action.Id && issue.ReasonCode == "invalid_action_journal");
+        Assert.Contains(recent, entry => entry.Id == action.Id && entry.Status == "Executing");
+        Assert.Equal(1, fixture.ExecutionCount);
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
     public async Task ConcurrentInterruptedActionRecoveryAcceptsTheFirstTerminalOutcome()
     {
         using var fixture = await Fixture.CreateAsync(riskClass: ToolRiskClass.ApprovalRequired);
@@ -1637,6 +1678,7 @@ public sealed class ToolDispatcherTests
             ?? throw new InvalidOperationException("The approved action was not journaled.");
         action = await fixture.Journal.UpdateStatusAsync(
             action.Id, "Executing", action.Version, fixture.Clock.UtcNow, CancellationToken.None);
+        await fixture.MarkTurnTerminalAsync(recoveryRequest.TurnId);
         await fixture.SqlAsync($"DELETE FROM messages WHERE turn_id = '{recoveryRequest.TurnId.Value:D}';");
 
         var actionReadCount = 0;
@@ -1769,6 +1811,31 @@ public sealed class ToolDispatcherTests
 
     [Fact]
     [Trait("Category", "Integration")]
+    public async Task TurnReleaseDuringPreparationCleansBudgetCreatedByActiveDispatch()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var request = PorchRequest with { TurnId = TurnId.New(), CallId = "late-budget" };
+        var prepareStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releasePrepare = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var prepareNormally = fixture.PrepareDefaultAsync;
+        fixture.SetPrepare(async (arguments, dispatchRequest, cancellationToken) =>
+        {
+            prepareStarted.TrySetResult();
+            await releasePrepare.Task.WaitAsync(cancellationToken);
+            return await prepareNormally(arguments, dispatchRequest, cancellationToken);
+        });
+
+        var dispatch = fixture.Dispatcher.DispatchAsync(request, CancellationToken.None).AsTask();
+        await prepareStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        fixture.Dispatcher.ReleaseTurn(request.TurnId);
+        releasePrepare.TrySetResult();
+        Assert.Equal("Succeeded", (await dispatch.WaitAsync(TimeSpan.FromSeconds(5))).Status);
+
+        Assert.Equal(0, FailureBudgetCount(fixture.Dispatcher));
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
     public async Task LowRiskWriteWithoutVerifiedExplicitOwnerIntentRequiresApproval()
     {
         using var fixture = await Fixture.CreateAsync();
@@ -1833,6 +1900,10 @@ public sealed class ToolDispatcherTests
         await Assert.ThrowsAsync<PersistenceConcurrencyException>(async () =>
             await fixture.Approvals.ResolveAsync(approvalId, "owner", 1, true, CancellationToken.None));
         Assert.Equal(0, fixture.ExecutionCount);
+        fixture.Clock.Advance(TimeSpan.FromMinutes(5));
+        var summary = Assert.Single(await fixture.ApprovalWorkflow().ReadRecentAsync("owner", 10, default));
+        Assert.Equal("Pending", summary.Approval.Status);
+        Assert.Equal("Rejected", summary.ActionStatus);
     }
 
     [Fact]
@@ -2344,6 +2415,7 @@ public sealed class ToolDispatcherTests
         private readonly IsolatedDatabaseFile file;
         private Func<ToolArguments, ToolActionDraft, CancellationToken, ValueTask<ToolExecutionOutcome>> execution;
         private Func<ToolArguments, ToolActionDraft, ToolExecutionOutcome, CancellationToken, ValueTask<ToolVerificationOutcome>> verification;
+        private Func<ToolArguments, ToolDispatchRequest, CancellationToken, ValueTask<ToolPreparationResult>> prepare;
         private int executionCount;
         private int verificationCount;
         private ToolRegistry registry = null!;
@@ -2370,11 +2442,12 @@ public sealed class ToolDispatcherTests
             Policy = new MutablePolicy("policy-v1", AllowedPermission);
             this.execution = execution ?? DefaultExecution;
             this.verification = verification ?? DefaultVerification;
+            prepare = Prepare;
             var registration = new ToolRegistration<ToolArguments>(
                 "home.set_light",
                 """{"type":"object","properties":{"Entity":{"type":"string"},"On":{"type":"boolean"}},"required":["Entity","On"],"additionalProperties":false}""",
                 riskClass,
-                Prepare,
+                PrepareAsync,
                 Execute,
                 Verify);
             registry = new ToolRegistry([registration]);
@@ -2423,6 +2496,22 @@ public sealed class ToolDispatcherTests
             Func<ToolArguments, ToolActionDraft, ToolExecutionOutcome, CancellationToken, ValueTask<ToolVerificationOutcome>> handler) =>
             verification = handler;
 
+        public void SetPrepare(
+            Func<ToolArguments, ToolDispatchRequest, CancellationToken, ValueTask<ToolPreparationResult>> handler) =>
+            prepare = handler;
+
+        public ValueTask<ToolPreparationResult> PrepareAsync(
+            ToolArguments arguments,
+            ToolDispatchRequest request,
+            CancellationToken cancellationToken) =>
+            prepare(arguments, request, cancellationToken);
+
+        public ValueTask<ToolPreparationResult> PrepareDefaultAsync(
+            ToolArguments arguments,
+            ToolDispatchRequest request,
+            CancellationToken cancellationToken) =>
+            Prepare(arguments, request, cancellationToken);
+
         public async Task<ToolDispatchResult> CreatePendingHomeApprovalAsync(ToolDispatchRequest request)
         {
             var conversations = new SqliteConversationStore(Database, Clock);
@@ -2439,6 +2528,14 @@ public sealed class ToolDispatcherTests
                 Clock.UtcNow,
                 RequiredOwnerId: "owner"), default);
             return await Dispatcher.DispatchAsync(request, default);
+        }
+
+        public async Task MarkTurnTerminalAsync(TurnId turnId, TurnStatus status = TurnStatus.Interrupted)
+        {
+            var conversations = new SqliteConversationStore(Database, Clock);
+            var turn = await conversations.GetTurnAsync(turnId, default)
+                ?? throw new InvalidOperationException("The source turn was not persisted.");
+            await conversations.UpdateTurnStatusAsync(turnId, status, turn.Version, Clock.UtcNow, default);
         }
 
         public async Task SqlAsync(string sql)

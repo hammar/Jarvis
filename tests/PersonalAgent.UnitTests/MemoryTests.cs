@@ -404,7 +404,7 @@ public sealed class MemoryTests
         internal string LastCall { get; private set; } = "";
         internal ToolDispatcher Dispatcher { get; }
         internal MemoryProposalService Proposals =>
-            new(Memory, Journal, Approvals, Dispatcher, null!, Clock);
+            new(Memory, Journal, Approvals, Dispatcher, new ProposalConversations(), Clock);
         internal Fixture(ProviderKind provider = ProviderKind.Local)
         {
             Memory.Source = Source;
@@ -603,7 +603,11 @@ public sealed class MemoryTests
             TurnId turnId, ConversationId conversationId, TurnStatus status, DateTimeOffset createdAtUtc,
             CancellationToken cancellationToken) => throw new NotImplementedException();
         public ValueTask<ConversationTurn?> GetTurnForOwnerAsync(
-            TurnId turnId, string ownerId, CancellationToken cancellationToken) => throw new NotImplementedException();
+            TurnId turnId, string ownerId, CancellationToken cancellationToken) =>
+            ValueTask.FromResult<ConversationTurn?>(
+                ownerId != Conversation.OwnerId ? null
+                : Turn?.Id == turnId ? Turn
+                : new(turnId, Conversation.Id, TurnStatus.Interrupted, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, 1));
         public ValueTask<IReadOnlyList<ConversationTurn>> ReadRecentTurnsForOwnerAsync(
             string ownerId, int maximumTurns, CancellationToken cancellationToken) => throw new NotImplementedException();
         public ValueTask<IReadOnlyList<ConversationTurn>> ReadNonterminalTurnsAsync(

@@ -2201,6 +2201,16 @@ public sealed class ToolDispatcherUnitTests
             Version = secondApproval.Version + 1
         });
         stillPending.Journal.ThrowWithoutTerminalSettlement = true;
+        stillPending.ApprovalStore.AfterRead = async (_, token) =>
+        {
+            token.ThrowIfCancellationRequested();
+            await Task.Yield();
+        };
+        stillPending.Journal.AfterRead = async (_, token) =>
+        {
+            token.ThrowIfCancellationRequested();
+            await Task.Yield();
+        };
         await Assert.ThrowsAsync<PersistenceConcurrencyException>(async () =>
             await stillPending.Approvals.SettleExpiredAsync(
                 secondApprovalId, "owner", secondApproval.Version + 1, CancellationToken.None));
@@ -2244,6 +2254,127 @@ public sealed class ToolDispatcherUnitTests
         var action = await completed.Dispatcher.DispatchAsync(Request, CancellationToken.None);
         await Assert.ThrowsAsync<InvalidOperationException>(async () =>
             await completed.Approvals.CreateAsync(action.ActionId!.Value, "owner", CancellationToken.None));
+    }
+
+    [Fact]
+    [Trait("Category", "Unit")]
+    public async Task ApprovalServiceRejectsAChangedActionAndMismatchedExistingBinding()
+    {
+        using var changedAction = new Fixture(ToolRiskClass.ApprovalRequired);
+        var pending = await changedAction.Dispatcher.DispatchAsync(Request, CancellationToken.None);
+        var action = await changedAction.Journal.GetAsync(pending.ActionId!.Value, CancellationToken.None)
+            ?? throw new InvalidOperationException("The approval action was not journaled.");
+        await changedAction.Journal.UpdateStatusAsync(
+            action.Id, "Rejected", action.Version, changedAction.Clock.UtcNow, CancellationToken.None);
+        var currentApproval = await changedAction.Approvals.GetAsync(pending.ApprovalId!.Value, CancellationToken.None);
+        Assert.Equal("Pending", currentApproval!.Status);
+        Assert.Equal(1, currentApproval.ExpectedVersion);
+        Assert.Equal("Rejected", (await changedAction.Journal.GetAsync(action.Id, CancellationToken.None))!.Status);
+        changedAction.Journal.AfterRead = async (_, token) =>
+        {
+            token.ThrowIfCancellationRequested();
+            await Task.Yield();
+        };
+        changedAction.ApprovalStore.AfterRead = async (_, token) =>
+        {
+            token.ThrowIfCancellationRequested();
+            await Task.Yield();
+        };
+
+        var actionConflict = await Assert.ThrowsAsync<PersistenceConcurrencyException>(async () =>
+            await changedAction.Approvals.ResolveAsync(
+                pending.ApprovalId!.Value, "owner", 1, approved: true, CancellationToken.None));
+        Assert.Equal("The action is no longer awaiting approval.", actionConflict.Message);
+
+        using var mismatchedBinding = new Fixture(ToolRiskClass.ApprovalRequired);
+        pending = await mismatchedBinding.Dispatcher.DispatchAsync(Request, CancellationToken.None);
+        var approval = Assert.Single(mismatchedBinding.ApprovalStore.Entries);
+        mismatchedBinding.ApprovalStore.Replace(approval with { ActionId = new ActionId(Guid.NewGuid()) });
+
+        await Assert.ThrowsAsync<PersistenceConcurrencyException>(async () =>
+            await mismatchedBinding.Approvals.CreateAsync(
+                pending.ActionId!.Value, "owner", CancellationToken.None));
+    }
+
+    [Fact]
+    [Trait("Category", "Unit")]
+    public async Task ApprovalServiceRejectsResolvedRecordsAndMissingActions()
+    {
+        using var resolvedApproval = new Fixture(ToolRiskClass.ApprovalRequired);
+        var pending = await resolvedApproval.Dispatcher.DispatchAsync(Request, CancellationToken.None);
+        var approval = Assert.Single(resolvedApproval.ApprovalStore.Entries);
+        resolvedApproval.ApprovalStore.Replace(approval with { Status = "Approved" });
+
+        await Assert.ThrowsAsync<PersistenceConcurrencyException>(async () =>
+            await resolvedApproval.Approvals.ResolveAsync(
+                pending.ApprovalId!.Value, "owner", approval.Version, approved: true, CancellationToken.None));
+
+        using var missingResolveAction = new Fixture(ToolRiskClass.ApprovalRequired);
+        pending = await missingResolveAction.Dispatcher.DispatchAsync(Request, CancellationToken.None);
+        missingResolveAction.Journal.Remove(pending.ActionId!.Value);
+
+        await Assert.ThrowsAsync<PersistenceConcurrencyException>(async () =>
+            await missingResolveAction.Approvals.ResolveAsync(
+                pending.ApprovalId!.Value, "owner", 1, approved: true, CancellationToken.None));
+
+        using var missingSettledAction = new Fixture(ToolRiskClass.ApprovalRequired);
+        pending = await missingSettledAction.Dispatcher.DispatchAsync(Request, CancellationToken.None);
+        approval = Assert.Single(missingSettledAction.ApprovalStore.Entries);
+        missingSettledAction.ApprovalStore.Replace(approval with
+        {
+            Status = "Expired",
+            ResolvedAtUtc = missingSettledAction.Clock.UtcNow,
+            Version = approval.Version + 1
+        });
+        missingSettledAction.Journal.Remove(pending.ActionId!.Value);
+
+        await Assert.ThrowsAsync<PersistenceConcurrencyException>(async () =>
+            await missingSettledAction.Approvals.SettleExpiredAsync(
+                pending.ApprovalId!.Value, "owner", approval.Version + 1, CancellationToken.None));
+    }
+
+    [Fact]
+    [Trait("Category", "Unit")]
+    public async Task ApprovalServiceExpirySettlementHandlesMatchingAndUnsettledConcurrency()
+    {
+        using var matching = new Fixture(ToolRiskClass.ApprovalRequired);
+        var pending = await matching.Dispatcher.DispatchAsync(Request, CancellationToken.None);
+        matching.Clock.Advance(TimeSpan.FromMinutes(5));
+        matching.Journal.SettleThenConflictStatus = "Expired";
+
+        var expired = await matching.Approvals.ResolveAsync(
+            pending.ApprovalId!.Value, "owner", 1, approved: true, CancellationToken.None);
+
+        Assert.Equal("Expired", expired.Status);
+        Assert.Equal("Expired", (await matching.Journal.GetAsync(pending.ActionId!.Value, CancellationToken.None))!.Status);
+
+        using var unsettled = new Fixture(ToolRiskClass.ApprovalRequired);
+        pending = await unsettled.Dispatcher.DispatchAsync(Request, CancellationToken.None);
+        unsettled.Clock.Advance(TimeSpan.FromMinutes(5));
+        unsettled.Journal.ThrowWithoutTerminalSettlement = true;
+
+        await Assert.ThrowsAsync<PersistenceConcurrencyException>(async () =>
+            await unsettled.Approvals.ResolveAsync(
+                pending.ApprovalId!.Value, "owner", 1, approved: true, CancellationToken.None));
+        Assert.Equal("AwaitingApproval", (await unsettled.Journal.GetAsync(pending.ActionId!.Value, CancellationToken.None))!.Status);
+    }
+
+    [Fact]
+    [Trait("Category", "Unit")]
+    public async Task ApprovalServiceRejectedSettlementIsIdempotentForTerminalActions()
+    {
+        using var fixture = new Fixture(ToolRiskClass.ApprovalRequired);
+        var pending = await fixture.Dispatcher.DispatchAsync(Request, CancellationToken.None);
+
+        var rejected = await fixture.Approvals.ResolveAsync(
+            pending.ApprovalId!.Value, "owner", 1, approved: false, CancellationToken.None);
+        var settled = await fixture.Approvals.SettleRejectedAsync(
+            pending.ApprovalId.Value, "owner", rejected.ExpectedVersion, CancellationToken.None);
+
+        Assert.Equal("Rejected", settled.Status);
+        Assert.Equal("approval_rejected", settled.Outcome?.ReasonCode);
+        Assert.Equal(settled, await fixture.Approvals.SettleRejectedAsync(
+            pending.ApprovalId.Value, "owner", rejected.ExpectedVersion, CancellationToken.None));
     }
 
     [Fact]
@@ -2870,6 +3001,14 @@ public sealed class ToolDispatcherUnitTests
                     CanonicalArguments = canonicalEnvelope,
                     RequestHash = preserveHash ? entries[id].RequestHash : "changed-hash"
                 };
+            }
+        }
+
+        public void Remove(ActionId id)
+        {
+            lock (gate)
+            {
+                entries.Remove(id);
             }
         }
 

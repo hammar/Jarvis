@@ -85,6 +85,7 @@ public sealed class ApprovalWorkflowService
             var approval = new ApprovalRequest(
                 record.Id, record.ActionId, record.OwnerId, record.ExpiresAtUtc, record.Version, record.Status);
             if (approval.Status == "Pending"
+                && action.Status == "AwaitingApproval"
                 && !action.MemoryInvalidated
                 && clock.UtcNow.ToUniversalTime() >= approval.ExpiresAtUtc)
             {
@@ -144,7 +145,7 @@ public sealed class ApprovalWorkflowService
             }
 
             var envelope = ReadEnvelope(action);
-            if (!string.Equals(envelope.OwnerId, ownerId, StringComparison.Ordinal)
+            if (!string.Equals(envelope.OwnerId, ownerId)
                 || envelope.ToolName is not ("home.set_light" or "home.set_temperature" or "memory.propose_change"))
             {
                 throw new InvalidDataException("An approval is not bound to an approved owner tool.");
@@ -228,7 +229,7 @@ public sealed class ApprovalWorkflowService
         CancellationToken cancellationToken)
     {
         var envelope = ReadEnvelope(action);
-        if (!string.Equals(envelope.OwnerId, ownerId)
+        if (!string.Equals(envelope.OwnerId, ownerId, StringComparison.Ordinal)
             || envelope.ToolName is not ("home.set_light" or "home.set_temperature" or "memory.propose_change"))
         {
             throw new InvalidDataException("An executing approval is not bound to a recoverable owner action.");
@@ -240,8 +241,7 @@ public sealed class ApprovalWorkflowService
         {
             if (envelope.ToolName == "memory.propose_change")
             {
-                var result = await memoryProposals.CompleteAsync(ownerId, action.Id, cancellationToken);
-                releaseTurn = result.Status != "Executing";
+                await memoryProposals.CompleteAsync(ownerId, action.Id, cancellationToken);
             }
             else
             {
@@ -256,7 +256,7 @@ public sealed class ApprovalWorkflowService
                         cancellationToken,
                         new("Unknown", null, "interrupted_execution_source_unavailable", action.Id,
                             new ApprovalId(action.Id.Value)));
-                    releaseTurn = true;
+                    releaseTurn = await memoryProposals.IsSourceTurnTerminalAsync(ownerId, turnId, cancellationToken);
                 }
                 else
                 {
@@ -275,8 +275,12 @@ public sealed class ApprovalWorkflowService
                     {
                         action = await dispatcher.MarkUnavailableExecutingActionUnknownAsync(action, cancellationToken);
                     }
-                    releaseTurn = action.Status != "Executing";
                 }
+
+                action = await journal.GetAsync(action.Id, cancellationToken)
+                    ?? throw new InvalidDataException("The recovered action disappeared.");
+                releaseTurn = action.Status != "Executing"
+                    && await memoryProposals.IsSourceTurnTerminalAsync(ownerId, turnId, cancellationToken);
             }
         }
         catch (PersistenceConcurrencyException)
@@ -288,7 +292,7 @@ public sealed class ApprovalWorkflowService
                 throw;
             }
 
-            releaseTurn = true;
+            releaseTurn = await memoryProposals.IsSourceTurnTerminalAsync(ownerId, turnId, cancellationToken);
         }
         finally
         {
@@ -430,7 +434,13 @@ public sealed class ApprovalWorkflowService
         {
             ReplayCurrentRequestHash = envelope.CurrentRequestHash
         };
-        return await dispatcher.DispatchAsync(request, cancellationToken);
+        var result = await dispatcher.DispatchAsync(request, cancellationToken);
+        if (result.Status != "Executing"
+            && await memoryProposals.IsSourceTurnTerminalAsync(ownerId, turnId, cancellationToken))
+        {
+            dispatcher.ReleaseTurn(turnId);
+        }
+        return result;
     }
 
     /// <summary>Settles an already-approved Home Assistant action that expired before execution was claimed.</summary>
@@ -517,8 +527,25 @@ public sealed class ApprovalWorkflowService
     {
         try
         {
-            return JsonSerializer.Deserialize<CanonicalActionEnvelope>(action.CanonicalArguments)
+            var envelope = JsonSerializer.Deserialize<CanonicalActionEnvelope>(action.CanonicalArguments)
                 ?? throw new InvalidDataException("The action envelope is missing.");
+            if (envelope.FormatVersion != 1
+                || !Guid.TryParse(envelope.TurnId, out var turnId)
+                || turnId == Guid.Empty
+                || string.IsNullOrWhiteSpace(envelope.CallId)
+                || string.IsNullOrWhiteSpace(envelope.OwnerId)
+                || string.IsNullOrWhiteSpace(envelope.ToolName)
+                || string.IsNullOrWhiteSpace(envelope.ActionType)
+                || string.IsNullOrWhiteSpace(envelope.Operation)
+                || string.IsNullOrWhiteSpace(envelope.PolicyVersion)
+                || !Enum.IsDefined(envelope.RiskClass)
+                || string.IsNullOrWhiteSpace(envelope.CurrentRequestHash)
+                || string.IsNullOrWhiteSpace(envelope.CanonicalArguments))
+            {
+                throw new InvalidDataException("The action envelope is incomplete or invalid.");
+            }
+
+            return envelope;
         }
         catch (JsonException error)
         {

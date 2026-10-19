@@ -17,6 +17,14 @@ namespace PersonalAgent.IntegrationTests;
 [Trait("Category", "Integration")]
 public sealed class ConfirmedMemoryTests
 {
+    private static int FailureBudgetCount(ToolDispatcher dispatcher)
+    {
+        var budgets = typeof(ToolDispatcher)
+            .GetField("failureBudgets", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .GetValue(dispatcher)!;
+        return (int)budgets.GetType().GetProperty("Count")!.GetValue(budgets)!;
+    }
+
     [Fact]
     [Trait("Category", "Integration")]
     public async Task ApprovalWorkflowValidatesDependenciesOwnerAndPageBounds()
@@ -124,11 +132,15 @@ public sealed class ConfirmedMemoryTests
             default);
         Assert.Equal("Approved", approved.Status);
         Assert.Equal("AwaitingApproval", (await fixture.Journal.GetAsync(pending.ActionId!.Value, default))!.Status);
+        await fixture.MarkTurnTerminalAsync(request.TurnId);
 
-        var resumed = await workflow.ResolveAsync(
+        var restartedDispatcher = fixture.RestartedDispatcher();
+        var restartedWorkflow = fixture.ApprovalWorkflow(restartedDispatcher);
+        var resumed = await restartedWorkflow.ResolveAsync(
             "owner", pending.ApprovalId.Value, approved.ExpectedVersion, true, default);
 
         Assert.Equal("Succeeded", resumed.Status);
+        Assert.Equal(0, FailureBudgetCount(restartedDispatcher));
         Assert.Single(await fixture.Memory.SearchAsync("owner", "synthetic room lamp warm", 10, default));
         Assert.Equal("Succeeded", (await fixture.Journal.GetAsync(pending.ActionId!.Value, default))!.Status);
     }
@@ -1114,8 +1126,13 @@ public sealed class ConfirmedMemoryTests
             return fixture;
         }
 
-        internal ApprovalWorkflowService ApprovalWorkflow() =>
-            new(ApprovalStore, Journal, Approvals, Dispatcher, Memory, Proposals, Clock);
+        internal ApprovalWorkflowService ApprovalWorkflow(ToolDispatcher? dispatcher = null)
+        {
+            dispatcher ??= Dispatcher;
+            var proposals = new MemoryProposalService(
+                Memory, Journal, Approvals, dispatcher, new SqliteConversationStore(Database, Clock), Clock);
+            return new(ApprovalStore, Journal, Approvals, dispatcher, Memory, proposals, Clock);
+        }
 
         internal ToolDispatcher RestartedDispatcher(IActionJournalStore? journal = null) => new(
             new ToolRegistry(MemoryToolRegistrations.Create(Memory)),
@@ -1129,6 +1146,8 @@ public sealed class ConfirmedMemoryTests
         {
             var conversations = new SqliteConversationStore(Database, Clock);
             var conversation = ConversationId.New();
+            await conversations.CreateConversationAsync(new(
+                conversation, "owner", "Memory proposal test", Clock.UtcNow, Clock.UtcNow), default);
             var turn = TurnId.New();
             var text = "Explicit synthetic owner request";
             await conversations.SubmitTurnAsync(new(turn, conversation, Guid.NewGuid().ToString(),
@@ -1162,6 +1181,14 @@ public sealed class ConfirmedMemoryTests
             await new SqliteConversationStore(Database, Clock).CreateConversationAsync(
                 new(id, "owner", "Memory proposal test", now, now), default);
             return id;
+        }
+
+        internal async Task MarkTurnTerminalAsync(TurnId turnId, TurnStatus status = TurnStatus.Interrupted)
+        {
+            var conversations = new SqliteConversationStore(Database, Clock);
+            var turn = await conversations.GetTurnAsync(turnId, default)
+                ?? throw new InvalidOperationException("The source turn was not persisted.");
+            await conversations.UpdateTurnStatusAsync(turnId, status, turn.Version, Clock.UtcNow, default);
         }
 
         internal async Task SqlAsync(string sql)
