@@ -126,6 +126,233 @@ public sealed class ToolDispatcherTests
 
     [Fact]
     [Trait("Category", "Integration")]
+    public async Task UnknownApprovedWriteRemainsProtectedAcrossTurnReleaseWhileSiblingApprovalIsPending()
+    {
+        using var fixture = await Fixture.CreateAsync(
+            ToolRiskClass.ApprovalRequired,
+            execution: (_, _, _) => ValueTask.FromResult(
+                new ToolExecutionOutcome(ToolExecutionStatus.Unknown, null, "transport_timeout")),
+            verification: (_, _, _, _) => ValueTask.FromResult(
+                new ToolVerificationOutcome(ToolVerificationStatus.Unknown, "unconfirmed")));
+        var conversations = new SqliteConversationStore(fixture.Database, fixture.Clock);
+        var conversationId = ConversationId.New();
+        await conversations.CreateConversationAsync(new(
+            conversationId, "owner", "Approval workflow", fixture.Clock.UtcNow, fixture.Clock.UtcNow), default);
+        await conversations.SubmitTurnAsync(new(
+            PorchRequest.TurnId,
+            conversationId,
+            Guid.NewGuid().ToString(),
+            new string('a', 64),
+            Guid.NewGuid(),
+            PorchRequest.CurrentUserRequest!,
+            fixture.Clock.UtcNow,
+            RequiredOwnerId: "owner"), default);
+
+        var first = await fixture.Dispatcher.DispatchAsync(PorchRequest, default);
+        var siblingRequest = PorchRequest with { CallId = "call-2" };
+        var sibling = await fixture.Dispatcher.DispatchAsync(siblingRequest, default);
+        Assert.Equal("AwaitingApproval", first.Status);
+        Assert.Equal("AwaitingApproval", sibling.Status);
+
+        var workflow = fixture.ApprovalWorkflow();
+        var firstSummary = (await workflow.ReadRecentAsync("owner", 10, default))
+            .Single(summary => summary.ActionId == first.ActionId);
+        var firstOutcome = await workflow.ResolveAsync(
+            "owner", first.ApprovalId!.Value, firstSummary.Approval.ExpectedVersion, true, default);
+        Assert.Equal("Unknown", firstOutcome.Status);
+        Assert.Equal(1, fixture.ExecutionCount);
+
+        fixture.Dispatcher.ReleaseTurn(PorchRequest.TurnId);
+
+        var siblingSummary = (await workflow.ReadRecentAsync("owner", 10, default))
+            .Single(summary => summary.ActionId == sibling.ActionId);
+        var siblingOutcome = await workflow.ResolveAsync(
+            "owner", sibling.ApprovalId!.Value, siblingSummary.Approval.ExpectedVersion, true, default);
+
+        Assert.Equal("Rejected", siblingOutcome.Status);
+        Assert.Equal("equivalent_write_outcome_unknown", siblingOutcome.ReasonCode);
+        Assert.Equal(1, fixture.ExecutionCount);
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task OwnerWorkflowRejectionSettlesApprovalWithoutExecutingAction()
+    {
+        using var fixture = await Fixture.CreateAsync(ToolRiskClass.ApprovalRequired);
+        var conversations = new SqliteConversationStore(fixture.Database, fixture.Clock);
+        var conversationId = ConversationId.New();
+        await conversations.CreateConversationAsync(new(
+            conversationId, "owner", "Approval workflow", fixture.Clock.UtcNow, fixture.Clock.UtcNow), default);
+        await conversations.SubmitTurnAsync(new(
+            PorchRequest.TurnId,
+            conversationId,
+            Guid.NewGuid().ToString(),
+            new string('a', 64),
+            Guid.NewGuid(),
+            PorchRequest.CurrentUserRequest!,
+            fixture.Clock.UtcNow,
+            RequiredOwnerId: "owner"), default);
+        var pending = await fixture.Dispatcher.DispatchAsync(PorchRequest, default);
+        var workflow = fixture.ApprovalWorkflow();
+        var summary = Assert.Single(await workflow.ReadRecentAsync("owner", 10, default));
+        await Assert.ThrowsAsync<KeyNotFoundException>(async () =>
+            await workflow.ResolveAsync(
+                "another-owner", pending.ApprovalId!.Value, summary.Approval.ExpectedVersion, false, default));
+
+        var result = await workflow.ResolveAsync(
+            "owner", pending.ApprovalId!.Value, summary.Approval.ExpectedVersion, false, default);
+
+        Assert.Equal("Rejected", result.Status);
+        Assert.Equal(0, fixture.ExecutionCount);
+        Assert.Equal("Rejected", Assert.Single(await workflow.ReadRecentAsync("owner", 10, default)).Approval.Status);
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task OwnerWorkflowRejectsMalformedStoredActionEnvelope()
+    {
+        using var fixture = await Fixture.CreateAsync(ToolRiskClass.ApprovalRequired);
+        var conversations = new SqliteConversationStore(fixture.Database, fixture.Clock);
+        var conversationId = ConversationId.New();
+        await conversations.CreateConversationAsync(new(
+            conversationId, "owner", "Approval workflow", fixture.Clock.UtcNow, fixture.Clock.UtcNow), default);
+        await conversations.SubmitTurnAsync(new(
+            PorchRequest.TurnId,
+            conversationId,
+            Guid.NewGuid().ToString(),
+            new string('a', 64),
+            Guid.NewGuid(),
+            PorchRequest.CurrentUserRequest!,
+            fixture.Clock.UtcNow,
+            RequiredOwnerId: "owner"), default);
+        var pending = await fixture.Dispatcher.DispatchAsync(PorchRequest, default);
+        await fixture.SqlAsync(
+            $"UPDATE actions SET canonical_arguments = 'not-json' WHERE id = '{pending.ActionId!.Value.Value:D}';");
+
+        await Assert.ThrowsAsync<InvalidDataException>(async () =>
+            await fixture.ApprovalWorkflow().ReadRecentAsync("owner", 10, default));
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task OwnerWorkflowExpiresHomeApprovalWithoutExecutingAction()
+    {
+        using var fixture = await Fixture.CreateAsync(ToolRiskClass.ApprovalRequired);
+        var conversations = new SqliteConversationStore(fixture.Database, fixture.Clock);
+        var conversationId = ConversationId.New();
+        await conversations.CreateConversationAsync(new(
+            conversationId, "owner", "Approval workflow", fixture.Clock.UtcNow, fixture.Clock.UtcNow), default);
+        await conversations.SubmitTurnAsync(new(
+            PorchRequest.TurnId,
+            conversationId,
+            Guid.NewGuid().ToString(),
+            new string('a', 64),
+            Guid.NewGuid(),
+            PorchRequest.CurrentUserRequest!,
+            fixture.Clock.UtcNow,
+            RequiredOwnerId: "owner"), default);
+        var pending = await fixture.Dispatcher.DispatchAsync(PorchRequest, default);
+        var workflow = fixture.ApprovalWorkflow();
+        var summary = Assert.Single(await workflow.ReadRecentAsync("owner", 10, default));
+        fixture.Clock.Advance(TimeSpan.FromMinutes(5));
+
+        var result = await workflow.ResolveAsync(
+            "owner", pending.ApprovalId!.Value, summary.Approval.ExpectedVersion, true, default);
+
+        Assert.Equal("Expired", result.Status);
+        Assert.Equal(0, fixture.ExecutionCount);
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task OwnerWorkflowRequiresOriginalRequestSourceBeforeApprovingHomeAction()
+    {
+        using var fixture = await Fixture.CreateAsync(ToolRiskClass.ApprovalRequired);
+        var conversations = new SqliteConversationStore(fixture.Database, fixture.Clock);
+        var conversationId = ConversationId.New();
+        await conversations.CreateConversationAsync(new(
+            conversationId, "owner", "Approval workflow", fixture.Clock.UtcNow, fixture.Clock.UtcNow), default);
+        await conversations.SubmitTurnAsync(new(
+            PorchRequest.TurnId,
+            conversationId,
+            Guid.NewGuid().ToString(),
+            new string('a', 64),
+            Guid.NewGuid(),
+            PorchRequest.CurrentUserRequest!,
+            fixture.Clock.UtcNow,
+            RequiredOwnerId: "owner"), default);
+        var pending = await fixture.Dispatcher.DispatchAsync(PorchRequest, default);
+        var summary = Assert.Single(await fixture.ApprovalWorkflow().ReadRecentAsync("owner", 10, default));
+        await fixture.SqlAsync("DELETE FROM conversations;");
+
+        await Assert.ThrowsAsync<PersistenceConcurrencyException>(async () =>
+            await fixture.ApprovalWorkflow().ResolveAsync(
+                "owner", pending.ApprovalId!.Value, summary.Approval.ExpectedVersion, true, default));
+        Assert.Equal(0, fixture.ExecutionCount);
+    }
+
+    [Theory]
+    [InlineData("another-owner", "home.set_light")]
+    [InlineData("owner", "home.run_service")]
+    [Trait("Category", "Integration")]
+    public async Task OwnerWorkflowRejectsUnboundOrUnsupportedStoredActions(string storedOwner, string toolName)
+    {
+        using var fixture = await Fixture.CreateAsync(ToolRiskClass.ApprovalRequired);
+        var pending = await fixture.CreatePendingHomeApprovalAsync(PorchRequest);
+        await fixture.SqlAsync(
+            $"UPDATE actions SET canonical_arguments = '{{\"OwnerId\":\"{storedOwner}\",\"ToolName\":\"{toolName}\"}}' " +
+            $"WHERE id = '{pending.ActionId!.Value.Value:D}';");
+        var workflow = fixture.ApprovalWorkflow();
+
+        await Assert.ThrowsAsync<InvalidDataException>(async () =>
+            await workflow.ReadRecentAsync("owner", 10, default));
+        if (storedOwner != "owner")
+        {
+            await Assert.ThrowsAsync<KeyNotFoundException>(async () =>
+                await workflow.ResolveAsync(
+                    "owner", pending.ApprovalId!.Value, 1, true, default));
+        }
+        else
+        {
+            await Assert.ThrowsAsync<InvalidDataException>(async () =>
+                await workflow.ResolveAsync(
+                    "owner", pending.ApprovalId!.Value, 1, true, default));
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task OwnerWorkflowReportsMissingApprovalAndActionRecordsExplicitly()
+    {
+        using var fixture = await Fixture.CreateAsync(ToolRiskClass.ApprovalRequired);
+        var workflow = fixture.ApprovalWorkflow();
+        await Assert.ThrowsAsync<KeyNotFoundException>(async () =>
+            await workflow.ResolveAsync("owner", new ApprovalId(Guid.NewGuid()), 1, true, default));
+
+        var pending = await fixture.CreatePendingHomeApprovalAsync(PorchRequest);
+        await fixture.SqlAsync(
+            $"PRAGMA foreign_keys = OFF; DELETE FROM actions WHERE id = '{pending.ActionId!.Value.Value:D}';");
+        await Assert.ThrowsAsync<InvalidDataException>(async () =>
+            await workflow.ReadRecentAsync("owner", 10, default));
+        await Assert.ThrowsAsync<PersistenceConcurrencyException>(async () =>
+            await workflow.ResolveAsync("owner", pending.ApprovalId!.Value, 1, true, default));
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task OwnerWorkflowRejectsNullStoredActionEnvelope()
+    {
+        using var fixture = await Fixture.CreateAsync(ToolRiskClass.ApprovalRequired);
+        var pending = await fixture.CreatePendingHomeApprovalAsync(PorchRequest);
+        await fixture.SqlAsync(
+            $"UPDATE actions SET canonical_arguments = 'null' WHERE id = '{pending.ActionId!.Value.Value:D}';");
+
+        await Assert.ThrowsAsync<InvalidDataException>(async () =>
+            await fixture.ApprovalWorkflow().ReadRecentAsync("owner", 10, default));
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
     public async Task ChangedArgumentsCannotReuseCompletedActionIdentity()
     {
         using var fixture = await Fixture.CreateAsync();
@@ -1385,6 +1612,32 @@ public sealed class ToolDispatcherTests
         public void SetVerification(
             Func<ToolArguments, ToolActionDraft, ToolExecutionOutcome, CancellationToken, ValueTask<ToolVerificationOutcome>> handler) =>
             verification = handler;
+
+        public async Task<ToolDispatchResult> CreatePendingHomeApprovalAsync(ToolDispatchRequest request)
+        {
+            var conversations = new SqliteConversationStore(Database, Clock);
+            var conversationId = ConversationId.New();
+            await conversations.CreateConversationAsync(new(
+                conversationId, "owner", "Approval workflow", Clock.UtcNow, Clock.UtcNow), default);
+            await conversations.SubmitTurnAsync(new(
+                request.TurnId,
+                conversationId,
+                Guid.NewGuid().ToString(),
+                new string('a', 64),
+                Guid.NewGuid(),
+                request.CurrentUserRequest!,
+                Clock.UtcNow,
+                RequiredOwnerId: "owner"), default);
+            return await Dispatcher.DispatchAsync(request, default);
+        }
+
+        public async Task SqlAsync(string sql)
+        {
+            await using var connection = await Database.OpenConnectionAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText = sql;
+            await command.ExecuteNonQueryAsync();
+        }
 
         public ToolDispatcher CreateRestartedDispatcher(IActionJournalStore? journal = null) =>
             new(registry, Policy, journal ?? Journal, Approvals, Clock, TimeSpan.FromSeconds(1));

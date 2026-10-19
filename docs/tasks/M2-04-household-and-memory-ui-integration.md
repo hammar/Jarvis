@@ -212,5 +212,38 @@ causality, human observations, and assistive-technology certification remain
 unexercised; the controlled status failure and pathological long-content
 fixture are not substitutes for those opt-in/live observations.
 
+### Exact-commit review follow-up
+
+The independent review of implementation commit
+`36586095483e2277c42a8f02887952fa7d7f709f` reported four findings. Their
+dispositions below are being verified against the follow-up revision; they do
+not replace the complete earlier M2 ledgers above.
+
+| Reference | Severity | Finding | Follow-up disposition |
+| --- | --- | --- | --- |
+| M2-04-R1 | High | Completing the model turn could clear equivalent-write uncertainty while an approved sibling action remained actionable, allowing a second equivalent approved send after an Unknown outcome. | Implemented approval-scoped failure-budget holds: turn release defers cleanup while any same-proposal approval remains unresolved, and a settled decision releases its hold. `ToolDispatcherTests.UnknownApprovedWriteRemainsProtectedAcrossTurnReleaseWhileSiblingApprovalIsPending` reproduces Unknown → turn release → blocked sibling approval. |
+| M2-04-R2 | Medium | Listing an invalidated memory approval parsed its redacted `{}` envelope before checking invalidation and failed the approval-list request. | Implemented an invalidation-first, owner-bound redacted summary with no stale content and a non-actionable `Invalidated` presentation state. `ConfirmedMemoryTests.DeleteRedactsDerivedCopiesAndOldCallsCannotRestoreThem` checks the real SQLite invalidation/list path and content redaction. |
+| M2-04-R3 | Medium | Owner navigation remained enabled during an active turn and could hide the only Cancel control. | Implemented active-turn disabling for Approvals, Memory and Household navigation. `BrowserSmokeTests` asserts all three remain disabled while the delayed streaming turn and Cancel control are active. |
+| M2-04-R4 | Medium | The approval workflow had no explicit critical-module 95% line / 90% branch coverage ownership. | Added `ApprovalWorkflowService.cs` to the critical-module gate and behavioral integration coverage for invalidation/redaction, owner binding, malformed/missing state, expiry, rejection, replay and execution. The refreshed coverage gate must pass before this record is complete. |
+
+The follow-up implementation adds no migration or schema change. The review
+dispositions, final revision, refreshed gate results, and independent review of
+these fixes will be recorded before handoff.
+
+Follow-up validation ran on native macOS with isolated simulator/SQLite test
+data:
+
+| Command | Result |
+| --- | --- |
+| `tools/validate.sh build` | Passed Release build, formatting/analyzers, zero warnings/errors. |
+| `tools/validate.sh architecture` | Passed; 6/6 discovered tests. |
+| `tools/validate.sh unit` | Passed; 325/325 discovered tests. |
+| `tools/validate.sh integration` | Passed; 444/444 discovered tests, including the R1/R2 regressions and critical workflow boundary cases. |
+| `tools/validate.sh sdk-contracts` | Passed actual pinned-runtime probes and 57/57 SDK contract tests. |
+| `tools/validate.sh coverage artifacts/coverage/unit/20261019T083120Z-43461 artifacts/coverage/integration/20261019T082946Z-42714` | Passed all assembly and critical-module thresholds; changed executable lines 98.0% (383/391). |
+| `tools/validate.sh aspire-e2e` | Passed; 10/10 out-of-process scenarios. |
+| `tools/validate.sh browser-e2e` | Passed; 31/31 Playwright scenarios; required deliberately failing browser probe was discovered and failed as expected. |
+| `tools/validate.sh docs` | Passed; all internal Markdown links resolve. |
+
 The final implementation revision and independent review disposition are
 recorded below after review. The owner retains the merge decision.

@@ -170,7 +170,9 @@ M2-01 typed tool registration, exact allowlist policy, dispatcher, and approval
 service in `Application/Tools/ToolRegistration.cs`,
 `Application/Tools/ToolAuthorizationPolicy.cs`,
 `Application/Tools/ToolDispatcher.cs`, and
-`Application/Approvals/ApprovalService.cs`, also at 95% / 90%;
+`Application/Approvals/ApprovalService.cs`, plus the M2-04 owner approval
+workflow/redaction boundary in `Application/Approvals/ApprovalWorkflowService.cs`,
+also at 95% / 90%;
 changed executable lines at 90%.
 The coverage validator requires each critical source file to exist at its
 exact owned path, so renaming it cannot silently remove the gate. A module with no coverable lines
@@ -311,6 +313,8 @@ E2E is a separate pass gate, not in-process coverage. See the
 | Turn state/version survive restart and nonterminal recovery reads are bounded | `SqlitePersistenceTests.NonterminalTurnStateAndVersionCanBeRecoveredAfterRestart` |
 | Durable request ID retries return the original turn and conflicting reuse fails after reopening SQLite | `SqlitePersistenceTests.TurnSubmissionIsAtomicAndDeduplicatedAcrossStoreReopen` |
 | Owner UI APIs bound memory reads, return only allowlisted household status, and reject missing/invalid consent protection | `AspireSimulatorTests.OwnerUiApisExposeOnlyBoundedMemoryApprovalsAndAllowlistedHouseholdStatus` |
+| An Unknown approved write remains protected after turn completion while an equivalent sibling approval is still actionable | `ToolDispatcherTests.UnknownApprovedWriteRemainsProtectedAcrossTurnReleaseWhileSiblingApprovalIsPending` |
+| Invalidated memory approval records remain owner-bound, content-free, and non-actionable in the approvals list | `ConfirmedMemoryTests.DeleteRedactsDerivedCopiesAndOldCallsCannotRestoreThem` |
 | A controlled exact-eligible light command traverses the actual Web/SDK/coordinator/dispatcher composition and performs exactly one simulator write | `AspireSimulatorTests.WebChatDispatchesAllowedSimulatedLightThroughProductionComposition` |
 | Approval, memory, household, and activity surfaces render empty/status states without horizontal overflow at desktop/tablet/mobile widths, with visible keyboard focus | `BrowserSmokeTests.HouseholdMemoryApprovalAndActivitySurfacesReflowAndKeepKeyboardFocusVisible` |
 | Turn completion atomically stores one final assistant message and terminal event | `SqlitePersistenceTests.TerminalCompletionPersistsItsFinalAssistantMessageAtomicallyOnce`, `LocalTurnCoordinatorTests.CoordinatorPersistsOneCompletedAnswerAndReturnsDuplicateRequest` |

@@ -50,6 +50,9 @@ function setTurnNavigationLocked(locked) {
     document.getElementById("new-conversation").disabled = locked;
     document.getElementById("settings-button").disabled = locked;
     document.getElementById("activity-button").disabled = locked;
+    document.getElementById("approvals-button").disabled = locked;
+    document.getElementById("memory-button").disabled = locked;
+    document.getElementById("household-button").disabled = locked;
     document.getElementById("logout").disabled = locked;
     document.getElementById("rename-conversation").disabled = locked;
     for (const button of document.querySelectorAll("#conversation-list button")) {

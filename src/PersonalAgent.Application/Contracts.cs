@@ -647,8 +647,12 @@ public interface IToolDispatcher
 {
     /// <summary>Releases ephemeral equivalent-failure accounting after all callbacks for a turn have stopped.</summary>
     /// <param name="turnId">Completed or interrupted host turn whose callbacks can no longer dispatch.</param>
-    /// <remarks>Does not delete durable actions or permit replay of an existing action identity.</remarks>
+    /// <remarks>Accounting is retained while owner approvals from the turn remain actionable. Does not delete durable actions or permit replay of an existing action identity.</remarks>
     void ReleaseTurn(TurnId turnId);
+
+    /// <summary>Releases the failure-budget hold for an approval after its decision is settled.</summary>
+    /// <param name="actionId">The durable action associated with the settled approval.</param>
+    void ReleaseApproval(ActionId actionId);
 
     /// <summary>Dispatches one untrusted proposal through host-side policy checks.</summary>
     /// <param name="request">Model-proposed call; its arguments are never trusted as authorization.</param>

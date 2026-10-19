@@ -2557,6 +2557,7 @@ public sealed class CopilotAgentEngineContractTests(ITestOutputHelper output)
         public TurnId? ReleasedTurn { get; private set; }
 
         public void ReleaseTurn(TurnId turnId) => ReleasedTurn = turnId;
+        public void ReleaseApproval(ActionId actionId) { }
 
         public ValueTask<ToolDispatchResult> DispatchAsync(
             ToolDispatchRequest request,
@@ -2576,6 +2577,7 @@ public sealed class CopilotAgentEngineContractTests(ITestOutputHelper output)
         public void ReleaseTurn(TurnId turnId)
         {
         }
+        public void ReleaseApproval(ActionId actionId) { }
 
         public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource Cancelled { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);

@@ -78,6 +78,26 @@ public sealed class ApprovalWorkflowService
 
             var action = await journal.GetAsync(record.ActionId, cancellationToken)
                 ?? throw new InvalidDataException("An approval is missing its durable action.");
+            if (action.MemoryInvalidated)
+            {
+                if (!string.Equals(action.MemoryOwnerId, ownerId, StringComparison.Ordinal))
+                {
+                    throw new InvalidDataException("An invalidated memory approval is not bound to its owner.");
+                }
+
+                dispatcher.ReleaseApproval(action.Id);
+                summaries.Add(new(
+                    new(record.Id, record.ActionId, record.OwnerId, record.ExpiresAtUtc, record.Version, record.Status),
+                    action.Id,
+                    "memory.propose_change",
+                    action.ActionType,
+                    "invalidated",
+                    null,
+                    "Invalidated",
+                    """{"invalidated":true}"""));
+                continue;
+            }
+
             var envelope = ReadEnvelope(action);
             if (!string.Equals(envelope.OwnerId, ownerId, StringComparison.Ordinal)
                 || envelope.ToolName is not ("home.set_light" or "home.set_temperature" or "memory.propose_change"))
@@ -88,19 +108,12 @@ public sealed class ApprovalWorkflowService
             var arguments = envelope.CanonicalArguments;
             if (envelope.ToolName == "memory.propose_change")
             {
-                if (action.MemoryInvalidated)
+                var proposal = await memoryProposals.PreviewAsync(ownerId, action.Id, cancellationToken);
+                arguments = JsonSerializer.Serialize(new
                 {
-                    arguments = """{"invalidated":true}""";
-                }
-                else
-                {
-                    var proposal = await memoryProposals.PreviewAsync(ownerId, action.Id, cancellationToken);
-                    arguments = JsonSerializer.Serialize(new
-                    {
-                        change = proposal.Command.Change,
-                        conflicts = proposal.Conflicts
-                    });
-                }
+                    change = proposal.Command.Change,
+                    conflicts = proposal.Conflicts
+                });
             }
 
             summaries.Add(new(
@@ -140,6 +153,17 @@ public sealed class ApprovalWorkflowService
 
         var action = await journal.GetAsync(approval.ActionId, cancellationToken)
             ?? throw new PersistenceConcurrencyException("The approved action is unavailable.");
+        if (action.MemoryInvalidated)
+        {
+            if (!string.Equals(action.MemoryOwnerId, ownerId, StringComparison.Ordinal))
+            {
+                throw new KeyNotFoundException("The approval request is unavailable.");
+            }
+
+            dispatcher.ReleaseApproval(action.Id);
+            return new("Rejected", null, "memory_result_invalidated", action.Id, approvalId);
+        }
+
         var envelope = ReadEnvelope(action);
         if (!string.Equals(envelope.OwnerId, ownerId, StringComparison.Ordinal))
         {
@@ -148,8 +172,13 @@ public sealed class ApprovalWorkflowService
 
         if (envelope.ToolName == "memory.propose_change")
         {
-            return await memoryProposals.ResolveAsync(
+            var memoryResult = await memoryProposals.ResolveAsync(
                 ownerId, action.Id, expectedVersion, approved, cancellationToken);
+            if (memoryResult.Status != "AwaitingApproval")
+            {
+                dispatcher.ReleaseApproval(action.Id);
+            }
+            return memoryResult;
         }
 
         if (envelope.ToolName is not ("home.set_light" or "home.set_temperature"))
@@ -164,6 +193,7 @@ public sealed class ApprovalWorkflowService
             approvalId, ownerId, expectedVersion, approved, cancellationToken);
         if (resolved.Status != "Approved")
         {
+            dispatcher.ReleaseApproval(action.Id);
             var settled = await journal.GetAsync(action.Id, cancellationToken)
                 ?? throw new InvalidDataException("The settled action disappeared.");
             return settled.Outcome ?? new(settled.Status, null, $"approval_{resolved.Status.ToLowerInvariant()}",

@@ -12,6 +12,11 @@ public sealed class RejectingToolDispatcher : IToolDispatcher
     }
 
     /// <inheritdoc />
+    public void ReleaseApproval(ActionId actionId)
+    {
+    }
+
+    /// <inheritdoc />
     public ValueTask<ToolDispatchResult> DispatchAsync(
         ToolDispatchRequest request,
         CancellationToken cancellationToken)

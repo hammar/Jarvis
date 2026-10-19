@@ -25,6 +25,8 @@ public sealed class ToolDispatcher : IToolDispatcher
     private readonly TimeSpan verificationTimeout;
     private readonly ConcurrentDictionary<ActionId, byte> activeExecutions = new();
     private readonly ConcurrentDictionary<(TurnId Turn, string Proposal), FailureBudget> failureBudgets = new();
+    private readonly Dictionary<ActionId, (TurnId Turn, string Proposal)> approvalBudgets = [];
+    private readonly object failureBudgetLifecycleGate = new();
 
     /// <summary>Creates the host tool dispatcher.</summary>
     /// <param name="registry">Immutable host-registered tools.</param>
@@ -57,9 +59,35 @@ public sealed class ToolDispatcher : IToolDispatcher
     /// <inheritdoc />
     public void ReleaseTurn(TurnId turnId)
     {
-        foreach (var key in failureBudgets.Keys.Where(key => key.Turn == turnId))
+        lock (failureBudgetLifecycleGate)
         {
-            failureBudgets.TryRemove(key, out _);
+            foreach (var pair in failureBudgets.Where(pair => pair.Key.Turn == turnId).ToArray())
+            {
+                pair.Value.TurnReleased = true;
+                if (pair.Value.PendingApprovals.Count == 0)
+                {
+                    failureBudgets.TryRemove(pair.Key, out _);
+                }
+            }
+        }
+    }
+
+    /// <inheritdoc />
+    public void ReleaseApproval(ActionId actionId)
+    {
+        lock (failureBudgetLifecycleGate)
+        {
+            if (!approvalBudgets.Remove(actionId, out var key)
+                || !failureBudgets.TryGetValue(key, out var budget))
+            {
+                return;
+            }
+
+            budget.PendingApprovals.Remove(actionId);
+            if (budget.TurnReleased && budget.PendingApprovals.Count == 0)
+            {
+                failureBudgets.TryRemove(key, out _);
+            }
         }
     }
 
@@ -289,7 +317,9 @@ public sealed class ToolDispatcher : IToolDispatcher
 
         if (action.Status != "AwaitingApproval")
         {
-            return Recorded(await ReconcileTerminalReplayAsync(action, request, draft, cancellationToken));
+            var terminal = await ReconcileTerminalReplayAsync(action, request, draft, cancellationToken);
+            ReleaseApproval(action.Id);
+            return Recorded(terminal);
         }
 
         var approvalId = new ApprovalId(actionId.Value);
@@ -310,7 +340,9 @@ public sealed class ToolDispatcher : IToolDispatcher
 
         if (action.Status != "AwaitingApproval")
         {
-            return Recorded(await ReconcileTerminalReplayAsync(action, request, draft, cancellationToken));
+            var terminal = await ReconcileTerminalReplayAsync(action, request, draft, cancellationToken);
+            ReleaseApproval(action.Id);
+            return Recorded(terminal);
         }
 
         if (approval.Status == "Pending" && clock.UtcNow.ToUniversalTime() >= approval.ExpiresAtUtc)
@@ -353,11 +385,13 @@ public sealed class ToolDispatcher : IToolDispatcher
             }
 
             action = await ReconcileTerminalReplayAsync(action, request, draft, cancellationToken);
+            ReleaseApproval(action.Id);
             return Recorded(action);
         }
 
         if (approval.Status == "Pending")
         {
+            HoldApproval(actionId, request, draft);
             return new(
                 "AwaitingApproval",
                 null,
@@ -369,6 +403,7 @@ public sealed class ToolDispatcher : IToolDispatcher
 
         if (approval.Status != "Approved")
         {
+            ReleaseApproval(action.Id);
             return new("Rejected", null, "invalid_approval_state", action.Id, approvalId);
         }
 
@@ -377,11 +412,17 @@ public sealed class ToolDispatcher : IToolDispatcher
             action = await TransitionAsync(action, "Expired", cancellationToken,
                 "approval_expired_before_execution", approvalId);
             action = await ReconcileTerminalReplayAsync(action, request, draft, cancellationToken);
+            ReleaseApproval(action.Id);
             return Recorded(action);
         }
 
-        return await ExecuteOnceAsync(
+        var result = await ExecuteOnceAsync(
             action, arguments, registration, draft, request, policyVersion, true, approval.ExpiresAtUtc, cancellationToken);
+        if (result.Status != "AwaitingApproval")
+        {
+            ReleaseApproval(action.Id);
+        }
+        return result;
     }
 
     private async ValueTask<ToolDispatchResult> ExecuteOnceAsync(
@@ -837,7 +878,23 @@ public sealed class ToolDispatcher : IToolDispatcher
 
     private FailureBudget GetFailureBudget(ToolDispatchRequest request, ToolActionDraft draft)
     {
-        var proposalKey = HashText(JsonSerializer.Serialize(new
+        var proposalKey = GetProposalKey(request, draft);
+        return failureBudgets.GetOrAdd((request.TurnId, proposalKey), _ => new FailureBudget());
+    }
+
+    private void HoldApproval(ActionId actionId, ToolDispatchRequest request, ToolActionDraft draft)
+    {
+        var key = (request.TurnId, GetProposalKey(request, draft));
+        lock (failureBudgetLifecycleGate)
+        {
+            var budget = failureBudgets.GetOrAdd(key, _ => new FailureBudget());
+            approvalBudgets[actionId] = key;
+            budget.PendingApprovals.Add(actionId);
+        }
+    }
+
+    private static string GetProposalKey(ToolDispatchRequest request, ToolActionDraft draft) =>
+        HashText(JsonSerializer.Serialize(new
         {
             request.OwnerId,
             request.ToolName,
@@ -846,8 +903,6 @@ public sealed class ToolDispatcher : IToolDispatcher
             draft.ResolvedEntityId,
             Arguments = CanonicalizeObjectJson(draft.EquivalentFailureArguments ?? draft.CanonicalArguments)
         }));
-        return failureBudgets.GetOrAdd((request.TurnId, proposalKey), _ => new FailureBudget());
-    }
 
     // Called only under the proposal gate, after its outcome has been durably recorded.
     private static void RecordBudgetOutcome(FailureBudget budget, ActionId actionId, string status)
@@ -1135,6 +1190,8 @@ public sealed class ToolDispatcher : IToolDispatcher
 
         public SemaphoreSlim Gate { get; } = new(1, 1);
         public HashSet<ActionId> FailedActions { get; } = [];
+        public HashSet<ActionId> PendingApprovals { get; } = [];
+        public bool TurnReleased { get; set; }
         public bool HasUncertainWrites => !uncertainWrites.IsEmpty;
 
         public void RegisterUncertainWrite(ActionId actionId)

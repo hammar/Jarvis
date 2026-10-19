@@ -222,6 +222,10 @@ and only for the action that owns that uncertainty. Verified success removes
 that action's provisional failure slot; confirmed failure consumes one slot,
 deduplicated by action ID. Unknown outcomes and failed observation or journaling
 retain the write block. Recovery of another action cannot clear it.
+Approval-waiting proposals retain their equivalent-proposal budget across
+completion of the originating model turn. Settling an approval releases its
+hold only after dispatch has produced a terminal durable outcome; unresolved
+sibling approvals keep the shared uncertainty budget alive.
 On a fresh dispatcher, recovery seeds uncertainty from the persisted action's
 original risk before observing, not from the new policy/registration risk.
 Unresolved writes are tracked by action ID as a set so reconciling one orphan

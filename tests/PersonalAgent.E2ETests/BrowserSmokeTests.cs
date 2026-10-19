@@ -1761,6 +1761,10 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
             await page.GetByRole(AriaRole.Button, new PageGetByRoleOptions { Name = "Send" }).ClickAsync();
             var cancelButton = page.GetByRole(AriaRole.Button, new PageGetByRoleOptions { Name = "Cancel turn" });
             await cancelButton.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible });
+            Assert.True(await page.Locator("#approvals-button").IsDisabledAsync());
+            Assert.True(await page.Locator("#memory-button").IsDisabledAsync());
+            Assert.True(await page.Locator("#household-button").IsDisabledAsync());
+            Assert.True(await cancelButton.IsVisibleAsync());
             Assert.True(await page.Locator("#new-conversation").IsDisabledAsync());
             Assert.True(await page.Locator("#conversation-list button").Nth(1).IsDisabledAsync());
             using var delayedStream = await fixture.ModelClient.GetAsync(
@@ -1785,6 +1789,9 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
             try
             {
                 Assert.True(await page.Locator("#new-conversation").IsDisabledAsync());
+                Assert.True(await page.Locator("#approvals-button").IsDisabledAsync());
+                Assert.True(await page.Locator("#memory-button").IsDisabledAsync());
+                Assert.True(await page.Locator("#household-button").IsDisabledAsync());
                 Assert.True(await page.Locator("#send-turn").IsDisabledAsync());
                 Assert.Equal(acceptedTurnId, await page.EvaluateAsync<string>("activeTurnId"));
             }

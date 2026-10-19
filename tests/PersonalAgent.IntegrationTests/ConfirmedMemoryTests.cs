@@ -16,6 +16,34 @@ namespace PersonalAgent.IntegrationTests;
 public sealed class ConfirmedMemoryTests
 {
     [Fact]
+    [Trait("Category", "Integration")]
+    public async Task ApprovalWorkflowValidatesDependenciesOwnerAndPageBounds()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var valid = fixture.ApprovalWorkflow();
+
+        Assert.Throws<ArgumentNullException>(() => new ApprovalWorkflowService(
+            null!, fixture.Journal, fixture.Approvals, fixture.Dispatcher, fixture.Memory, fixture.Proposals));
+        Assert.Throws<ArgumentNullException>(() => new ApprovalWorkflowService(
+            fixture.ApprovalStore, null!, fixture.Approvals, fixture.Dispatcher, fixture.Memory, fixture.Proposals));
+        Assert.Throws<ArgumentNullException>(() => new ApprovalWorkflowService(
+            fixture.ApprovalStore, fixture.Journal, null!, fixture.Dispatcher, fixture.Memory, fixture.Proposals));
+        Assert.Throws<ArgumentNullException>(() => new ApprovalWorkflowService(
+            fixture.ApprovalStore, fixture.Journal, fixture.Approvals, null!, fixture.Memory, fixture.Proposals));
+        Assert.Throws<ArgumentNullException>(() => new ApprovalWorkflowService(
+            fixture.ApprovalStore, fixture.Journal, fixture.Approvals, fixture.Dispatcher, null!, fixture.Proposals));
+        Assert.Throws<ArgumentNullException>(() => new ApprovalWorkflowService(
+            fixture.ApprovalStore, fixture.Journal, fixture.Approvals, fixture.Dispatcher, fixture.Memory, null!));
+
+        await Assert.ThrowsAsync<ArgumentException>(async () =>
+            await valid.ReadRecentAsync(" ", 10, default));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(async () =>
+            await valid.ReadRecentAsync("owner", 0, default));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(async () =>
+            await valid.ReadRecentAsync("owner", 101, default));
+    }
+
+    [Fact]
     public async Task ExplicitSensitiveFactRequiresApprovalAndSurvivesRuntimeAndStoreLoss()
     {
         using var fixture = await Fixture.CreateAsync();
@@ -373,8 +401,23 @@ public sealed class ConfirmedMemoryTests
             Assert.Equal("memory_result_invalidated", replay.ReasonCode);
             Assert.Null(replay.ResultJson);
         }
+        var invalidatedApproval = (await fixture.ApprovalWorkflow().ReadRecentAsync("owner", 20, default))
+            .Single(summary => summary.ActionId == pending.ActionId);
+        Assert.Equal("memory.propose_change", invalidatedApproval.ToolName);
+        Assert.Equal("invalidated", invalidatedApproval.Operation);
+        Assert.Equal("Invalidated", invalidatedApproval.ActionStatus);
+        Assert.Equal("""{"invalidated":true}""", invalidatedApproval.ArgumentsJson);
+        Assert.DoesNotContain("private_blue_sentinel", invalidatedApproval.ArgumentsJson, StringComparison.Ordinal);
+        var invalidatedDecision = await fixture.ApprovalWorkflow().ResolveAsync(
+            "owner", pending.ApprovalId!.Value, invalidatedApproval.Approval.ExpectedVersion, true, default);
+        Assert.Equal("Rejected", invalidatedDecision.Status);
+        Assert.Equal("memory_result_invalidated", invalidatedDecision.ReasonCode);
         await Assert.ThrowsAsync<PersistenceConcurrencyException>(async () =>
             await fixture.Proposals.PreviewAsync("owner", pending.ActionId!.Value, default));
+        await fixture.SqlAsync(
+            $"UPDATE actions SET memory_owner_id = 'another-owner' WHERE id = '{pending.ActionId!.Value.Value:D}';");
+        await Assert.ThrowsAsync<InvalidDataException>(async () =>
+            await fixture.ApprovalWorkflow().ReadRecentAsync("owner", 20, default));
         await using var connection = await fixture.Database.OpenConnectionAsync();
         await using var command = connection.CreateCommand();
         command.CommandText = """
@@ -387,6 +430,32 @@ public sealed class ConfirmedMemoryTests
         command.CommandText = "SELECT COUNT(*) FROM memory_facts_fts WHERE memory_facts_fts MATCH 'private_blue_sentinel';";
         Assert.Equal(0L, (long)(await command.ExecuteScalarAsync())!);
         Assert.Equal(deleted, await fixture.RestartedDispatcher().DispatchAsync(deletion, default));
+    }
+
+    [Fact]
+    public async Task OwnerWorkflowExecutesOnlyTheConfirmedMemoryProposal()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var request = await fixture.RequestAsync(new("create", Subject: "bathroom", Key: "paint", Value: "blue"));
+        var pending = await fixture.Dispatcher.DispatchAsync(request, default);
+        var workflow = fixture.ApprovalWorkflow();
+        var summary = Assert.Single(await workflow.ReadRecentAsync("owner", 10, default));
+        Assert.Equal("memory.propose_change", summary.ToolName);
+
+        var result = await workflow.ResolveAsync(
+            "owner", pending.ApprovalId!.Value, summary.Approval.ExpectedVersion, true, default);
+
+        Assert.Equal("Succeeded", result.Status);
+        Assert.Equal("blue", Assert.Single(await fixture.Memory.FindConflictsAsync("owner", "bathroom", "paint", default)).Value);
+
+        var rejectedRequest = await fixture.RequestAsync(
+            new("create", Subject: "kitchen", Key: "paint", Value: "red"));
+        var rejectedPending = await fixture.Dispatcher.DispatchAsync(rejectedRequest, default);
+        var rejectedSummary = (await workflow.ReadRecentAsync("owner", 10, default))
+            .Single(item => item.ActionId == rejectedPending.ActionId);
+        var rejected = await workflow.ResolveAsync(
+            "owner", rejectedPending.ApprovalId!.Value, rejectedSummary.Approval.ExpectedVersion, false, default);
+        Assert.Equal("Rejected", rejected.Status);
     }
 
     [Fact]
