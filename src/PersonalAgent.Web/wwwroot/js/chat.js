@@ -19,6 +19,9 @@ let conversationRenameGeneration = 0;
 let lastRenamedConversation = null;
 let eventSource = null;
 let bootstrapRequired = false;
+let reviewedMemoryConflicts = null;
+let pendingMemoryProposalRequestId = "";
+let memoryProposalInFlight = false;
 const workspaceViews = ["conversation", "settings", "activity", "approvals", "memory", "household"];
 
 function hideWorkspaceViews() {
@@ -443,6 +446,7 @@ async function loadMemory(query, generation = conversationSelectionGeneration) {
             metadata.textContent = [
                 `ID ${fact.id.value || fact.id}`,
                 `Version ${fact.version}`,
+                fact.distinguishingContext ? `Context: ${fact.distinguishingContext}` : "",
                 fact.sourceType === "OwnerMessage" ? "Source: owner message" : "Source: imported/legacy",
                 fact.sourceAvailable ? "Original source available" : "Original source unavailable",
                 `Updated ${new Date(fact.updatedAtUtc).toLocaleString()}`
@@ -454,19 +458,30 @@ async function loadMemory(query, generation = conversationSelectionGeneration) {
             edit.className = "button button-secondary";
             edit.textContent = "Propose an edit";
             edit.addEventListener("click", () => {
-                document.getElementById("memory-request").value =
-                    `Please propose an update to memory fact ${fact.id.value || fact.id} (version ${fact.version}). ` +
-                    `Keep its subject "${fact.subject}" and key "${fact.key}". I want its value to be: `;
-                document.getElementById("memory-request").focus();
+                document.getElementById("memory-operation").value = "update";
+                document.getElementById("memory-target-id").value = fact.id.value || fact.id;
+                document.getElementById("memory-target-version").value = fact.version;
+                document.getElementById("memory-subject").value = fact.subject;
+                document.getElementById("memory-key").value = fact.key;
+                document.getElementById("memory-value").value = fact.value;
+                syncMemoryEditor();
+                resetMemoryConflictReview();
+                document.getElementById("memory-value").focus();
             });
             const remove = document.createElement("button");
             remove.type = "button";
             remove.className = "button button-secondary";
             remove.textContent = "Propose forgetting";
-            remove.addEventListener("click", async () => {
-                document.getElementById("memory-request").value =
-                    `Please propose forgetting memory fact ${fact.id.value || fact.id} at version ${fact.version}.`;
-                document.getElementById("memory-request").focus();
+            remove.addEventListener("click", () => {
+                document.getElementById("memory-operation").value = "delete";
+                document.getElementById("memory-target-id").value = fact.id.value || fact.id;
+                document.getElementById("memory-target-version").value = fact.version;
+                document.getElementById("memory-subject").value = fact.subject;
+                document.getElementById("memory-key").value = fact.key;
+                document.getElementById("memory-value").value = fact.value;
+                syncMemoryEditor();
+                resetMemoryConflictReview();
+                document.getElementById("memory-operation").focus();
             });
             const actions = document.createElement("div");
             actions.className = "activity-actions";
@@ -522,29 +537,183 @@ document.getElementById("memory-search-form").addEventListener("submit", async e
     await loadMemory(document.getElementById("memory-query").value.trim(), generation);
 });
 
+function resetMemoryConflictReview() {
+    reviewedMemoryConflicts = null;
+    document.getElementById("memory-conflict-review").hidden = true;
+    document.getElementById("memory-conflict-list").replaceChildren();
+    document.getElementById("memory-conflict-choice").value = "";
+    document.getElementById("memory-distinguishing-context").value = "";
+}
+
+function syncMemoryEditor() {
+    const operation = document.getElementById("memory-operation").value;
+    const deleting = operation === "delete";
+    for (const id of ["memory-subject", "memory-key", "memory-value"]) {
+        const field = document.getElementById(id);
+        field.disabled = deleting;
+        field.required = !deleting;
+    }
+    if (operation === "create") {
+        document.getElementById("memory-target-id").value = "";
+        document.getElementById("memory-target-version").value = "";
+    }
+}
+
+function renderMemoryConflictReview(conflicts) {
+    const container = document.getElementById("memory-conflict-review");
+    const list = document.getElementById("memory-conflict-list");
+    list.replaceChildren();
+    for (const fact of conflicts) {
+        const entry = createActivityEntry(
+            `${fact.subject} · ${fact.key}`,
+            `Version ${fact.version}: ${fact.value}`,
+            "memory-conflict-card");
+        list.append(entry);
+    }
+    container.hidden = conflicts.length === 0;
+}
+
 document.getElementById("memory-request-form").addEventListener("submit", async event => {
     event.preventDefault();
-    if (activeTurnId || turnSubmissionInFlight || conversationCreationInFlight) {
-        document.getElementById("memory-status").textContent =
-            "Finish or cancel the active assistant turn before starting a memory proposal.";
-        return;
-    }
-    const request = document.getElementById("memory-request").value.trim();
-    if (!request) return;
-    document.getElementById("memory-status").textContent = "Preparing a chat request; no memory is changed yet.";
+    if (memoryProposalInFlight) return;
+    memoryProposalInFlight = true;
+    const submitButton = event.currentTarget.querySelector('button[type="submit"]');
+    submitButton.disabled = true;
+    const status = document.getElementById("memory-status");
+    const operation = document.getElementById("memory-operation").value;
+    const targetId = document.getElementById("memory-target-id").value;
+    const expectedVersion = Number(document.getElementById("memory-target-version").value || 0);
+    const subject = document.getElementById("memory-subject").value.trim();
+    const key = document.getElementById("memory-key").value.trim();
+    const value = document.getElementById("memory-value").value;
+    const isDelete = operation === "delete";
+    const conflictQueryKey = JSON.stringify([operation, subject, key, targetId, expectedVersion]);
     clearError();
     try {
-        if (!conversationId) await createConversation();
-        if (!conversationId) throw new Error("Create a conversation before proposing a memory change.");
-        hideWorkspaceViews();
-        document.getElementById("conversation").hidden = false;
-        const prompt = document.getElementById("prompt");
-        prompt.value = `Please propose this memory change for my review; do not save it without my approval: ${request}`;
-        document.getElementById("memory-request").value = "";
-        document.getElementById("turn-form").requestSubmit();
+        let conflicts = [];
+        if (!isDelete) {
+            const query = new URLSearchParams({ subject, key });
+            if (operation === "update" && targetId) query.set("excludeId", targetId);
+            conflicts = await api(`/api/memory/conflicts?${query}`);
+            const previous = reviewedMemoryConflicts;
+            const sameReview = previous
+                && previous.queryKey === conflictQueryKey
+                && JSON.stringify(previous.facts.map(fact => [fact.id.value || fact.id, fact.version]))
+                    === JSON.stringify(conflicts.map(fact => [fact.id.value || fact.id, fact.version]));
+            if (conflicts.length > 0 && !sameReview) {
+                reviewedMemoryConflicts = { queryKey: conflictQueryKey, facts: conflicts };
+                renderMemoryConflictReview(conflicts);
+                document.getElementById("memory-conflict-choice").value = "";
+                document.getElementById("memory-distinguishing-context").value = "";
+                status.textContent = "Review the exact current conflicts and choose how this proposal should resolve them, then submit again.";
+                document.getElementById("memory-conflict-review").scrollIntoView({ block: "nearest" });
+                return;
+            }
+            if (conflicts.length === 0) resetMemoryConflictReview();
+        }
+
+        const selectedConflictMode = document.getElementById("memory-conflict-choice").value;
+        if (conflicts.length > 0 && !selectedConflictMode) {
+            status.textContent = "Choose an explicit conflict decision before preparing this proposal.";
+            document.getElementById("memory-conflict-choice").focus();
+            return;
+        }
+        const references = conflicts.map(fact => ({
+            id: fact.id.value || fact.id,
+            version: fact.version
+        }));
+        let proposalOperation = operation;
+        let proposalFactId = targetId || null;
+        let proposalVersion = expectedVersion;
+        let proposalConflicts = references;
+        let distinguishingContext = null;
+        if (conflicts.length > 0 && selectedConflictMode === "supersede") {
+            proposalOperation = "supersede";
+            proposalFactId = null;
+            proposalVersion = 0;
+            proposalConflicts = references;
+            if (operation === "update" && targetId) {
+                proposalConflicts.push({ id: targetId, version: expectedVersion });
+            }
+        } else if (conflicts.length > 0 && selectedConflictMode === "retain_both") {
+            distinguishingContext = document.getElementById("memory-distinguishing-context").value.trim();
+            if (!distinguishingContext) {
+                status.textContent = "Add a distinct context before keeping both facts.";
+                document.getElementById("memory-distinguishing-context").focus();
+                return;
+            }
+            if (operation === "create") proposalOperation = "retain_both";
+        }
+        status.textContent = "Creating a durable exact proposal; no memory changes until approval.";
+        if (!conversationId) {
+            const created = await api("/api/conversations", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ title: "Memory proposals" })
+            });
+            conversationId = created.id.value || created.id;
+            await loadConversations();
+        }
+        if (!pendingMemoryProposalRequestId) pendingMemoryProposalRequestId = crypto.randomUUID();
+        const result = await api("/api/memory/proposals", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                conversationId,
+                requestId: pendingMemoryProposalRequestId,
+                operation: proposalOperation,
+                factId: proposalFactId,
+                expectedVersion: proposalVersion,
+                subject: isDelete && proposalOperation === "delete" ? null : subject,
+                key: isDelete && proposalOperation === "delete" ? null : key,
+                value: isDelete && proposalOperation === "delete" ? null : value,
+                conflicts: proposalConflicts,
+                distinguishingContext
+            })
+        });
+        conversationId = result.conversationId.value || result.conversationId;
+        pendingMemoryProposalRequestId = "";
+        reviewedMemoryConflicts = null;
+        document.getElementById("memory-request-form").reset();
+        syncMemoryEditor();
+        resetMemoryConflictReview();
+        await loadConversations();
+        await loadMemory(document.getElementById("memory-query").value.trim());
+        status.textContent = result.result.status === "AwaitingApproval"
+            ? "Exact proposal saved for review. Open Approvals to approve or reject it; inference was not required."
+            : `Proposal outcome: ${result.result.status}. Review Activity before retrying.`;
     } catch (error) {
-        document.getElementById("memory-status").textContent = `Could not prepare the memory request: ${error.message}`;
+        if (error.status === 409) {
+            pendingMemoryProposalRequestId = "";
+            reviewedMemoryConflicts = null;
+            resetMemoryConflictReview();
+            status.textContent = "A fact or conflict changed. Review the refreshed facts before preparing another proposal.";
+            await loadMemory(document.getElementById("memory-query").value.trim());
+            return;
+        }
+        status.textContent = `Could not prepare the memory proposal: ${error.message}`;
+    } finally {
+        memoryProposalInFlight = false;
+        submitButton.disabled = false;
     }
+});
+
+document.getElementById("memory-operation").addEventListener("change", () => {
+    pendingMemoryProposalRequestId = "";
+    syncMemoryEditor();
+    resetMemoryConflictReview();
+});
+for (const id of ["memory-subject", "memory-key", "memory-target-id", "memory-target-version"]) {
+    document.getElementById(id).addEventListener("input", () => {
+        pendingMemoryProposalRequestId = "";
+        resetMemoryConflictReview();
+    });
+}
+for (const id of ["memory-value", "memory-distinguishing-context"]) {
+    document.getElementById(id).addEventListener("input", () => pendingMemoryProposalRequestId = "");
+}
+document.getElementById("memory-conflict-choice").addEventListener("change", () => {
+    pendingMemoryProposalRequestId = "";
 });
 
 document.getElementById("rename-conversation").addEventListener("click", () => {

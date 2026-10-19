@@ -39,7 +39,8 @@ body {
 
 button,
 input,
-textarea {
+textarea,
+select {
     color: inherit;
     font: inherit;
 }
@@ -56,6 +57,7 @@ button:disabled {
 button:focus-visible,
 input:focus-visible,
 textarea:focus-visible,
+select:focus-visible,
 a:focus-visible {
     outline: 3px solid var(--focus);
     outline-offset: 3px;
@@ -647,7 +649,8 @@ a:focus-visible {
 }
 
 .memory-view input,
-.memory-view textarea {
+.memory-view textarea,
+.memory-view select {
     width: 100%;
     min-width: 0;
     min-height: 2.75rem;

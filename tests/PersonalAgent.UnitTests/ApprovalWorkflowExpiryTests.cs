@@ -46,7 +46,9 @@ public sealed class ApprovalWorkflowExpiryTests
         await Assert.ThrowsAsync<PersistenceConcurrencyException>(() => notExpired.ExpireAsync());
 
         var memoryAction = new Fixture(toolName: "memory.propose_change");
-        await Assert.ThrowsAsync<InvalidDataException>(() => memoryAction.ExpireAsync());
+        Assert.Equal("Expired", (await memoryAction.ExpireAsync()).Status);
+        var wrongMemoryOwner = new Fixture(toolName: "memory.propose_change", memoryOwner: "someone-else");
+        await Assert.ThrowsAsync<InvalidDataException>(() => wrongMemoryOwner.ExpireAsync());
 
         var wrongOwnerEnvelope = new Fixture(envelopeOwner: "someone-else");
         await Assert.ThrowsAsync<InvalidDataException>(() => wrongOwnerEnvelope.ExpireAsync());
@@ -91,12 +93,42 @@ public sealed class ApprovalWorkflowExpiryTests
         await Assert.ThrowsAsync<PersistenceConcurrencyException>(() => stillPending.ExpireAsync());
     }
 
+    [Fact]
+    public async Task RecentApprovalReadReturnsOnlyValidOwnerBoundSupportedActions()
+    {
+        var empty = new Fixture();
+        Assert.Empty(await empty.Workflow.ReadRecentAsync("owner", 10, default));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(async () =>
+            await empty.Workflow.ReadRecentAsync("owner", 0, default));
+        await Assert.ThrowsAsync<ArgumentException>(async () =>
+            await empty.Workflow.ReadRecentAsync("", 10, default));
+
+        var fixture = new Fixture();
+        fixture.ApprovalStore.Records =
+        [
+            new(fixture.Approval.Id, fixture.Approval.ActionId, "owner", "Pending",
+                Now, fixture.Approval.ExpiresAtUtc, null, fixture.Approval.ExpectedVersion)
+        ];
+        var summary = Assert.Single(await fixture.Workflow.ReadRecentAsync("owner", 10, default));
+        Assert.Equal("home.set_light", summary.ToolName);
+        Assert.Equal("AwaitingApproval", summary.ActionStatus);
+
+        fixture.ApprovalStore.Records =
+        [
+            new(fixture.Approval.Id, fixture.Approval.ActionId, "someone-else", "Pending",
+                Now, fixture.Approval.ExpiresAtUtc, null, fixture.Approval.ExpectedVersion)
+        ];
+        await Assert.ThrowsAsync<InvalidDataException>(async () =>
+            await fixture.Workflow.ReadRecentAsync("owner", 10, default));
+    }
+
     private sealed class Fixture
     {
         internal readonly ApprovalRequest Approval;
         internal readonly Journal Journal;
         internal readonly Dispatcher Dispatcher = new();
         internal readonly Clock Clock;
+        internal readonly ApprovalStore ApprovalStore = new();
         internal readonly ApprovalWorkflowService Workflow;
 
         internal Fixture(
@@ -105,27 +137,29 @@ public sealed class ApprovalWorkflowExpiryTests
             string approvalStatus = "Approved",
             string actionStatus = "AwaitingApproval",
             string toolName = "home.set_light",
-            DateTimeOffset? expiry = null)
+            DateTimeOffset? expiry = null,
+            string? memoryOwner = null)
         {
             var actionId = new ActionId(Guid.NewGuid());
             Approval = new(new(actionId.Value), actionId, approvalOwner, expiry ?? Now.AddMinutes(-1), 7, approvalStatus);
-            Journal = new(CreateEntry(actionId, envelopeOwner, toolName, actionStatus));
+            Journal = new(CreateEntry(actionId, envelopeOwner, toolName, actionStatus, memoryOwner));
             Clock = new(Now);
             var approvals = new Approvals(Approval);
             Workflow = new(
-                new ApprovalStore(),
+                ApprovalStore,
                 Journal,
                 approvals,
                 Dispatcher,
                 new MemoryStore(),
-                new MemoryProposalService(null!, null!, null!, null!),
+                new MemoryProposalService(null!, null!, null!, null!, null!, Clock),
                 Clock);
         }
 
         internal Task<ToolDispatchResult> ExpireAsync() =>
             Workflow.ExpireApprovedUnclaimedAsync("owner", Approval.Id, Approval.ExpectedVersion, default).AsTask();
 
-        private static ActionJournalEntry CreateEntry(ActionId id, string owner, string tool, string status)
+        private static ActionJournalEntry CreateEntry(
+            ActionId id, string owner, string tool, string status, string? memoryOwner)
         {
             var canonical = $$"""
                 {
@@ -143,18 +177,22 @@ public sealed class ApprovalWorkflowExpiryTests
                   "CanonicalArguments": "{}"
                 }
                 """;
-            return new(id, tool, canonical, "hash", status, Now, Now, 3);
+            return new ActionJournalEntry(id, tool, canonical, "hash", status, Now, Now, 3)
+            {
+                MemoryOwnerId = tool == "memory.propose_change" ? memoryOwner ?? "owner" : null
+            };
         }
     }
 
     private sealed class ApprovalStore : IApprovalStore
     {
+        internal IReadOnlyList<ApprovalStorageRecord> Records { get; set; } = [];
         public ValueTask<ApprovalStorageRecord> CreateAsync(ApprovalStorageRecord approval, CancellationToken cancellationToken) =>
             throw new NotImplementedException();
         public ValueTask<ApprovalStorageRecord?> GetAsync(ApprovalId id, CancellationToken cancellationToken) =>
             throw new NotImplementedException();
         public ValueTask<IReadOnlyList<ApprovalStorageRecord>> ReadRecentForOwnerAsync(string ownerId, int maximumRequests, CancellationToken cancellationToken) =>
-            throw new NotImplementedException();
+            ValueTask.FromResult<IReadOnlyList<ApprovalStorageRecord>>(Records.Take(maximumRequests).ToArray());
         public ValueTask<ApprovalStorageRecord> ResolveAsync(ApprovalId id, string ownerId, string status, long expectedVersion,
             DateTimeOffset resolvedAtUtc, CancellationToken cancellationToken) => throw new NotImplementedException();
     }

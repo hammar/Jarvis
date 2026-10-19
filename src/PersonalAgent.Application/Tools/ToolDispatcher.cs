@@ -887,6 +887,7 @@ public sealed class ToolDispatcher : IToolDispatcher
         var budget = GetFailureBudget(request, draft);
         var currentProposal = GetProposalKey(request, draft);
         var turnActions = await journal.ReadForTurnAsync(request.OwnerId!, request.TurnId, cancellationToken);
+        var candidates = new Dictionary<ActionId, ActionJournalEntry>();
         foreach (var previous in turnActions)
         {
             if (previous.Id == currentActionId
@@ -930,7 +931,42 @@ public sealed class ToolDispatcher : IToolDispatcher
             if (string.Equals(currentProposal, previousProposal, StringComparison.Ordinal))
             {
                 RegisterPersistedWriteUncertainty(budget, previous);
+                candidates[previous.Id] = previous;
             }
+        }
+
+        if (candidates.Count == 0)
+        {
+            return;
+        }
+
+        await budget.Gate.WaitAsync(cancellationToken);
+        try
+        {
+            foreach (var previous in candidates.Values)
+            {
+                var current = await journal.GetAsync(previous.Id, cancellationToken)
+                    ?? throw new InvalidDataException("An unresolved action disappeared during recovery seeding.");
+                if (current.ActionType != previous.ActionType
+                    || !string.Equals(current.CanonicalArguments, previous.CanonicalArguments, StringComparison.Ordinal))
+                {
+                    budget.RegisterUncertainWrite(previous.Id);
+                    throw new InvalidDataException("An unresolved action changed during recovery seeding.");
+                }
+
+                if (current.MemoryInvalidated || current.Status is not ("Unknown" or "Executing"))
+                {
+                    budget.ClearUncertainWrite(current.Id);
+                }
+                else
+                {
+                    RegisterPersistedWriteUncertainty(budget, current);
+                }
+            }
+        }
+        finally
+        {
+            budget.Gate.Release();
         }
     }
 

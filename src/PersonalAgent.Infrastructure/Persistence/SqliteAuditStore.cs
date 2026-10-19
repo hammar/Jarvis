@@ -61,6 +61,39 @@ public sealed class SqliteAuditStore : IAuditStore
         command.Parameters.AddWithValue("$from", SqliteValue.Utc(fromUtc));
         command.Parameters.AddWithValue("$maximum", maximumEvents);
 
+        return await ReadEventsAsync(command, cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public async ValueTask<IReadOnlyList<AuditEventRecord>> ReadRecentActivityAsync(
+        DateTimeOffset fromUtc,
+        int maximumEvents,
+        CancellationToken cancellationToken)
+    {
+        if (maximumEvents is < 1 or > 1000)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maximumEvents), "The event limit must be from 1 through 1000.");
+        }
+
+        await using var connection = await database.OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT id, event_type, subject_id, payload_json, occurred_at_utc
+            FROM audit_events
+            WHERE occurred_at_utc >= $from
+              AND (event_type LIKE 'approval.%' OR event_type LIKE 'action.%')
+            ORDER BY occurred_at_utc DESC, id DESC
+            LIMIT $maximum;
+            """;
+        command.Parameters.AddWithValue("$from", SqliteValue.Utc(fromUtc));
+        command.Parameters.AddWithValue("$maximum", maximumEvents);
+        return await ReadEventsAsync(command, cancellationToken);
+    }
+
+    private static async ValueTask<IReadOnlyList<AuditEventRecord>> ReadEventsAsync(
+        SqliteCommand command,
+        CancellationToken cancellationToken)
+    {
         var events = new List<AuditEventRecord>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))

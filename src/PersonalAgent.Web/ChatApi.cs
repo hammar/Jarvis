@@ -285,6 +285,100 @@ internal static class ChatApi
                 OwnerHttpSecurity.GetOwnerId(context.User)!, new MemoryFactId(id), ct);
             return fact is null ? Results.NotFound() : Results.Ok(fact);
         });
+        api.MapGet("/memory/conflicts", async (
+            string? subject,
+            string? key,
+            Guid? excludeId,
+            HttpContext context,
+            MemoryProposalService proposals,
+            CancellationToken ct) =>
+        {
+            if (string.IsNullOrWhiteSpace(subject) || string.IsNullOrWhiteSpace(key)
+                || subject.Length > 256 || key.Length > 128)
+            {
+                return Results.Problem(statusCode: StatusCodes.Status400BadRequest, title: "Memory conflict query is invalid.");
+            }
+            var conflicts = await proposals.ReadConflictsAsync(
+                OwnerHttpSecurity.GetOwnerId(context.User)!,
+                subject,
+                key,
+                excludeId is null ? null : new MemoryFactId(excludeId.Value),
+                ct);
+            return Results.Ok(conflicts);
+        });
+        api.MapPost("/memory/proposals", async (
+            MemoryProposalRequest request,
+            HttpContext context,
+            IAntiforgery antiforgery,
+            MemoryProposalService proposals,
+            IAuditStore audit,
+            IClock clock,
+            CancellationToken ct) =>
+        {
+            if (!await OwnerHttpSecurity.ValidateCsrfAsync(antiforgery, context, ct))
+            {
+                return Results.Problem(statusCode: StatusCodes.Status400BadRequest, title: "Invalid request token.");
+            }
+            if (string.IsNullOrWhiteSpace(request.Operation)
+                || request.RequestId == Guid.Empty
+                || request.ConversationId == Guid.Empty
+                || request.ExpectedVersion < 0
+                || request.Conflicts?.Count > 100
+                || request.Conflicts?.Any(conflict => conflict is null) == true)
+            {
+                return Results.Problem(statusCode: StatusCodes.Status400BadRequest, title: "Memory proposal is invalid.");
+            }
+
+            var owner = OwnerHttpSecurity.GetOwnerId(context.User)!;
+            var change = new MemoryChange(
+                request.Operation,
+                request.FactId is { } factId ? new MemoryFactId(factId) : new MemoryFactId(request.RequestId),
+                request.ExpectedVersion,
+                request.Subject,
+                request.Key,
+                request.Value,
+                request.Conflicts?.Select(conflict =>
+                    new MemoryReference(new MemoryFactId(conflict.Id), conflict.Version)).ToArray() ?? [],
+                request.DistinguishingContext);
+            await audit.AppendAsync(new(
+                Guid.NewGuid(),
+                "memory.proposal_requested",
+                request.Operation,
+                JsonSerializer.Serialize(new { conversationId = request.ConversationId }),
+                clock.UtcNow), ct);
+            try
+            {
+                var result = await proposals.ProposeAsync(
+                    owner,
+                    new ConversationId(request.ConversationId),
+                    request.RequestId,
+                    change,
+                    ct);
+                await audit.AppendAsync(new(
+                    Guid.NewGuid(),
+                    "memory.proposal_completed",
+                    result.Result.ActionId?.Value.ToString("D") ?? string.Empty,
+                    JsonSerializer.Serialize(new { status = result.Result.Status, result.ConversationId }),
+                    clock.UtcNow), ct);
+                return Results.Ok(result);
+            }
+            catch (KeyNotFoundException)
+            {
+                return Results.NotFound();
+            }
+            catch (PersistenceConcurrencyException)
+            {
+                return Results.Conflict(new { title = "The memory fact or conflict set changed. Review current facts again." });
+            }
+            catch (TurnRequestConflictException)
+            {
+                return Results.Conflict(new { title = "This proposal request ID was already used for different content." });
+            }
+            catch (ArgumentException)
+            {
+                return Results.Problem(statusCode: StatusCodes.Status400BadRequest, title: "Memory proposal is invalid.");
+            }
+        });
         api.MapGet("/household", (HomeUiStatus home) =>
         {
             var catalog = home.Catalog;
@@ -322,7 +416,7 @@ internal static class ChatApi
             IAuditStore audit,
             IClock clock,
             CancellationToken ct) =>
-            Results.Ok(await audit.ReadSinceAsync(clock.UtcNow.AddDays(-30), 200, ct)));
+            Results.Ok(await audit.ReadRecentActivityAsync(clock.UtcNow.AddDays(-30), 200, ct)));
         api.MapPost("/conversations", async (
             HttpContext context,
             CreateConversationRequest request,
@@ -632,6 +726,18 @@ internal static class ChatApi
     internal sealed record SubmitTurnRequest(string RequestId, string Text);
     internal sealed record ApprovalDecisionRequest(long? ExpectedVersion, bool? Approved);
     internal sealed record ApprovalExpiryRequest(long? ExpectedVersion);
+    internal sealed record MemoryProposalRequest(
+        Guid ConversationId,
+        Guid RequestId,
+        string Operation,
+        Guid? FactId,
+        long ExpectedVersion,
+        string? Subject,
+        string? Key,
+        string? Value,
+        IReadOnlyList<MemoryConflictRequest>? Conflicts,
+        string? DistinguishingContext);
+    internal sealed record MemoryConflictRequest(Guid Id, long Version);
 }
 
 internal sealed record HomeUiStatus(HomeEntityCatalog? Catalog);

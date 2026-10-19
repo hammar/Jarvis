@@ -19,5 +19,14 @@ AppHost enables this only for E2E. Integration tests link the endpoint helper
 for real loopback HTTP tests with controlled callbacks; these callbacks are
 not remotely available in live profiles or model arguments.
 
+The managed Simulator/E2E model also recognizes a fixed set of literal demo
+commands: `list household entities`, `read temperature`, `turn on simulator
+lamp`, `turn off simulator lamp`, `search memory: <terms>`, and `remember:
+<subject> | <key> | <value>`. It emits calls only to the registered household
+and memory tools; all normal host validation, exact-intent checks, and approval
+requirements still apply. This is deterministic demonstration behavior, not a
+general-purpose model, and no demo command commits memory without owner
+approval. AppHost never starts this fixture in Local or Hybrid profiles.
+
 Entry point: `Program.cs`, HA routes: `HomeAssistantSimulator.cs`.
 Validate with `tools/validate.sh integration` and `tools/validate.sh aspire-e2e`.

@@ -110,7 +110,7 @@
             <section id="memory" class="surface-card memory-view" hidden aria-labelledby="memory-title">
                 <p class="eyebrow">Owner-confirmed, stored locally</p>
                 <h2 id="memory-title">Memory</h2>
-                <p>Facts are evidence, not instructions. Ask Jarvis to propose a change; nothing is saved until you approve its exact proposal.</p>
+                <p>Facts are evidence, not instructions. Enter an exact change here or ask Jarvis to propose one. Nothing is saved until you approve its exact proposal.</p>
                 <form id="memory-search-form">
                     <label for="memory-query">Search remembered facts</label>
                     <div class="inline-form">
@@ -119,9 +119,33 @@
                     </div>
                 </form>
                 <form id="memory-request-form">
-                    <label for="memory-request">Ask Jarvis to remember, edit, or forget a fact</label>
-                    <textarea id="memory-request" maxlength="8000" required placeholder="Describe the explicit fact or change to propose."></textarea>
-                    <button class="button button-primary" type="submit">Prepare proposal in chat</button>
+                    <label for="memory-operation">Change type</label>
+                    <select id="memory-operation">
+                        <option value="create">Remember a new fact</option>
+                        <option value="update">Edit this fact</option>
+                        <option value="delete">Forget this fact</option>
+                    </select>
+                    <input id="memory-target-id" type="hidden" />
+                    <input id="memory-target-version" type="hidden" />
+                    <label for="memory-subject">Subject</label>
+                    <input id="memory-subject" maxlength="256" required />
+                    <label for="memory-key">Fact key</label>
+                    <input id="memory-key" maxlength="128" required />
+                    <label for="memory-value">Exact fact value</label>
+                    <textarea id="memory-value" maxlength="8192" required></textarea>
+                    <div id="memory-conflict-review" hidden>
+                        <p>Review these current facts before choosing how this proposal handles the conflicts:</p>
+                        <ul id="memory-conflict-list" class="activity-list"></ul>
+                        <label for="memory-conflict-choice">Conflict decision</label>
+                        <select id="memory-conflict-choice">
+                            <option value="">Choose how to resolve these conflicts</option>
+                            <option value="retain_both">Keep a separate fact with distinguishing context</option>
+                            <option value="supersede">Replace the matching facts</option>
+                        </select>
+                        <label for="memory-distinguishing-context">Distinguishing context (required to keep both)</label>
+                        <input id="memory-distinguishing-context" maxlength="512" />
+                    </div>
+                    <button class="button button-primary" type="submit">Prepare exact proposal</button>
                 </form>
                 <p id="memory-status" class="inline-status" role="status"></p>
                 <ul id="memory-list" class="activity-list"></ul>

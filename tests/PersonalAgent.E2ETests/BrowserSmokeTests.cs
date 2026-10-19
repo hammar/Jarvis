@@ -1987,7 +1987,7 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
             await page.GetByRole(AriaRole.Button, new PageGetByRoleOptions { Name = "Memory" }).ClickAsync();
             await page.Locator("#memory-status").GetByText("0 active facts").WaitForAsync();
             Assert.Contains("No active remembered facts", await page.Locator("#memory-list").InnerTextAsync(), StringComparison.Ordinal);
-            Assert.True(await page.GetByLabel("Ask Jarvis to remember, edit, or forget a fact").IsVisibleAsync());
+            Assert.True(await page.GetByLabel("Change type").IsVisibleAsync());
 
             await page.GetByRole(AriaRole.Button, new PageGetByRoleOptions { Name = "Household" }).ClickAsync();
             await page.GetByText("connection probe: not-run", new PageGetByTextOptions { Exact = false }).WaitForAsync();
@@ -2295,6 +2295,88 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
             await page.GetByRole(AriaRole.Button, new PageGetByRoleOptions { Name = "Memory" }).ClickAsync();
             await page.Locator("#memory-list").GetByText("synthetic room · lamp").WaitForAsync();
             Assert.Contains("blue", await page.Locator("#memory-list").InnerTextAsync(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            await isolated.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "BrowserE2E")]
+    public async Task MemoryUiCreatesAndApprovesTypedProposalWithoutInference()
+    {
+        var isolated = new SimulatorHostFixture();
+        await isolated.InitializeAsync();
+        try
+        {
+            using var playwright = await Playwright.CreateAsync();
+            await using var browser = await playwright.Chromium.LaunchAsync(
+                new BrowserTypeLaunchOptions { Headless = true });
+            var page = await browser.NewPageAsync();
+            await page.GotoAsync(isolated.WebClient.BaseAddress!.ToString());
+            await page.WaitForFunctionAsync(
+                "() => !document.getElementById('auth').hidden || !document.getElementById('chat').hidden");
+            if (!await page.Locator("#auth").IsHiddenAsync())
+            {
+                await page.GetByLabel("Passphrase").FillAsync(SimulatorHostFixture.OwnerPassphrase);
+                await page.Locator("#auth-submit").ClickAsync();
+                await page.WaitForFunctionAsync("() => !authenticationInFlight && !document.getElementById('chat').hidden");
+            }
+
+            await page.GetByRole(AriaRole.Button, new PageGetByRoleOptions { Name = "Memory" }).ClickAsync();
+            await page.GetByLabel("Subject").FillAsync("typed room");
+            await page.GetByLabel("Fact key").FillAsync("curtain");
+            await page.GetByLabel("Exact fact value").FillAsync("linen");
+            var proposalResponseTask = page.WaitForResponseAsync(response =>
+                response.Url.EndsWith("/api/memory/proposals", StringComparison.Ordinal)
+                && response.Request.Method == "POST");
+            await page.GetByRole(AriaRole.Button, new PageGetByRoleOptions { Name = "Prepare exact proposal" }).ClickAsync();
+            var proposalResponse = await proposalResponseTask;
+            Assert.Equal(200, proposalResponse.Status);
+            await page.Locator("#memory-status").GetByText("inference was not required").WaitForAsync();
+            Assert.Empty(await page.Locator("#messages .user-message").AllTextContentsAsync());
+
+            await page.GetByRole(AriaRole.Button, new PageGetByRoleOptions { Name = "Approvals" }).ClickAsync();
+            await page.Locator("#approval-list").GetByText(
+                "Tool: memory.propose_change",
+                new LocatorGetByTextOptions { Exact = false }).WaitForAsync();
+            await page.Locator("#approval-list details summary").ClickAsync();
+            Assert.Contains("typed room", await page.Locator("#approval-list").InnerTextAsync(), StringComparison.Ordinal);
+            var decisionResponseTask = page.WaitForResponseAsync(response =>
+                response.Url.Contains("/api/approvals/", StringComparison.Ordinal)
+                && response.Request.Method == "POST");
+            await page.GetByRole(AriaRole.Button, new PageGetByRoleOptions { Name = "Approve exact action" }).ClickAsync();
+            Assert.Equal(200, (await decisionResponseTask).Status);
+
+            await page.GetByRole(AriaRole.Button, new PageGetByRoleOptions { Name = "Memory", Exact = true }).ClickAsync();
+            await page.Locator("#memory-list").GetByText("typed room · curtain").WaitForAsync();
+            Assert.Contains("linen", await page.Locator("#memory-list").InnerTextAsync(), StringComparison.Ordinal);
+
+            await page.GetByLabel("Subject").FillAsync("typed room");
+            await page.GetByLabel("Fact key").FillAsync("curtain");
+            await page.GetByLabel("Exact fact value").FillAsync("velvet");
+            await page.GetByRole(AriaRole.Button, new PageGetByRoleOptions { Name = "Prepare exact proposal" }).ClickAsync();
+            await page.Locator("#memory-conflict-review").WaitForAsync(new LocatorWaitForOptions
+            {
+                State = WaitForSelectorState.Visible
+            });
+            Assert.Contains("linen", await page.Locator("#memory-conflict-list").InnerTextAsync(), StringComparison.Ordinal);
+            await page.GetByLabel("Conflict decision").SelectOptionAsync("retain_both");
+            await page.GetByLabel("Distinguishing context (required to keep both)").FillAsync("guest room preference");
+            var conflictProposalTask = page.WaitForResponseAsync(response =>
+                response.Url.EndsWith("/api/memory/proposals", StringComparison.Ordinal)
+                && response.Request.Method == "POST");
+            await page.GetByRole(AriaRole.Button, new PageGetByRoleOptions { Name = "Prepare exact proposal" }).ClickAsync();
+            Assert.Equal(200, (await conflictProposalTask).Status);
+            await page.Locator("#memory-status").GetByText("inference was not required").WaitForAsync();
+
+            await page.GetByRole(AriaRole.Button, new PageGetByRoleOptions { Name = "Approvals" }).ClickAsync();
+            await page.GetByRole(AriaRole.Button, new PageGetByRoleOptions { Name = "Approve exact action" }).ClickAsync();
+            await page.Locator("#approvals-status").GetByText("0 pending approvals").WaitForAsync();
+            await page.GetByRole(AriaRole.Button, new PageGetByRoleOptions { Name = "Memory", Exact = true }).ClickAsync();
+            await page.Locator("#memory-list").GetByText("velvet").WaitForAsync();
+            Assert.Contains("guest room preference", await page.Locator("#memory-list").InnerTextAsync(), StringComparison.Ordinal);
         }
         finally
         {

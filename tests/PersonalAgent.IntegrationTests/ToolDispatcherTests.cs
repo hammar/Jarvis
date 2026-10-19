@@ -315,6 +315,57 @@ public sealed class ToolDispatcherTests
 
     [Fact]
     [Trait("Category", "Integration")]
+    public async Task HistorySeedingDoesNotResurrectUncertaintyAfterMatchingExecutionSucceeds()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var executionStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseExecution = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var execution = 0;
+        fixture.SetExecution(async (_, _, cancellationToken) =>
+        {
+            if (Interlocked.Increment(ref execution) == 1)
+            {
+                executionStarted.SetResult();
+                await releaseExecution.Task.WaitAsync(cancellationToken);
+            }
+
+            return new(ToolExecutionStatus.Completed, """{"ok":true}""", null);
+        });
+
+        var snapshotTaken = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var resumeHistoryRead = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var pauseNextHistoryRead = 0;
+        var journal = new PausedJournal(
+            fixture.Journal,
+            (_, _) => Task.CompletedTask,
+            afterTurnRead: async (entries, cancellationToken) =>
+            {
+                if (Interlocked.Exchange(ref pauseNextHistoryRead, 0) == 1)
+                {
+                    Assert.Contains(entries, entry => entry.Status == "Executing");
+                    snapshotTaken.SetResult();
+                    await resumeHistoryRead.Task.WaitAsync(cancellationToken);
+                }
+            });
+        var dispatcher = fixture.CreateRestartedDispatcher(journal);
+
+        var first = dispatcher.DispatchAsync(PorchRequest with { CallId = "history-first" }, default).AsTask();
+        await executionStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Interlocked.Exchange(ref pauseNextHistoryRead, 1);
+
+        var second = dispatcher.DispatchAsync(PorchRequest with { CallId = "history-second" }, default).AsTask();
+        await snapshotTaken.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        releaseExecution.SetResult();
+        Assert.Equal("Succeeded", (await first.WaitAsync(TimeSpan.FromSeconds(5))).Status);
+        resumeHistoryRead.SetResult();
+
+        var secondResult = await second.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal("Succeeded", secondResult.Status);
+        Assert.Equal(2, fixture.ExecutionCount);
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
     public async Task MalformedSameTurnUnknownEnvelopeFailsClosedBeforeFreshWrite()
     {
         using var fixture = await Fixture.CreateAsync(
@@ -1813,7 +1864,8 @@ public sealed class ToolDispatcherTests
         {
             dispatcher ??= Dispatcher;
             var memories = new SqliteConfirmedMemoryStore(Database, Clock);
-            var proposals = new MemoryProposalService(memories, Journal, Approvals, dispatcher);
+            var proposals = new MemoryProposalService(
+                memories, Journal, Approvals, dispatcher, new SqliteConversationStore(Database, Clock), Clock);
             return new(ApprovalStore, Journal, Approvals, dispatcher, memories, proposals, Clock);
         }
 
@@ -1887,7 +1939,8 @@ public sealed class ToolDispatcherTests
     private sealed class PausedJournal(
         IActionJournalStore inner,
         Func<ActionJournalEntry?, CancellationToken, Task> afterRead,
-        Func<CancellationToken, Task>? beforeExecuting = null) : IActionJournalStore
+        Func<CancellationToken, Task>? beforeExecuting = null,
+        Func<IReadOnlyList<ActionJournalEntry>, CancellationToken, Task>? afterTurnRead = null) : IActionJournalStore
     {
         public ValueTask<ActionJournalEntry> CreateAsync(ActionJournalEntry entry, CancellationToken cancellationToken) =>
             inner.CreateAsync(entry, cancellationToken);
@@ -1896,9 +1949,16 @@ public sealed class ToolDispatcherTests
             string ownerId, int maximumActions, CancellationToken cancellationToken) =>
             inner.ReadRecentForOwnerAsync(ownerId, maximumActions, cancellationToken);
 
-        public ValueTask<IReadOnlyList<ActionJournalEntry>> ReadForTurnAsync(
-            string ownerId, TurnId turnId, CancellationToken cancellationToken) =>
-            inner.ReadForTurnAsync(ownerId, turnId, cancellationToken);
+        public async ValueTask<IReadOnlyList<ActionJournalEntry>> ReadForTurnAsync(
+            string ownerId, TurnId turnId, CancellationToken cancellationToken)
+        {
+            var entries = await inner.ReadForTurnAsync(ownerId, turnId, cancellationToken);
+            if (afterTurnRead is not null)
+            {
+                await afterTurnRead(entries, cancellationToken);
+            }
+            return entries;
+        }
 
         public async ValueTask<ActionJournalEntry?> GetAsync(ActionId id, CancellationToken cancellationToken)
         {

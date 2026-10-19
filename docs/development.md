@@ -140,8 +140,16 @@ made.
 The owner UI offers Approvals, Memory, Household, and Activity alongside
 Chat and Settings. Simulator displays only its controlled Home Assistant
 allowlist and marks the connection probe `not-run`; it does not require or
-forward household credentials. Memory edits/deletions begin as chat proposals
-and remain unchanged until the exact owner-reviewed proposal is approved.
+forward household credentials. The Memory surface can create, edit, delete,
+and explicitly resolve conflicts through typed owner-entered proposals without
+model inference; chat may also propose changes. Facts remain unchanged until
+the exact owner-reviewed proposal is approved. The Simulator model recognizes
+only the documented demo commands `list household entities`, `read
+temperature`, `turn on simulator lamp`, `turn off simulator lamp`, `search
+memory: <terms>`, and `remember: <subject> | <key> | <value>`. This behavior is
+limited to the managed Simulator/E2E model fixture; live profiles never launch
+or configure it. A remembered fact is still only proposed until explicit
+approval.
 
 Bare loopback Ollama origins (with no path or `/`) are normalized to the
 OpenAI-compatible `/v1` API base. Explicit API paths, such as `/v1` or a

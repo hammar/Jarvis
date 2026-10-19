@@ -1240,6 +1240,16 @@ public interface IAuditStore
         DateTimeOffset fromUtc,
         int maximumEvents,
         CancellationToken cancellationToken);
+
+    /// <summary>Reads the newest bounded page of owner-visible action and approval events.</summary>
+    /// <param name="fromUtc">Inclusive UTC lower bound.</param>
+    /// <param name="maximumEvents">Maximum results, from 1 through 1000.</param>
+    /// <param name="cancellationToken">Token that cancels the read.</param>
+    /// <returns>Matching events newest first; unrelated event types do not consume the page limit.</returns>
+    ValueTask<IReadOnlyList<AuditEventRecord>> ReadRecentActivityAsync(
+        DateTimeOffset fromUtc,
+        int maximumEvents,
+        CancellationToken cancellationToken);
 }
 
 /// <summary>Reports a stale or conflicting optimistic-concurrency update.</summary>

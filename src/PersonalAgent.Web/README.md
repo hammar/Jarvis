@@ -71,14 +71,17 @@ profile; normal Simulator, Local, and Hybrid hosts generate a fresh token.
   authenticated `GET /health/ready`, and public `GET /health/live`.
 - Authenticated owner-only `GET /api/actions`, `GET /api/approvals`,
   `POST /api/approvals/{id}/decision`, `GET /api/memory`,
-  `GET /api/memory/{id}`, `GET /api/household`, and `GET /api/audit`.
+  `GET /api/memory/{id}`, `GET /api/memory/conflicts`,
+  `POST /api/memory/proposals`, `GET /api/household`, and `GET /api/audit`.
   Approval decisions require the expected approval version and the same
   antiforgery protection as other cookie-authenticated mutations. Action and
   approval lists are bounded and owner-filtered; previews omit host identity,
   source request and secret material. The household view reports the resolved
   allowlist and explicitly says `connectionProbe: not-run`; configuration is
-  not evidence of current connectivity. Memory edits and deletion are chat
-  proposals, and facts change only after the exact proposal is approved.
+  not evidence of current connectivity. Typed owner-entered memory proposals
+  and model-proposed changes preserve durable source provenance and expected
+  versions; conflicts require explicit review, and facts change only after
+  approval of the exact proposal.
 
 Before sending a turn, the browser temporarily stores its text, conversation,
 and request ID in tab-scoped `sessionStorage`. This lets an owner safely retry

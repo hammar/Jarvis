@@ -199,9 +199,10 @@ only, not complete WCAG conformance or assistive-technology behavior.
 
 ## Validation and remaining limits
 
-Final credential-free gates ran on native macOS with the pinned .NET SDK and
-isolated simulator/SQLite data, against merge base
+The R8/R9 follow-up's credential-free gate baseline ran on native macOS with
+the pinned .NET SDK and isolated simulator/SQLite data, against merge base
 `ede7885ca87cc6bf1919f3b670f031f905f04f23`:
+these results predate R10–R14 and are retained as historical evidence only.
 
 | Command | Result |
 | --- | --- |
@@ -249,3 +250,44 @@ current branch has no newer `origin/main` commits to integrate. The final
 exact-commit independent review of R8/R9 and the complete cumulative M2-01/02/03
 ledgers remains required before owner acceptance. The owner retains the
 acceptance and merge decisions.
+
+### Exact-commit review follow-up: R10–R14
+
+An independent review of `f03cf8644b0e8ee8d4160de439280476a7fbdaa9` reported
+five additional findings. The follow-up implementation and focused regressions
+are in progress; the previous full-gate evidence above predates these changes.
+
+| Reference | Severity | Finding | Follow-up disposition |
+| --- | --- | --- | --- |
+| M2-04-R10 | High | Memory edits/deletions and conflict resolution depended on model inference; the Memory surface had no typed proposal path. | Added authenticated `/api/memory/conflicts` and CSRF-protected `/api/memory/proposals`, plus typed create/edit/delete controls and explicit current-conflict supersede/retain-both decisions. `MemoryProposalService` persists owner source provenance, binds optimistic target/conflict versions, uses a stable request identity for exact replay, and routes only through the existing dispatcher/approval policy. `OwnerEnteredCreateEditAndDeleteProposalsNeedNoModelInference`, `OwnerEnteredConflictProposalRejectsAStaleReviewedVersion`, and `MemoryUiCreatesAndApprovesTypedProposalWithoutInference` cover durable SQLite and browser approval/retain-both flow. Full gates and exact-commit review remain required. |
+| M2-04-R11 | Medium | Resuming an already-approved but unclaimed memory proposal attempted to settle an already-Approved decision; expired memory approvals could not be finalized. | The approval workflow now completes an already-Approved memory action from its durable host proposal and permits expiry finalization only for the matching owner-attributed memory action. `AlreadyApprovedUnclaimedMemoryProposalCanResumeAfterInterruption`, `ExpiredApprovedUnclaimedMemoryProposalCanBeFinalizedWithoutCommit`, and `ApprovalWorkflowExpiryTests` verify resume, host-clock expiry, no commit on finalization, and owner attribution. Full gates and exact-commit review remain required. |
+| M2-04-R12 | High | A stale action-history snapshot could register uncertainty after a matching write had already succeeded, blocking equivalent future writes. | Candidate uncertainty is provisionally seeded, then serialized through the proposal gate and refreshed from durable action state before retention. `HistorySeedingDoesNotResurrectUncertaintyAfterMatchingExecutionSucceeds` pauses the history read, completes the matching write, then resumes stale history and verifies the durable success is not converted to uncertainty. Full gates and exact-commit review remain required. |
+| M2-04-R13 | Medium | The ordinary Simulator model returned fixed text rather than deterministic tool calls, making the documented household/memory demo non-runnable without E2E-only injection. | The managed Simulator/E2E model now recognizes a small documented set of literal read/write/memory commands and emits only registered tool calls. Every call still passes the production authorization, explicit-intent, exact-approval, and memory provenance boundaries. `SimulatorDemoMapsDocumentedCommandsToBoundedRegisteredTools` and `WebChatRunsDocumentedSimulatorLightCommandWithoutFixtureInjection` verify the model protocol and full controlled Web/HA path. Local/Hybrid never launch the fixture; full gates and exact-commit review remain required. |
+| M2-04-R14 | Medium | Activity read the oldest bounded audit page and filtered afterward, omitting recent action/approval events. | Added a dedicated SQLite `ReadRecentActivityAsync` query that filters the requested event families before applying a newest-first bound; general audit reads retain their previous ordering. `AuditPageIncludesNewestEventsBeforeApplyingItsBoundedLimit` adds 205 unrelated events and 202 approval events, then verifies the newest bounded activity page. Full gates and exact-commit review remain required. |
+
+### R10–R14 validation
+
+Final credential-free validation for the current follow-up source ran on native
+macOS with the pinned .NET SDK and isolated Simulator/SQLite data. The initial
+coverage run exposed a unit-only Application branch shortfall and an M2-03
+memory-proposal critical-module shortfall; focused behavior tests were added,
+and the refreshed unit and combined coverage gates passed.
+
+| Command | Result |
+| --- | --- |
+| `tools/validate.sh build` | Passed; Release build, format and analyzers, zero warnings/errors. |
+| `tools/validate.sh architecture` | Passed; 6/6 discovered tests. |
+| `tools/validate.sh unit` | Passed; 335/335 discovered tests. |
+| `tools/validate.sh integration` | Passed; 456/456 discovered tests. |
+| `tools/validate.sh sdk-contracts` | Passed; actual pinned-runtime probes and 57/57 contract tests. |
+| `tools/validate.sh coverage` | Passed; changed executable lines 96.1% (811/844). Application 98.4% lines / 94.0% branches; Infrastructure 94.2% / 82.6%; ServiceDefaults 100% / 100%; Web 98.0% / 79.0%; all critical-module and unit-only thresholds met. |
+| `tools/validate.sh aspire-e2e` | Passed; 12/12 out-of-process scenarios. |
+| `tools/validate.sh browser-e2e` | Passed; 34/34 Playwright scenarios; the deliberately failing browser gate probe was discovered and failed as expected. |
+| `tools/validate.sh docs` | Passed; all internal Markdown links resolve. |
+
+The full M2-01/02/03 finding ledgers remain recorded above and must be included
+in independent exact-commit review. That review of the current follow-up
+revision remains pending. No live Home Assistant credentials, private
+household data, cloud inference, or physical devices were used. Linux CI, live
+HA/provider availability, physical-effect causality, human observations, and
+assistive-technology certification remain unexercised.

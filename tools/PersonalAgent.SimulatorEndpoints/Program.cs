@@ -17,6 +17,8 @@ var delayNextStreamResponse = 0;
 var delayNextStreamFrame = 0;
 var failStreamResponses = 0;
 var nextToolCalls = new ConcurrentQueue<SimulatorToolCall>();
+var demoEnabled = builder.Configuration.GetValue<bool>("JARVIS_SIMULATOR_DEMO_ENABLED");
+var demoToolCallCount = 0;
 var delayedStreamStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 var firstDelayedFrameWritten = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 app.MapGet("/health/live", () => Results.Ok());
@@ -95,7 +97,20 @@ if (kind == "model")
         using var request = await JsonDocument.ParseAsync(
             context.Request.Body,
             cancellationToken: context.RequestAborted);
-        if (nextToolCalls.TryDequeue(out var toolCall))
+        SimulatorToolCall? toolCall = null;
+        if (nextToolCalls.TryDequeue(out var controlledToolCall))
+        {
+            toolCall = controlledToolCall;
+        }
+        else if (demoEnabled)
+        {
+            toolCall = CreateDemoToolCall(request.RootElement);
+            if (toolCall is not null)
+            {
+                Interlocked.Increment(ref demoToolCallCount);
+            }
+        }
+        if (toolCall is not null)
         {
             var responseJson = JsonSerializer.Serialize(new
             {
@@ -176,7 +191,9 @@ if (kind == "model")
     app.MapGet("/fixture/model", () => Results.Json(new
     {
         provider = "simulator",
-        completion = "controlled fixture response"
+        completion = "controlled fixture response",
+        demoEnabled,
+        demoToolCallCount = Volatile.Read(ref demoToolCallCount)
     }));
 }
 else
@@ -245,6 +262,74 @@ async Task WriteStreamingCompletionAsync(HttpResponse response, CancellationToke
         }
     }
 
+}
+
+static SimulatorToolCall? CreateDemoToolCall(JsonElement request)
+{
+    if (!request.TryGetProperty("messages", out var messages) || messages.ValueKind != JsonValueKind.Array)
+    {
+        return null;
+    }
+
+    var messageList = messages.EnumerateArray().ToArray();
+    var lastMessage = messageList.LastOrDefault();
+    if (lastMessage.ValueKind != JsonValueKind.Object
+        || !lastMessage.TryGetProperty("role", out var lastRole)
+        || lastRole.GetString() != "user"
+        || !lastMessage.TryGetProperty("content", out var lastContent)
+        || lastContent.ValueKind != JsonValueKind.String)
+    {
+        return null;
+    }
+    var lastUserMessage = lastContent.GetString();
+    if (string.IsNullOrWhiteSpace(lastUserMessage))
+    {
+        return null;
+    }
+
+    var command = lastUserMessage.Trim();
+    if (command.Equals("list household entities", StringComparison.OrdinalIgnoreCase))
+    {
+        return new("home.list_entities", "{}");
+    }
+    if (command.Equals("read temperature", StringComparison.OrdinalIgnoreCase))
+    {
+        return new("home.get_state", """{"entity":"sensor.temperature"}""");
+    }
+    if (command.Equals("turn on simulator lamp", StringComparison.OrdinalIgnoreCase))
+    {
+        return new("home.set_light", """{"entity":"simulator lamp","on":true}""");
+    }
+    if (command.Equals("turn off simulator lamp", StringComparison.OrdinalIgnoreCase))
+    {
+        return new("home.set_light", """{"entity":"simulator lamp","on":false}""");
+    }
+
+    const string searchPrefix = "search memory: ";
+    if (command.StartsWith(searchPrefix, StringComparison.OrdinalIgnoreCase))
+    {
+        var query = command[searchPrefix.Length..].Trim();
+        return query.Length is > 0 and <= 512
+            ? new("memory.search", JsonSerializer.Serialize(new { Query = query, Limit = 10 }))
+            : null;
+    }
+
+    const string rememberPrefix = "remember: ";
+    if (command.StartsWith(rememberPrefix, StringComparison.OrdinalIgnoreCase))
+    {
+        var fields = command[rememberPrefix.Length..].Split('|', StringSplitOptions.TrimEntries);
+        if (fields.Length == 3 && fields.All(field => field.Length is > 0 and <= 8192))
+        {
+            return new("memory.propose_change", JsonSerializer.Serialize(new
+            {
+                Operation = "create",
+                Subject = fields[0],
+                Key = fields[1],
+                Value = fields[2]
+            }));
+        }
+    }
+    return null;
 }
 
 internal sealed class SimulatorClock : IClock

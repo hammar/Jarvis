@@ -126,6 +126,15 @@ managed Home Assistant process. It checks the SSE tool lifecycle and terminal
 event, verified journal status, and exactly one write to the isolated
 simulator. The response is controlled by an E2E-only fixture endpoint; it does
 not establish live model behavior or physical-device causality.
+`AspireSimulatorTests.SimulatorDemoMapsDocumentedCommandsToBoundedRegisteredTools`
+checks the Simulator/E2E model fixture's fixed household and memory demo
+commands; `WebChatRunsDocumentedSimulatorLightCommandWithoutFixtureInjection`
+proves a documented exact light command traverses the managed tool and fake
+Home Assistant path without the E2E call-injection control.
+`ConfirmedMemoryTests.OwnerEnteredCreateEditAndDeleteProposalsNeedNoModelInference`
+and `BrowserSmokeTests.MemoryUiCreatesAndApprovesTypedProposalWithoutInference`
+cover the provider-independent typed proposal route, durable action replay,
+exact approval, edit/delete versions, and explicit retain-both conflict review.
 `BrowserSmokeTests.HouseholdMemoryApprovalAndActivitySurfacesReflowAndKeepKeyboardFocusVisible`
 signs in through Playwright, forces a controlled `/api/status` failure, then
 verifies the owner surfaces still load and render empty-state/status content

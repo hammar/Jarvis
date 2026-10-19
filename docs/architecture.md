@@ -86,7 +86,11 @@ No fact text is inserted into host instructions or treated as owner intent.
 `memory.propose_change` uses the existing exact-action approval flow. The
 journaled canonical change is the pending draft; fact mutation requires an
 approved, unexpired owner-bound action. The host's `MemoryProposalService`
-can preview, resolve and complete it without a live callback. Normalized
+can preview, resolve and complete it without a live callback. It also accepts
+typed owner-entered proposals directly from the Memory surface: the host
+persists a source message and idempotency key, binds the authenticated owner,
+checks target/conflict versions before dispatch, and still requires approval
+of the immutable action. Normalized
 subject/key conflicts require exact-version supersession or distinguishing
 context to retain both. The full conflict set is checked under SQLite's
 immediate transaction, including concurrent insertions.

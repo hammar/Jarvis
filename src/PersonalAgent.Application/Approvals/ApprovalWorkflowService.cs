@@ -177,8 +177,27 @@ public sealed class ApprovalWorkflowService
 
         if (envelope.ToolName == "memory.propose_change")
         {
-            var memoryResult = await memoryProposals.ResolveAsync(
-                ownerId, action.Id, expectedVersion, approved, cancellationToken);
+            ToolDispatchResult memoryResult;
+            if (approval.Status == "Approved")
+            {
+                if (!approved || approval.ExpectedVersion != expectedVersion)
+                {
+                    throw new PersistenceConcurrencyException(
+                        "The approved action cannot be changed or its version has changed.");
+                }
+                if (action.Status != "AwaitingApproval")
+                {
+                    return action.Outcome
+                        ?? new(action.Status, null, "recorded_action_outcome", action.Id, approvalId);
+                }
+
+                memoryResult = await memoryProposals.CompleteAsync(ownerId, action.Id, cancellationToken);
+            }
+            else
+            {
+                memoryResult = await memoryProposals.ResolveAsync(
+                    ownerId, action.Id, expectedVersion, approved, cancellationToken);
+            }
             if (memoryResult.Status != "AwaitingApproval")
             {
                 dispatcher.ReleaseApproval(action.Id);
@@ -272,10 +291,14 @@ public sealed class ApprovalWorkflowService
         }
 
         var envelope = ReadEnvelope(action);
+        var isHomeAction = envelope.ToolName is "home.set_light" or "home.set_temperature";
+        var isMemoryAction = envelope.ToolName == "memory.propose_change"
+            && action.ActionType == "memory.propose_change"
+            && string.Equals(action.MemoryOwnerId, ownerId, StringComparison.Ordinal);
         if (!string.Equals(envelope.OwnerId, ownerId, StringComparison.Ordinal)
-            || envelope.ToolName is not ("home.set_light" or "home.set_temperature"))
+            || !(isHomeAction || isMemoryAction))
         {
-            throw new InvalidDataException("Only an owner-bound Home Assistant action can be finalized as expired.");
+            throw new InvalidDataException("Only an owner-bound Home Assistant or memory action can be finalized as expired.");
         }
         if (action.Status != "AwaitingApproval")
         {

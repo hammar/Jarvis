@@ -237,6 +237,36 @@ public sealed class MemoryTests
     }
 
     [Fact]
+    public async Task OwnerEnteredConflictPreviewIsBoundedAndCanExcludeItsEditTarget()
+    {
+        var fixture = new Fixture();
+        var target = new MemoryFact(Id, "subject", "key", "old", "source", "LocalOnly", 2);
+        var sibling = new MemoryFact(MemoryFactId.New(), "subject", "key", "new", "source", "LocalOnly", 1);
+        fixture.Memory.Facts = [target, sibling];
+
+        Assert.Equal([target, sibling],
+            await fixture.Proposals.ReadConflictsAsync("owner", "subject", "key", null, default));
+        Assert.Equal([sibling],
+            await fixture.Proposals.ReadConflictsAsync("owner", "subject", "key", Id, default));
+        await Assert.ThrowsAsync<ArgumentException>(async () =>
+            await fixture.Proposals.ReadConflictsAsync("", "subject", "key", null, default));
+        await Assert.ThrowsAsync<ArgumentException>(async () =>
+            await fixture.Proposals.ReadConflictsAsync("owner", " ", "key", null, default));
+        await Assert.ThrowsAsync<ArgumentException>(async () =>
+            await fixture.Proposals.ReadConflictsAsync("owner", "subject", new string('x', 129), null, default));
+        await Assert.ThrowsAsync<ArgumentException>(async () =>
+            await fixture.Proposals.ReadConflictsAsync("owner", new string('x', 257), "key", null, default));
+    }
+
+    [Fact]
+    public async Task OwnerEnteredProposalRequiresStableRequestIdentityBeforeReadingConversation()
+    {
+        var fixture = new Fixture();
+        await Assert.ThrowsAsync<ArgumentException>(() => fixture.Proposals.ProposeAsync(
+            "owner", ConversationId.New(), Guid.Empty, Create, default).AsTask());
+    }
+
+    [Fact]
     public async Task ChangedMemoryAndAbsentReceiptsReturnTruthfulFailureRatherThanSuccess()
     {
         var fixture = new Fixture();
@@ -312,7 +342,8 @@ public sealed class MemoryTests
         internal ConversationMessage Source { get; } = new(Guid.NewGuid(), ConversationId.New(), "user", "explicit request", DateTimeOffset.UtcNow);
         internal string LastCall { get; private set; } = "";
         internal ToolDispatcher Dispatcher { get; }
-        internal MemoryProposalService Proposals => new(Memory, Journal, Approvals, Dispatcher);
+        internal MemoryProposalService Proposals =>
+            new(Memory, Journal, Approvals, Dispatcher, null!, Clock);
         internal Fixture(ProviderKind provider = ProviderKind.Local)
         {
             Memory.Source = Source;

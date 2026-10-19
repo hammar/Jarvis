@@ -1542,6 +1542,37 @@ public sealed class SqlitePersistenceTests
 
     [Fact]
     [Trait("Category", "Integration")]
+    public async Task AuditPageIncludesNewestEventsBeforeApplyingItsBoundedLimit()
+    {
+        using var file = IsolatedDatabaseFile.Create();
+        var database = new SqliteDatabase(file.Path);
+        await database.InitializeAsync();
+        var audit = new SqliteAuditStore(database);
+        for (var index = 0; index < 205; index++)
+        {
+            await audit.AppendAsync(NewAudit(Now.AddMinutes(index)) with
+            {
+                EventType = $"conversation.turn-{index:D3}"
+            }, CancellationToken.None);
+        }
+        for (var index = 0; index < 202; index++)
+        {
+            await audit.AppendAsync(NewAudit(Now.AddMinutes(1000 + index)) with
+            {
+                EventType = $"approval.test-{index:D3}"
+            }, CancellationToken.None);
+        }
+
+        var events = await audit.ReadRecentActivityAsync(Now, 200, CancellationToken.None);
+
+        Assert.Equal(200, events.Count);
+        Assert.Equal("approval.test-201", events[0].EventType);
+        Assert.Equal("approval.test-002", events[^1].EventType);
+        Assert.All(events, item => Assert.StartsWith("approval.", item.EventType, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
     public async Task RetentionUsesDefaultAndOverrideWindowsAndKeepsDurableState()
     {
         Assert.Equal(new SqliteRetentionOptions(), new SqliteRetentionOptions(90, 30));
