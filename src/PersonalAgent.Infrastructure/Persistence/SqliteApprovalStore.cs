@@ -94,12 +94,28 @@ public sealed class SqliteApprovalStore : IApprovalStore
             SELECT id, action_id, owner_id, status, created_at_utc, expires_at_utc, resolved_at_utc, version
             FROM approval_requests
             WHERE owner_id = $owner
-            ORDER BY CASE WHEN status = 'Pending' OR EXISTS (
+            ORDER BY CASE WHEN status IN ('Approved', 'Rejected', 'Expired') AND EXISTS (
                               SELECT 1 FROM actions
                               WHERE actions.id = approval_requests.action_id
                                 AND actions.status IN ('AwaitingApproval', 'Executing')
+                                AND actions.memory_invalidated = 0
                           )
-                          THEN 0 ELSE 1 END,
+                          THEN 0
+                          WHEN status = 'Pending' AND EXISTS (
+                              SELECT 1 FROM actions
+                              WHERE actions.id = approval_requests.action_id
+                                AND actions.status = 'AwaitingApproval'
+                                AND actions.memory_invalidated = 0
+                          )
+                          THEN 1
+                          WHEN EXISTS (
+                              SELECT 1 FROM actions
+                              WHERE actions.id = approval_requests.action_id
+                                AND actions.status IN ('AwaitingApproval', 'Executing')
+                                AND actions.memory_invalidated = 0
+                          )
+                          THEN 2
+                          WHEN status = 'Pending' THEN 3 ELSE 4 END,
                      created_at_utc DESC, id
             LIMIT $limit;
             """;

@@ -26,6 +26,7 @@ public sealed class ToolDispatcher : IToolDispatcher
     private readonly ConcurrentDictionary<ActionId, byte> activeExecutions = new();
     private readonly ConcurrentDictionary<(TurnId Turn, string Proposal), FailureBudget> failureBudgets = new();
     private readonly Dictionary<ActionId, (TurnId Turn, string Proposal)> approvalBudgets = [];
+    private readonly Dictionary<TurnId, int> activeDispatchesByTurn = [];
     private readonly object failureBudgetLifecycleGate = new();
 
     /// <summary>Creates the host tool dispatcher.</summary>
@@ -64,10 +65,7 @@ public sealed class ToolDispatcher : IToolDispatcher
             foreach (var pair in failureBudgets.Where(pair => pair.Key.Turn == turnId).ToArray())
             {
                 pair.Value.TurnReleased = true;
-                if (pair.Value.PendingApprovals.Count == 0)
-                {
-                    failureBudgets.TryRemove(pair.Key, out _);
-                }
+                RemoveReleasedBudgetIfIdle(pair.Key, pair.Value);
             }
         }
     }
@@ -84,10 +82,63 @@ public sealed class ToolDispatcher : IToolDispatcher
             }
 
             budget.PendingApprovals.Remove(actionId);
-            if (budget.TurnReleased && budget.PendingApprovals.Count == 0)
+            RemoveReleasedBudgetIfIdle(key, budget);
+        }
+    }
+
+    /// <summary>Records an explicit Unknown outcome when an interrupted action can no longer be observed.</summary>
+    /// <param name="action">Owner-validated action still marked Executing.</param>
+    /// <param name="cancellationToken">Token that cancels the journal update before it commits.</param>
+    /// <returns>The durable action, preserving any concurrent execution or terminal outcome.</returns>
+    public async ValueTask<ActionJournalEntry> MarkUnavailableExecutingActionUnknownAsync(
+        ActionJournalEntry action,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(action);
+        if (action.Status != "Executing")
+        {
+            return action;
+        }
+        if (!activeExecutions.TryAdd(action.Id, 0))
+        {
+            return await journal.GetAsync(action.Id, cancellationToken)
+                ?? throw new InvalidDataException("The action disappeared during unavailable-capability recovery.");
+        }
+
+        try
+        {
+            var current = await journal.GetAsync(action.Id, cancellationToken)
+                ?? throw new InvalidDataException("The action disappeared during unavailable-capability recovery.");
+            if (current.Status != "Executing")
             {
-                failureBudgets.TryRemove(key, out _);
+                return current;
             }
+
+            try
+            {
+                return await journal.UpdateStatusAsync(
+                    current.Id,
+                    "Unknown",
+                    current.Version,
+                    clock.UtcNow.ToUniversalTime(),
+                    cancellationToken,
+                    new("Unknown", null, "recovery_capability_unavailable", current.Id));
+            }
+            catch (PersistenceConcurrencyException)
+            {
+                current = await journal.GetAsync(current.Id, cancellationToken)
+                    ?? throw new InvalidDataException("The action disappeared during unavailable-capability recovery.");
+                if (current.Status is "Executing" or "Prepared" or "AwaitingApproval")
+                {
+                    throw;
+                }
+
+                return current;
+            }
+        }
+        finally
+        {
+            activeExecutions.TryRemove(action.Id, out _);
         }
     }
 
@@ -103,6 +154,21 @@ public sealed class ToolDispatcher : IToolDispatcher
             return Rejected("invalid_tool_request");
         }
 
+        BeginDispatch(request.TurnId);
+        try
+        {
+            return await DispatchCoreAsync(request, cancellationToken);
+        }
+        finally
+        {
+            EndDispatch(request.TurnId);
+        }
+    }
+
+    private async ValueTask<ToolDispatchResult> DispatchCoreAsync(
+        ToolDispatchRequest request,
+        CancellationToken cancellationToken)
+    {
         if (request.ToolName.StartsWith("memory.", StringComparison.Ordinal))
         {
             var previous = await journal.GetAsync(CreateActionId(request.TurnId, request.CallId), cancellationToken);
@@ -974,6 +1040,51 @@ public sealed class ToolDispatcher : IToolDispatcher
     {
         var proposalKey = GetProposalKey(request, draft);
         return failureBudgets.GetOrAdd((request.TurnId, proposalKey), _ => new FailureBudget());
+    }
+
+    private void BeginDispatch(TurnId turnId)
+    {
+        lock (failureBudgetLifecycleGate)
+        {
+            activeDispatchesByTurn.TryGetValue(turnId, out var active);
+            activeDispatchesByTurn[turnId] = active + 1;
+        }
+    }
+
+    private void EndDispatch(TurnId turnId)
+    {
+        lock (failureBudgetLifecycleGate)
+        {
+            if (!activeDispatchesByTurn.TryGetValue(turnId, out var active) || active < 1)
+            {
+                throw new InvalidOperationException("A dispatcher turn lease was released without being acquired.");
+            }
+
+            if (active == 1)
+            {
+                activeDispatchesByTurn.Remove(turnId);
+                foreach (var pair in failureBudgets.Where(pair => pair.Key.Turn == turnId).ToArray())
+                {
+                    RemoveReleasedBudgetIfIdle(pair.Key, pair.Value);
+                }
+            }
+            else
+            {
+                activeDispatchesByTurn[turnId] = active - 1;
+            }
+        }
+    }
+
+    private void RemoveReleasedBudgetIfIdle(
+        (TurnId Turn, string Proposal) key,
+        FailureBudget budget)
+    {
+        if (budget.TurnReleased
+            && budget.PendingApprovals.Count == 0
+            && !activeDispatchesByTurn.ContainsKey(key.Turn))
+        {
+            failureBudgets.TryRemove(key, out _);
+        }
     }
 
     private void HoldApproval(ActionId actionId, ToolDispatchRequest request, ToolActionDraft draft)

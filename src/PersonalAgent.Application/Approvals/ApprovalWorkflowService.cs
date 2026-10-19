@@ -105,10 +105,13 @@ public sealed class ApprovalWorkflowService
                     }
                 }
             }
-            if (approval.Status == "Expired")
+            if (approval.Status is "Expired" or "Rejected")
             {
-                action = await approvals.SettleExpiredAsync(
-                    approval.Id, ownerId, approval.ExpectedVersion, cancellationToken);
+                action = approval.Status == "Expired"
+                    ? await approvals.SettleExpiredAsync(
+                        approval.Id, ownerId, approval.ExpectedVersion, cancellationToken)
+                    : await approvals.SettleRejectedAsync(
+                        approval.Id, ownerId, approval.ExpectedVersion, cancellationToken);
                 if (action.Status != "Executing" && !action.MemoryInvalidated)
                 {
                     dispatcher.ReleaseApproval(action.Id);
@@ -174,14 +177,15 @@ public sealed class ApprovalWorkflowService
     /// <summary>Recovers bounded owner-bound Home Assistant actions that have no approval record.</summary>
     /// <param name="ownerId">Authenticated owner whose recent actions may be reconciled.</param>
     /// <param name="cancellationToken">Token that cancels recovery before a durable outcome is recorded.</param>
-    /// <returns>A task completing after at most eight observation-only recovery attempts.</returns>
-    public async ValueTask RecoverUnapprovedExecutingActionsAsync(
+    /// <returns>Safe per-action recovery issues; at most eight observation-only attempts are made.</returns>
+    public async ValueTask<IReadOnlyList<ActionRecoveryIssue>> RecoverUnapprovedExecutingActionsAsync(
         string ownerId,
         CancellationToken cancellationToken)
     {
         MemoryPolicy.ValidateOwner(ownerId);
         var actions = await journal.ReadRecentForOwnerAsync(ownerId, 100, cancellationToken);
         var recovered = 0;
+        var issues = new List<ActionRecoveryIssue>();
         foreach (var action in actions)
         {
             if (recovered >= 8)
@@ -201,9 +205,21 @@ public sealed class ApprovalWorkflowService
                 continue;
             }
 
-            await RecoverExecutingActionAsync(ownerId, action, cancellationToken);
-            recovered++;
+            try
+            {
+                await RecoverExecutingActionAsync(ownerId, action, cancellationToken);
+                recovered++;
+            }
+            catch (InvalidDataException)
+            {
+                issues.Add(new(action.Id, "invalid_action_journal"));
+            }
+            catch (FormatException)
+            {
+                issues.Add(new(action.Id, "invalid_action_journal"));
+            }
         }
+        return issues;
     }
 
     private async ValueTask<ActionJournalEntry> RecoverExecutingActionAsync(
@@ -254,9 +270,25 @@ public sealed class ApprovalWorkflowService
                     {
                         ReplayCurrentRequestHash = envelope.CurrentRequestHash
                     }, cancellationToken);
-                    releaseTurn = result.Status != "Executing";
+                    if (result.Status == "Rejected"
+                        && result.ReasonCode is "unregistered_tool" or "home_operation_not_allowed")
+                    {
+                        action = await dispatcher.MarkUnavailableExecutingActionUnknownAsync(action, cancellationToken);
+                    }
+                    releaseTurn = action.Status != "Executing";
                 }
             }
+        }
+        catch (PersistenceConcurrencyException)
+        {
+            action = await journal.GetAsync(action.Id, cancellationToken)
+                ?? throw new InvalidDataException("The recovered action disappeared during concurrent settlement.");
+            if (action.Status is not ("Succeeded" or "Failed" or "Unknown" or "Rejected" or "Expired"))
+            {
+                throw;
+            }
+
+            releaseTurn = true;
         }
         finally
         {

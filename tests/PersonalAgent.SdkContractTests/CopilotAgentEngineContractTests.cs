@@ -2570,6 +2570,11 @@ public sealed class CopilotAgentEngineContractTests(ITestOutputHelper output)
             LastUserRequest = request.CurrentUserRequest;
             return ValueTask.FromResult(result);
         }
+
+        public ValueTask<ActionJournalEntry> MarkUnavailableExecutingActionUnknownAsync(
+            ActionJournalEntry action,
+            CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
     }
 
     private sealed class BlockingDispatcher : IToolDispatcher
@@ -2591,5 +2596,10 @@ public sealed class CopilotAgentEngineContractTests(ITestOutputHelper output)
             await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
             return new ToolDispatchResult("Succeeded", "{}", null);
         }
+
+        public ValueTask<ActionJournalEntry> MarkUnavailableExecutingActionUnknownAsync(
+            ActionJournalEntry action,
+            CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
     }
 }

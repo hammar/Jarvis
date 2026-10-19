@@ -1202,9 +1202,11 @@ public sealed class ToolDispatcherTests
         Assert.Equal(approval.ExpectedVersion, summary.Approval.ExpectedVersion);
     }
 
-    [Fact]
+    [Theory]
+    [InlineData("Succeeded")]
+    [InlineData("Unknown")]
     [Trait("Category", "Integration")]
-    public async Task UnapprovedExecutingActionRecoveryPrioritizesOlderUnresolvedActions()
+    public async Task UnapprovedExecutingActionRecoveryPrioritizesOlderUnresolvedActions(string newerStatus)
     {
         using var fixture = await Fixture.CreateAsync();
         var request = PorchRequest with { TurnId = TurnId.New(), CallId = "older-orphan" };
@@ -1226,7 +1228,7 @@ public sealed class ToolDispatcherTests
                          substr(hex(randomblob(16)), 17, 4) || '-' ||
                          substr(hex(randomblob(16)), 21, 12)),
                    action_type, canonical_arguments,
-                   'terminal-seed-' || value, 'Succeeded', '2026-10-15T00:00:00+00:00',
+                   'terminal-seed-' || value, '{newerStatus}', '2026-10-15T00:00:00+00:00',
                    '2026-10-15T00:00:00+00:00', 1, 'owner'
             FROM numbers
             CROSS JOIN actions
@@ -1297,6 +1299,115 @@ public sealed class ToolDispatcherTests
 
     [Fact]
     [Trait("Category", "Integration")]
+    public async Task ApprovalListPrioritizesOlderInterruptedExpiryBeforeNewerPendingApprovals()
+    {
+        using var fixture = await Fixture.CreateAsync(riskClass: ToolRiskClass.ApprovalRequired);
+        var expired = await fixture.CreatePendingHomeApprovalAsync(
+            PorchRequest with { TurnId = TurnId.New(), CallId = "older-expired" });
+        fixture.Clock.Advance(TimeSpan.FromMinutes(5));
+        await fixture.ApprovalStore.ResolveAsync(
+            expired.ApprovalId!.Value, "owner", "Expired", 1, fixture.Clock.UtcNow, CancellationToken.None);
+        await fixture.SqlAsync($"""
+            UPDATE approval_requests
+            SET created_at_utc = '2026-10-01T00:00:00+00:00'
+            WHERE id = '{expired.ApprovalId.Value.Value:D}';
+
+            WITH RECURSIVE numbers(value) AS (
+                SELECT 1 UNION ALL SELECT value + 1 FROM numbers WHERE value < 101
+            )
+            INSERT INTO actions
+                (id, action_type, canonical_arguments, request_hash, status, created_at_utc,
+                 updated_at_utc, version, action_owner_id)
+            SELECT lower(substr(hex(randomblob(16)), 1, 8) || '-' ||
+                         substr(hex(randomblob(16)), 9, 4) || '-' ||
+                         substr(hex(randomblob(16)), 13, 4) || '-' ||
+                         substr(hex(randomblob(16)), 17, 4) || '-' ||
+                         substr(hex(randomblob(16)), 21, 12)),
+                   action_type, canonical_arguments, 'pending-seed-' || value,
+                   'AwaitingApproval', '2026-10-15T00:00:00+00:00',
+                   '2026-10-15T00:00:00+00:00', 1, 'owner'
+            FROM numbers
+            CROSS JOIN actions
+            WHERE actions.id = '{expired.ActionId!.Value.Value:D}';
+
+            WITH RECURSIVE numbers(value) AS (
+                SELECT 1 UNION ALL SELECT value + 1 FROM numbers WHERE value < 101
+            )
+            INSERT INTO approval_requests
+                (id, action_id, owner_id, status, created_at_utc, expires_at_utc, resolved_at_utc, version)
+            SELECT lower(substr(hex(randomblob(16)), 1, 8) || '-' ||
+                         substr(hex(randomblob(16)), 9, 4) || '-' ||
+                         substr(hex(randomblob(16)), 13, 4) || '-' ||
+                         substr(hex(randomblob(16)), 17, 4) || '-' ||
+                         substr(hex(randomblob(16)), 21, 12)),
+                   actions.id, 'owner', 'Pending', '2026-10-15T00:00:00+00:00',
+                   '2026-10-20T00:00:00+00:00', NULL, 1
+            FROM actions
+            WHERE actions.request_hash LIKE 'pending-seed-%';
+            """);
+
+        var summaries = await fixture.ApprovalWorkflow().ReadRecentAsync("owner", 100, CancellationToken.None);
+
+        var recovered = Assert.Single(summaries, summary => summary.ActionId == expired.ActionId);
+        Assert.Equal("Expired", recovered.Approval.Status);
+        Assert.Equal("Expired", recovered.ActionStatus);
+        Assert.Equal(100, summaries.Count);
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task ApprovalListPrioritizesActionableApprovalOverNewerInvalidatedPendingRecords()
+    {
+        using var fixture = await Fixture.CreateAsync(riskClass: ToolRiskClass.ApprovalRequired);
+        var pending = await fixture.CreatePendingHomeApprovalAsync(
+            PorchRequest with { TurnId = TurnId.New(), CallId = "older-actionable" });
+        await fixture.SqlAsync($"""
+            UPDATE approval_requests
+            SET created_at_utc = '2026-10-01T00:00:00+00:00'
+            WHERE id = '{pending.ApprovalId!.Value.Value:D}';
+
+            WITH RECURSIVE numbers(value) AS (
+                SELECT 1 UNION ALL SELECT value + 1 FROM numbers WHERE value < 101
+            )
+            INSERT INTO actions
+                (id, action_type, canonical_arguments, request_hash, status, created_at_utc,
+                 updated_at_utc, version, action_owner_id, memory_owner_id, memory_invalidated)
+            SELECT lower(substr(hex(randomblob(16)), 1, 8) || '-' ||
+                         substr(hex(randomblob(16)), 9, 4) || '-' ||
+                         substr(hex(randomblob(16)), 13, 4) || '-' ||
+                         substr(hex(randomblob(16)), 17, 4) || '-' ||
+                         substr(hex(randomblob(16)), 21, 12)),
+                   action_type, canonical_arguments, 'invalidated-seed-' || value,
+                   'AwaitingApproval', '2026-10-15T00:00:00+00:00',
+                   '2026-10-15T00:00:00+00:00', 1, 'owner', 'owner', 1
+            FROM numbers
+            CROSS JOIN actions
+            WHERE actions.id = '{pending.ActionId!.Value.Value:D}';
+
+            WITH RECURSIVE numbers(value) AS (
+                SELECT 1 UNION ALL SELECT value + 1 FROM numbers WHERE value < 101
+            )
+            INSERT INTO approval_requests
+                (id, action_id, owner_id, status, created_at_utc, expires_at_utc, resolved_at_utc, version)
+            SELECT lower(substr(hex(randomblob(16)), 1, 8) || '-' ||
+                         substr(hex(randomblob(16)), 9, 4) || '-' ||
+                         substr(hex(randomblob(16)), 13, 4) || '-' ||
+                         substr(hex(randomblob(16)), 17, 4) || '-' ||
+                         substr(hex(randomblob(16)), 21, 12)),
+                   actions.id, 'owner', 'Pending', '2026-10-15T00:00:00+00:00',
+                   '2026-10-20T00:00:00+00:00', NULL, 1
+            FROM actions
+            WHERE actions.request_hash LIKE 'invalidated-seed-%';
+            """);
+
+        var records = await fixture.ApprovalStore.ReadRecentForOwnerAsync("owner", 100, CancellationToken.None);
+
+        Assert.Contains(records, record => record.ActionId == pending.ActionId);
+        Assert.Equal(100, records.Count);
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
     public async Task ApprovalListExpiresPendingActionsAndKeepsNewerApprovalPending()
     {
         using var fixture = await Fixture.CreateAsync(riskClass: ToolRiskClass.ApprovalRequired);
@@ -1346,6 +1457,314 @@ public sealed class ToolDispatcherTests
         Assert.Equal("Expired", summary.ActionStatus);
         Assert.Equal("Expired", (await fixture.Journal.GetAsync(pending.ActionId.Value, CancellationToken.None))!.Status);
         Assert.Equal(0, fixture.ExecutionCount);
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task ApprovalListRepairsRejectedDecisionWhoseActionSettlementWasInterrupted()
+    {
+        using var fixture = await Fixture.CreateAsync(riskClass: ToolRiskClass.ApprovalRequired);
+        var pending = await fixture.CreatePendingHomeApprovalAsync(PorchRequest);
+        await fixture.ApprovalStore.ResolveAsync(
+            pending.ApprovalId!.Value, "owner", "Rejected", 1, fixture.Clock.UtcNow, CancellationToken.None);
+        Assert.Equal(
+            "AwaitingApproval",
+            (await fixture.Journal.GetAsync(pending.ActionId!.Value, CancellationToken.None))!.Status);
+
+        var summary = Assert.Single(
+            await fixture.ApprovalWorkflow().ReadRecentAsync("owner", 10, CancellationToken.None));
+
+        Assert.Equal("Rejected", summary.Approval.Status);
+        Assert.Equal("Rejected", summary.ActionStatus);
+        Assert.Equal("Rejected", (await fixture.Journal.GetAsync(pending.ActionId.Value, CancellationToken.None))!.Status);
+        Assert.Equal(0, fixture.ExecutionCount);
+    }
+
+    [Theory]
+    [InlineData("unregistered_tool")]
+    [InlineData("home_operation_not_allowed")]
+    [Trait("Category", "Integration")]
+    public async Task InterruptedActionBecomesUnknownWhenItsCapabilityWasRemoved(string reason)
+    {
+        using var fixture = await Fixture.CreateAsync(riskClass: ToolRiskClass.ApprovalRequired);
+        var request = PorchRequest with { TurnId = TurnId.New(), CallId = "removed-capability" };
+        var pending = await fixture.CreatePendingHomeApprovalAsync(request);
+        var action = await fixture.Journal.GetAsync(pending.ActionId!.Value, CancellationToken.None)
+            ?? throw new InvalidOperationException("The action was not journaled.");
+        await fixture.Journal.UpdateStatusAsync(
+            action.Id, "Executing", action.Version, fixture.Clock.UtcNow, CancellationToken.None);
+        await fixture.SqlAsync($"DELETE FROM approval_requests WHERE action_id = '{action.Id.Value:D}';");
+
+        ToolDispatcher dispatcher;
+        if (reason == "unregistered_tool")
+        {
+            dispatcher = new(
+                new ToolRegistry([]), fixture.Policy, fixture.Journal, fixture.Approvals, fixture.Clock,
+                TimeSpan.FromSeconds(1));
+        }
+        else
+        {
+            fixture.Policy.Replace(
+                "removed-light",
+                new ToolPermission("home.set_light", "home.set_light", "turn_on", "light.other",
+                    ToolRiskClass.LowRiskWrite));
+            dispatcher = fixture.CreateRestartedDispatcher();
+        }
+
+        var workflow = fixture.ApprovalWorkflow(dispatcher);
+        var issues = await workflow.RecoverUnapprovedExecutingActionsAsync("owner", CancellationToken.None);
+        var recorded = await fixture.Journal.GetAsync(action.Id, CancellationToken.None);
+
+        Assert.Empty(issues);
+        Assert.Equal("Unknown", recorded!.Status);
+        Assert.Equal(
+            reason == "unregistered_tool"
+                ? "recovery_capability_unavailable"
+                : "interrupted_execution_observation_not_permitted",
+            recorded.Outcome!.ReasonCode);
+        Assert.Equal(0, fixture.ExecutionCount);
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task UnavailableRecoveryDoesNotOverwriteAnActiveExecutionOrTerminalAction()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var request = PorchRequest with { TurnId = TurnId.New(), CallId = "active-recovery-race" };
+        ToolDispatcher? dispatcher = null;
+        ActionJournalEntry? observedDuringExecution = null;
+        fixture.SetExecution(async (_, _, token) =>
+        {
+            var current = await fixture.Journal.GetAsync(fixture.ActionId(request), token)
+                ?? throw new InvalidOperationException("The active action disappeared.");
+            observedDuringExecution = await dispatcher!.MarkUnavailableExecutingActionUnknownAsync(current, token);
+            return new ToolExecutionOutcome(ToolExecutionStatus.Completed, null, null);
+        });
+        dispatcher = fixture.CreateRestartedDispatcher();
+
+        var result = await dispatcher.DispatchAsync(request, CancellationToken.None);
+        var completed = await fixture.Journal.GetAsync(result.ActionId!.Value, CancellationToken.None)
+            ?? throw new InvalidOperationException("The completed action disappeared.");
+        var unchanged = await dispatcher.MarkUnavailableExecutingActionUnknownAsync(
+            completed, CancellationToken.None);
+
+        Assert.Equal("Succeeded", result.Status);
+        Assert.Equal("Executing", observedDuringExecution!.Status);
+        Assert.Equal(completed, unchanged);
+        Assert.Equal(1, fixture.ExecutionCount);
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task UnavailableRecoveryAcceptsConcurrentTerminalStateAndRejectsNonterminalConflict()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var terminalRequest = PorchRequest with { TurnId = TurnId.New(), CallId = "terminal-recovery-race" };
+        var terminalResult = await fixture.Dispatcher.DispatchAsync(terminalRequest, CancellationToken.None);
+        var terminalAction = (await fixture.Journal.GetAsync(terminalResult.ActionId!.Value, CancellationToken.None))!;
+        terminalAction = await fixture.Journal.UpdateStatusAsync(
+            terminalAction.Id, "Executing", terminalAction.Version, fixture.Clock.UtcNow, CancellationToken.None);
+        var terminalJournal = new PausedJournal(
+            fixture.Journal,
+            (_, _) => Task.CompletedTask,
+            beforeUnknown: async token =>
+            {
+                await fixture.Journal.UpdateStatusAsync(
+                    terminalAction.Id,
+                    "Rejected",
+                    terminalAction.Version,
+                    fixture.Clock.UtcNow,
+                    token);
+            });
+        var terminalDispatcher = fixture.CreateRestartedDispatcher(terminalJournal);
+
+        var winner = await terminalDispatcher.MarkUnavailableExecutingActionUnknownAsync(
+            terminalAction, CancellationToken.None);
+
+        Assert.Equal("Rejected", winner.Status);
+
+        var nonterminalRequest = PorchRequest with { TurnId = TurnId.New(), CallId = "nonterminal-recovery-race" };
+        var nonterminalResult = await fixture.Dispatcher.DispatchAsync(nonterminalRequest, CancellationToken.None);
+        var nonterminalAction = (await fixture.Journal.GetAsync(nonterminalResult.ActionId!.Value, CancellationToken.None))!;
+        nonterminalAction = await fixture.Journal.UpdateStatusAsync(
+            nonterminalAction.Id, "Executing", nonterminalAction.Version, fixture.Clock.UtcNow, CancellationToken.None);
+        var nonterminalJournal = new PausedJournal(
+            fixture.Journal,
+            (_, _) => Task.CompletedTask,
+            beforeUnknown: token => fixture.SqlAsync(
+                $"UPDATE actions SET version = version + 1 WHERE id = '{nonterminalAction.Id.Value:D}';"));
+        var nonterminalDispatcher = fixture.CreateRestartedDispatcher(nonterminalJournal);
+
+        await Assert.ThrowsAsync<PersistenceConcurrencyException>(async () =>
+            await nonterminalDispatcher.MarkUnavailableExecutingActionUnknownAsync(
+                nonterminalAction, CancellationToken.None));
+        Assert.Equal("Executing", (await fixture.Journal.GetAsync(
+            nonterminalAction.Id, CancellationToken.None))!.Status);
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task MalformedExecutingActionReportsRecoveryIssueWithoutBreakingOwnerList()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var completed = await fixture.Dispatcher.DispatchAsync(
+            PorchRequest with { TurnId = TurnId.New(), CallId = "malformed-orphan" }, CancellationToken.None);
+        var action = await fixture.Journal.GetAsync(completed.ActionId!.Value, CancellationToken.None)
+            ?? throw new InvalidOperationException("The action was not journaled.");
+        await fixture.Journal.UpdateStatusAsync(
+            action.Id, "Executing", action.Version, fixture.Clock.UtcNow, CancellationToken.None);
+        await fixture.SqlAsync($"UPDATE actions SET canonical_arguments = '{{' WHERE id = '{action.Id.Value:D}';");
+
+        var issues = await fixture.ApprovalWorkflow()
+            .RecoverUnapprovedExecutingActionsAsync("owner", CancellationToken.None);
+        var recent = await fixture.Journal.ReadRecentForOwnerAsync("owner", 100, CancellationToken.None);
+
+        Assert.Contains(issues, issue => issue.ActionId == action.Id && issue.ReasonCode == "invalid_action_journal");
+        Assert.Contains(recent, entry => entry.Id == action.Id && entry.Status == "Executing");
+        Assert.Equal(1, fixture.ExecutionCount);
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task ConcurrentInterruptedActionRecoveryAcceptsTheFirstTerminalOutcome()
+    {
+        using var fixture = await Fixture.CreateAsync(riskClass: ToolRiskClass.ApprovalRequired);
+        var recoveryRequest = PorchRequest with { TurnId = TurnId.New(), CallId = "concurrent-recovery" };
+        var pending = await fixture.CreatePendingHomeApprovalAsync(recoveryRequest);
+        await fixture.ApprovalStore.ResolveAsync(
+            pending.ApprovalId!.Value, "owner", "Approved", 1, fixture.Clock.UtcNow, CancellationToken.None);
+        var action = await fixture.Journal.GetAsync(pending.ActionId!.Value, CancellationToken.None)
+            ?? throw new InvalidOperationException("The approved action was not journaled.");
+        action = await fixture.Journal.UpdateStatusAsync(
+            action.Id, "Executing", action.Version, fixture.Clock.UtcNow, CancellationToken.None);
+        await fixture.SqlAsync($"DELETE FROM messages WHERE turn_id = '{recoveryRequest.TurnId.Value:D}';");
+
+        var actionReadCount = 0;
+        var unknownUpdateCount = 0;
+        var actionReadsReleased = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var unknownUpdatesReleased = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var journal = new PausedJournal(
+            fixture.Journal,
+            async (current, token) =>
+            {
+                if (current?.Id == action.Id && current.Status == "Executing")
+                {
+                    if (Interlocked.Increment(ref actionReadCount) == 2)
+                    {
+                        actionReadsReleased.TrySetResult();
+                    }
+                    await actionReadsReleased.Task.WaitAsync(token);
+                }
+            },
+            afterTurnRead: null,
+            beforeUnknown: async token =>
+            {
+                if (Interlocked.Increment(ref unknownUpdateCount) == 2)
+                {
+                    unknownUpdatesReleased.TrySetResult();
+                }
+                await unknownUpdatesReleased.Task.WaitAsync(token);
+            });
+        var dispatcher = fixture.CreateRestartedDispatcher(journal);
+        var workflow = fixture.ApprovalWorkflow(dispatcher, journal);
+
+        var reads = await Task.WhenAll(
+            workflow.ReadRecentAsync("owner", 10, CancellationToken.None).AsTask(),
+            workflow.ReadRecentAsync("owner", 10, CancellationToken.None).AsTask());
+
+        Assert.All(reads, summaries => Assert.Equal("Unknown", Assert.Single(summaries).ActionStatus));
+        Assert.Equal("Unknown", (await fixture.Journal.GetAsync(action.Id, CancellationToken.None))!.Status);
+        Assert.Equal(0, fixture.ExecutionCount);
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task TurnReleaseDuringSiblingHistoryReadPreservesUncertaintyBudget()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var turnId = TurnId.New();
+        fixture.Policy.Replace("shared-turn-test",
+            fixture.AllowedPermission,
+            new ToolPermission("home.set_light", "home.set_light", "turn_on", "light.other",
+                ToolRiskClass.LowRiskWrite));
+        var interruptedRequest = PorchRequest with
+        {
+            TurnId = turnId,
+            CallId = "interrupted-action",
+            CurrentUserRequest = "Maybe turn on the porch light"
+        };
+        var pending = await fixture.CreatePendingHomeApprovalAsync(interruptedRequest);
+        await fixture.ApprovalStore.ResolveAsync(
+            pending.ApprovalId!.Value, "owner", "Approved", 1, fixture.Clock.UtcNow, CancellationToken.None);
+        var interrupted = await fixture.Journal.GetAsync(pending.ActionId!.Value, CancellationToken.None)
+            ?? throw new InvalidOperationException("The action was not journaled.");
+        await fixture.Journal.UpdateStatusAsync(
+            interrupted.Id, "Executing", interrupted.Version, fixture.Clock.UtcNow, CancellationToken.None);
+
+        var siblingHistoryRead = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var continueSibling = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var siblingCreated = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var historyReadPaused = 0;
+        var sibling = PorchRequest with
+        {
+            TurnId = turnId,
+            CallId = "equivalent-sibling",
+            ArgumentsJson = """{"Entity":"light.other","On":true}""",
+            CurrentUserRequest = "Turn on the porch light"
+        };
+        var siblingActionId = fixture.ActionId(sibling);
+        var journal = new PausedJournal(
+            fixture.Journal,
+            (_, _) => Task.CompletedTask,
+            afterTurnRead: async (_, token) =>
+            {
+                if (Interlocked.CompareExchange(ref historyReadPaused, 1, 0) == 0)
+                {
+                    siblingHistoryRead.TrySetResult();
+                    await continueSibling.Task.WaitAsync(token);
+                }
+            },
+            afterCreate: (entry, _) =>
+            {
+                if (entry.Id == siblingActionId)
+                {
+                    siblingCreated.TrySetResult();
+                }
+                return Task.CompletedTask;
+            });
+        var dispatcher = fixture.CreateRestartedDispatcher(journal);
+        var siblingRead = dispatcher.DispatchAsync(sibling, CancellationToken.None).AsTask();
+        await siblingHistoryRead.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        var writeStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseWrite = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.SetExecution(async (_, draft, token) =>
+        {
+            if (draft.ResolvedEntityId == "light.other")
+            {
+                writeStarted.TrySetResult();
+                await releaseWrite.Task.WaitAsync(token);
+            }
+            return new ToolExecutionOutcome(ToolExecutionStatus.Completed, null, null);
+        });
+        var executingSibling = dispatcher.DispatchAsync(sibling with { CallId = "active-sibling" }, CancellationToken.None).AsTask();
+        await writeStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        fixture.SetVerification((_, _, _, _) =>
+            ValueTask.FromResult(new ToolVerificationOutcome(ToolVerificationStatus.Unknown, "not_confirmed")));
+        var workflow = fixture.ApprovalWorkflow(dispatcher, journal);
+        var summary = await workflow.ReadRecentAsync("owner", 10, CancellationToken.None);
+        Assert.Equal("Unknown", Assert.Single(summary).ActionStatus);
+
+        continueSibling.TrySetResult();
+        await siblingCreated.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        releaseWrite.TrySetResult();
+        Assert.Equal("Unknown", (await executingSibling.WaitAsync(TimeSpan.FromSeconds(5))).Status);
+        var result = await siblingRead.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal("Rejected", result.Status);
+        Assert.Equal("equivalent_write_outcome_unknown", result.ReasonCode);
+        Assert.Equal(1, fixture.ExecutionCount);
     }
 
     [Fact]
@@ -2033,13 +2452,16 @@ public sealed class ToolDispatcherTests
         public ToolDispatcher CreateRestartedDispatcher(IActionJournalStore? journal = null) =>
             new(registry, Policy, journal ?? Journal, Approvals, Clock, TimeSpan.FromSeconds(1));
 
-        public ApprovalWorkflowService ApprovalWorkflow(ToolDispatcher? dispatcher = null)
+        public ApprovalWorkflowService ApprovalWorkflow(
+            ToolDispatcher? dispatcher = null,
+            IActionJournalStore? journal = null)
         {
             dispatcher ??= Dispatcher;
+            journal ??= Journal;
             var memories = new SqliteConfirmedMemoryStore(Database, Clock);
             var proposals = new MemoryProposalService(
-                memories, Journal, Approvals, dispatcher, new SqliteConversationStore(Database, Clock), Clock);
-            return new(ApprovalStore, Journal, Approvals, dispatcher, memories, proposals, Clock);
+                memories, journal, Approvals, dispatcher, new SqliteConversationStore(Database, Clock), Clock);
+            return new(ApprovalStore, journal, Approvals, dispatcher, memories, proposals, Clock);
         }
 
         public void Dispose() => file.Dispose();
@@ -2113,10 +2535,19 @@ public sealed class ToolDispatcherTests
         IActionJournalStore inner,
         Func<ActionJournalEntry?, CancellationToken, Task> afterRead,
         Func<CancellationToken, Task>? beforeExecuting = null,
-        Func<IReadOnlyList<ActionJournalEntry>, CancellationToken, Task>? afterTurnRead = null) : IActionJournalStore
+        Func<IReadOnlyList<ActionJournalEntry>, CancellationToken, Task>? afterTurnRead = null,
+        Func<CancellationToken, Task>? beforeUnknown = null,
+        Func<ActionJournalEntry, CancellationToken, Task>? afterCreate = null) : IActionJournalStore
     {
-        public ValueTask<ActionJournalEntry> CreateAsync(ActionJournalEntry entry, CancellationToken cancellationToken) =>
-            inner.CreateAsync(entry, cancellationToken);
+        public async ValueTask<ActionJournalEntry> CreateAsync(ActionJournalEntry entry, CancellationToken cancellationToken)
+        {
+            var created = await inner.CreateAsync(entry, cancellationToken);
+            if (afterCreate is not null)
+            {
+                await afterCreate(created, cancellationToken);
+            }
+            return created;
+        }
 
         public ValueTask<IReadOnlyList<ActionJournalEntry>> ReadRecentForOwnerAsync(
             string ownerId, int maximumActions, CancellationToken cancellationToken) =>
@@ -2148,7 +2579,12 @@ public sealed class ToolDispatcherTests
             {
                 await beforeExecuting(cancellationToken);
             }
-            return await inner.UpdateStatusAsync(id, status, expectedVersion, updatedAtUtc, cancellationToken, outcome);
+            if (status == "Unknown" && beforeUnknown is not null)
+            {
+                await beforeUnknown(cancellationToken);
+            }
+            return await inner.UpdateStatusAsync(
+                id, status, expectedVersion, updatedAtUtc, cancellationToken, outcome);
         }
     }
 
@@ -2167,8 +2603,8 @@ public sealed class ToolDispatcherTests
     {
         private ToolAllowlistPolicy current = new(version, [permission]);
 
-        public void Replace(string newVersion, ToolPermission newPermission) =>
-            current = new ToolAllowlistPolicy(newVersion, [newPermission]);
+        public void Replace(string newVersion, params ToolPermission[] newPermissions) =>
+            current = new ToolAllowlistPolicy(newVersion, newPermissions);
 
         public ToolAuthorizationDecision Evaluate(
             string toolName,

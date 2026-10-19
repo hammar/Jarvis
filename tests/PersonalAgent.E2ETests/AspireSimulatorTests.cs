@@ -153,6 +153,26 @@ public sealed class AspireSimulatorTests(SimulatorHostFixture fixture)
                 JsonDocument.Parse(expectedArguments).RootElement.GetRawText(),
                 JsonDocument.Parse(call.GetProperty("arguments").GetString()!).RootElement.GetRawText());
         }
+
+        using var followUp = await fixture.ModelClient.PostAsJsonAsync(
+            "/v1/chat/completions",
+            new
+            {
+                model = "simulator-model",
+                messages = new object[]
+                {
+                    new { role = "user", content = "read temperature" },
+                    new { role = "assistant", content = (string?)null },
+                    new { role = "tool", content = """{"entityId":"sensor.temperature","available":true}""" },
+                    new { role = "user", content = "tell me something unrelated" }
+                }
+            });
+        followUp.EnsureSuccessStatusCode();
+        using var followUpBody = JsonDocument.Parse(await followUp.Content.ReadAsStringAsync());
+        Assert.Equal(
+            "Controlled fixture response",
+            followUpBody.RootElement.GetProperty("choices")[0]
+                .GetProperty("message").GetProperty("content").GetString());
     }
 
     [Fact]
@@ -199,6 +219,50 @@ public sealed class AspireSimulatorTests(SimulatorHostFixture fixture)
         invalidDecision.Headers.Add("X-CSRF-TOKEN", "invalid-request-token");
         using var rejectedDecision = await fixture.WebClient.SendAsync(invalidDecision);
         Assert.Equal(HttpStatusCode.BadRequest, rejectedDecision.StatusCode);
+    }
+
+    [Fact]
+    [Trait("Category", "AspireE2E")]
+    public async Task MalformedExecutingActionDoesNotBreakOwnerActionsApi()
+    {
+        var isolated = new SimulatorHostFixture();
+        await isolated.InitializeAsync();
+        try
+        {
+            var actionId = Guid.NewGuid();
+            var turnId = Guid.NewGuid();
+            await using (var database = new SqliteConnection(
+                $"Data Source={Path.Combine(isolated.DataDirectoryPath, "jarvis.db")}"))
+            {
+                await database.OpenAsync();
+                await using var insertAction = database.CreateCommand();
+                insertAction.CommandText = """
+                    INSERT INTO actions
+                        (id, action_type, canonical_arguments, request_hash, status, created_at_utc,
+                         updated_at_utc, version, action_owner_id, action_turn_id)
+                    VALUES
+                        ($id, 'home.set_light', '{', 'malformed-owner-action', 'Executing',
+                         '2026-10-15T12:00:00+00:00', '2026-10-15T12:00:00+00:00', 1, 'owner', $turn);
+                    """;
+                insertAction.Parameters.AddWithValue("$id", actionId.ToString("D"));
+                insertAction.Parameters.AddWithValue("$turn", turnId.ToString("D"));
+                await insertAction.ExecuteNonQueryAsync();
+            }
+
+            using var response = await isolated.WebClient.GetAsync("/api/actions");
+            using var actions = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            var action = Assert.Single(
+                actions.RootElement.EnumerateArray(),
+                item => item.GetProperty("actionId").GetGuid() == actionId);
+
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            Assert.Equal("Executing", action.GetProperty("status").GetString());
+            Assert.Equal("invalid_action_journal", action.GetProperty("recoveryError").GetString());
+        }
+        finally
+        {
+            await isolated.DisposeAsync();
+        }
     }
 
     [Fact]
@@ -401,7 +465,6 @@ public sealed class AspireSimulatorTests(SimulatorHostFixture fixture)
             Assert.DoesNotContain(
                 approvals.RootElement.EnumerateArray(),
                 item => item.GetProperty("actionId").GetProperty("value").GetGuid() == lightActionId);
-            var simulatorEndpointBeforeRestart = isolated.HomeAssistantClient.BaseAddress;
             await using (var database = new SqliteConnection(
                 $"Data Source={Path.Combine(isolated.DataDirectoryPath, "jarvis.db")}"))
             {
@@ -415,6 +478,12 @@ public sealed class AspireSimulatorTests(SimulatorHostFixture fixture)
                 Assert.Equal(1, await setExecuting.ExecuteNonQueryAsync());
             }
             await isolated.RestartAsync();
+            using (var unavailableRead = await isolated.HomeAssistantClient.PostAsJsonAsync(
+                "/fixture/control/configure",
+                new { readFailures = Enumerable.Repeat(503, 64).ToArray(), applyWrites = true, writeStatus = 200 }))
+            {
+                Assert.Equal(HttpStatusCode.NoContent, unavailableRead.StatusCode);
+            }
             using var recoveredActionsResponse = await isolated.WebClient.GetAsync("/api/actions");
             using var recoveredActions = JsonDocument.Parse(
                 await recoveredActionsResponse.Content.ReadAsStringAsync());
@@ -424,16 +493,8 @@ public sealed class AspireSimulatorTests(SimulatorHostFixture fixture)
             Assert.NotEqual("Executing", recoveredLight.GetProperty("status").GetString());
             using var recoveredCounts = JsonDocument.Parse(
                 await isolated.HomeAssistantClient.GetStringAsync("/fixture/control/counts"));
-            if (simulatorEndpointBeforeRestart == isolated.HomeAssistantClient.BaseAddress)
-            {
-                Assert.Equal(writesBefore + 1, recoveredCounts.RootElement.GetProperty("writes").GetInt32());
-                Assert.Equal("Verified", recoveredLight.GetProperty("status").GetString());
-            }
-            else
-            {
-                Assert.Equal(0, recoveredCounts.RootElement.GetProperty("writes").GetInt32());
-                Assert.Equal("Unknown", recoveredLight.GetProperty("status").GetString());
-            }
+            Assert.Equal(0, recoveredCounts.RootElement.GetProperty("writes").GetInt32());
+            Assert.Equal("Unknown", recoveredLight.GetProperty("status").GetString());
 
             var configureFailures = await isolated.HomeAssistantClient.PostAsJsonAsync(
                 "/fixture/control/configure",

@@ -503,6 +503,9 @@ public sealed class MemoryTests
         public ValueTask<ActionJournalEntry> SettleExpiredAsync(
             ApprovalId approvalId, string ownerId, long expectedVersion, CancellationToken cancellationToken) =>
             throw new NotImplementedException();
+        public ValueTask<ActionJournalEntry> SettleRejectedAsync(
+            ApprovalId approvalId, string ownerId, long expectedVersion, CancellationToken cancellationToken) =>
+            throw new NotImplementedException();
     }
 
     private sealed class Clock : IClock
@@ -525,6 +528,10 @@ public sealed class MemoryTests
             }
             return ValueTask.FromResult(new ToolDispatchResult("AwaitingApproval", null, null));
         }
+        public ValueTask<ActionJournalEntry> MarkUnavailableExecutingActionUnknownAsync(
+            ActionJournalEntry action,
+            CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
     }
 
     private sealed class ProposalConversations : IConversationStore

@@ -2485,6 +2485,8 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
                 retryProposalRequest.RootElement.GetProperty("requestId").GetGuid());
             Assert.Equal(selectedConversationId.ToString("D"),
                 await page.EvaluateAsync<string>("conversationId"));
+            await page.WaitForFunctionAsync(
+                "() => document.getElementById('memory-value').value === ''");
             Assert.Equal(string.Empty, await page.GetByLabel("Exact fact value").InputValueAsync());
             Assert.Equal(2, proposalRequestCount);
         }

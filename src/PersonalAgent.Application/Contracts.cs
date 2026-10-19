@@ -659,6 +659,14 @@ public interface IToolDispatcher
     /// <param name="cancellationToken">Token that cancels work before an external side effect is sent.</param>
     /// <returns>A truthful result; ambiguous physical outcomes are reported as Unknown.</returns>
     ValueTask<ToolDispatchResult> DispatchAsync(ToolDispatchRequest request, CancellationToken cancellationToken);
+
+    /// <summary>Records Unknown when an interrupted action cannot be safely observed with current capabilities.</summary>
+    /// <param name="action">Owner-validated action still marked Executing.</param>
+    /// <param name="cancellationToken">Token that cancels persistence before the outcome is committed.</param>
+    /// <returns>The durable action, preserving concurrent execution and terminal outcomes.</returns>
+    ValueTask<ActionJournalEntry> MarkUnavailableExecutingActionUnknownAsync(
+        ActionJournalEntry action,
+        CancellationToken cancellationToken);
 }
 
 /// <summary>Describes an exact-action approval request.</summary>
@@ -723,6 +731,20 @@ public interface IApprovalService
     /// <remarks>Approval and action records are stored separately. This idempotent operation recovers an expired
     /// approval whose process stopped after the approval decision committed but before its action was settled.</remarks>
     ValueTask<ActionJournalEntry> SettleExpiredAsync(
+        ApprovalId approvalId,
+        string ownerId,
+        long expectedVersion,
+        CancellationToken cancellationToken);
+
+    /// <summary>Repairs action settlement for an approval already recorded as rejected.</summary>
+    /// <param name="approvalId">Persisted rejected approval request.</param>
+    /// <param name="ownerId">Authenticated owner bound to the approval.</param>
+    /// <param name="expectedVersion">Approval version read by the owner workflow.</param>
+    /// <param name="cancellationToken">Token that cancels settlement before commit.</param>
+    /// <returns>The current durable action; an already terminal or executing action is not overwritten.</returns>
+    /// <remarks>Approval and action records are stored separately. This idempotent operation repairs a rejected
+    /// approval whose process stopped before its action was settled.</remarks>
+    ValueTask<ActionJournalEntry> SettleRejectedAsync(
         ApprovalId approvalId,
         string ownerId,
         long expectedVersion,
@@ -1108,6 +1130,11 @@ public sealed record ActionJournalEntry(
     /// <summary>Gets the host-authenticated owner for memory actions, retained after content redaction.</summary>
     public string? MemoryOwnerId { get; init; }
 }
+
+/// <summary>Describes a safely reported failure to recover an owner-bound action.</summary>
+/// <param name="ActionId">Action whose durable recovery data could not be interpreted.</param>
+/// <param name="ReasonCode">Stable non-sensitive reason code suitable for owner-facing status.</param>
+public sealed record ActionRecoveryIssue(ActionId ActionId, string ReasonCode);
 
 /// <summary>Persists action intent and observed outcomes before and after external side effects.</summary>
 public interface IActionJournalStore

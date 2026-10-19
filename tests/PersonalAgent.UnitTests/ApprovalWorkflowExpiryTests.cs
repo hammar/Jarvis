@@ -255,10 +255,10 @@ public sealed class ApprovalWorkflowExpiryTests
         var fixture = new Fixture(actionStatus: "Executing", envelopeOwner: "someone-else");
         fixture.Journal.RecentActions = [fixture.Journal.Entry];
 
-        await Assert.ThrowsAsync<InvalidDataException>(() =>
-            fixture.Workflow.RecoverUnapprovedExecutingActionsAsync("owner", default).AsTask());
+        var issues = await fixture.Workflow.RecoverUnapprovedExecutingActionsAsync("owner", default);
 
         Assert.Equal("Executing", fixture.Journal.Entry.Status);
+        Assert.Equal([new ActionRecoveryIssue(fixture.Journal.Entry.Id, "invalid_action_journal")], issues);
         Assert.Empty(fixture.Dispatcher.ReleasedApprovals);
         Assert.Empty(fixture.Dispatcher.ReleasedTurns);
     }
@@ -438,23 +438,38 @@ public sealed class ApprovalWorkflowExpiryTests
             string ownerId,
             long expectedVersion,
             CancellationToken cancellationToken)
+            => await SettleResolvedAsync(approvalId, ownerId, expectedVersion, "Expired", cancellationToken);
+
+        public async ValueTask<ActionJournalEntry> SettleRejectedAsync(
+            ApprovalId approvalId,
+            string ownerId,
+            long expectedVersion,
+            CancellationToken cancellationToken)
+            => await SettleResolvedAsync(approvalId, ownerId, expectedVersion, "Rejected", cancellationToken);
+
+        private async ValueTask<ActionJournalEntry> SettleResolvedAsync(
+            ApprovalId approvalId,
+            string ownerId,
+            long expectedVersion,
+            string status,
+            CancellationToken cancellationToken)
         {
             if (Current.Id != approvalId
                 || Current.OwnerId != ownerId
                 || Current.ExpectedVersion != expectedVersion
-                || Current.Status != "Expired")
+                || Current.Status != status)
             {
-                throw new PersistenceConcurrencyException("The approval is not the expected expired version.");
+                throw new PersistenceConcurrencyException("The approval is not the expected resolved version.");
             }
 
             var entry = await journal.GetAsync(Current.ActionId, cancellationToken)
-                ?? throw new PersistenceConcurrencyException("The expired action disappeared.");
+                ?? throw new PersistenceConcurrencyException("The resolved action disappeared.");
             if (entry.Status == "AwaitingApproval")
             {
                 journal.Entry = entry with
                 {
-                    Status = "Expired",
-                    Outcome = new("Expired", null, "approval_expired", entry.Id, approvalId)
+                    Status = status,
+                    Outcome = new(status, null, $"approval_{status.ToLowerInvariant()}", entry.Id, approvalId)
                 };
             }
 
@@ -505,6 +520,10 @@ public sealed class ApprovalWorkflowExpiryTests
             Dispatches++;
             return ValueTask.FromResult(new ToolDispatchResult(DispatchStatus, null, null));
         }
+        public ValueTask<ActionJournalEntry> MarkUnavailableExecutingActionUnknownAsync(
+            ActionJournalEntry action,
+            CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
     }
 
     private sealed class MemoryStore : IConfirmedMemoryStore

@@ -354,7 +354,18 @@ static string? CreateDemoToolReply(JsonElement request)
     {
         return null;
     }
-    var toolMessage = messages.EnumerateArray()
+    var history = messages.EnumerateArray().ToArray();
+    var latestUserMessageIndex = Array.FindLastIndex(history, message =>
+        message.ValueKind == JsonValueKind.Object
+        && message.TryGetProperty("role", out var role)
+        && role.GetString() == "user");
+    if (latestUserMessageIndex < 0)
+    {
+        return null;
+    }
+
+    var toolMessage = history
+        .Skip(latestUserMessageIndex + 1)
         .LastOrDefault(message =>
             message.ValueKind == JsonValueKind.Object
             && message.TryGetProperty("role", out var role)

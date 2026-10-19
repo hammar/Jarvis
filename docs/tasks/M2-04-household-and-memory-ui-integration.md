@@ -513,3 +513,61 @@ Independent exact-commit review of the R33 follow-up and current-head GitHub
 checks remain pending after commit and push. Linux CI, live provider
 availability, physical-effect causality, human observations, and
 assistive-technology certification remain unexercised.
+
+### Exact-commit review follow-up: R34–R43
+
+The review of `5b460466afa027fc43111dfc80e7d8f8d0afdca3` raised five inline
+recovery findings and four summary-only "Previously missed" findings. The
+subsequent R33 follow-up also found that terminal approval decisions still
+needed priority over newer Pending requests. The fixes and regressions below
+are in progress; no full-gate or exact-commit review evidence is claimed yet.
+
+| Reference | Severity | Finding | Follow-up disposition |
+| --- | --- | --- | --- |
+| M2-04-R34 | Medium | An interrupted Rejected approval decision could leave its action AwaitingApproval and retain its dispatcher hold. | Added owner/version-checked idempotent rejected-action settlement and repair during owner approval reads. `ApprovalListRepairsRejectedDecisionWhoseActionSettlementWasInterrupted` covers durable recovery. |
+| M2-04-R35 | Medium | Concurrent owner reads recovering the same interrupted action could fail the whole list when the competing update won. | Recovery rereads the durable action after a concurrency conflict and accepts only an already-terminal outcome; disappeared or nonterminal actions remain errors. `ConcurrentInterruptedActionRecoveryAcceptsTheFirstTerminalOutcome` controls overlapping reads. |
+| M2-04-R36 | High | A removed registration or allowlist capability could leave an interrupted household action Executing. | Recovery records Unknown when the registration is absent and relies on the existing observation-only dispatcher path when policy no longer permits observation; neither path resends the write or overwrites active execution. `InterruptedActionBecomesUnknownWhenItsCapabilityWasRemoved`, `UnavailableRecoveryDoesNotOverwriteAnActiveExecutionOrTerminalAction`, and `UnavailableRecoveryAcceptsConcurrentTerminalStateAndRejectsNonterminalConflict` cover removed capabilities and concurrent action states. |
+| M2-04-R37 | High | Releasing a turn after one action recovered could discard a shared failure budget while sibling dispatches were still active or waiting. | Per-turn dispatch leases retain shared budgets until all same-turn dispatches exit, in addition to unresolved approval holds. `TurnReleaseDuringSiblingHistoryReadPreservesUncertaintyBudget` interleaves turn release with sibling history seeding. |
+| M2-04-R38 | Medium | Malformed canonical data in one Executing action could break the complete owner-scoped action-list response. | Recovery now reports a stable per-action error while leaving malformed actions unexecuted and returning the rest of the owner list. The API exposes the separate `recoveryError`; `MalformedExecutingActionReportsRecoveryIssueWithoutBreakingOwnerList` and `AspireSimulatorTests.MalformedExecutingActionDoesNotBreakOwnerActionsApi` cover a durably attributed malformed row. |
+| M2-04-R39 | Medium | An older interrupted Expired decision could be hidden behind newer Pending approvals in the bounded owner query. | Approval query ordering now prioritizes resolved decisions linked to unresolved actions, then actionable Pending records, ahead of non-actionable history. `ApprovalListPrioritizesOlderInterruptedExpiryBeforeNewerPendingApprovals` covers the terminal-decision overflow case. |
+| M2-04-R40 | Medium | One hundred newer Unknown actions could hide an older Executing action from the bounded recovery query. | Owner action queries prioritize Prepared/AwaitingApproval/Executing before Unknown and terminal history. `UnapprovedExecutingActionRecoveryPrioritizesOlderUnresolvedActions` now seeds 101 newer Unknown outcomes. |
+| M2-04-R41 | Medium | Newer invalidated Pending memory approvals could displace an older actionable approval from the bounded approval query. | Approval query ordering distinguishes non-invalidated AwaitingApproval actions from invalidated Pending records. `ApprovalListPrioritizesActionableApprovalOverNewerInvalidatedPendingRecords` seeds 101 newer invalidated requests. |
+| M2-04-R42 | Medium | The Aspire restart test inferred simulator state continuity from URL reuse, although a restarted simulator process begins with zero writes and a reset lamp. | The restart scenario now forces observation failure after the graph restart and always asserts zero simulator writes plus Unknown, independent of whether the endpoint URL was reused. The targeted restart E2E passed. |
+| M2-04-R43 | Medium | Simulator final-answer generation could reuse an earlier turn's tool result when the current turn made no tool call. | Tool-result lookup is restricted to tool messages following the latest user message. The multi-turn `SimulatorDemoMapsDocumentedCommandsToBoundedRegisteredTools` regression verifies an unrelated follow-up receives the normal controlled response instead of stale temperature data. |
+
+The focused lifecycle integration regressions passed 7/7, and the focused
+bounded-query cases passed 6/6 (including two repeated capability-removal
+cases); focused unit tests passed 32/32; focused SDK contract tests passed
+56/56; the simulator protocol and restart E2E scenarios passed 2/2; and the
+malformed-action production API E2E passed 1/1. The active-sibling budget test
+also reproduces recovery of action A while action B is executing and action C
+waits on the same-turn budget; it passed 1/1. GitHub's browser gate for
+pre-follow-up commit `5b460466afa027fc43111dfc80e7d8f8d0afdca3` failed 35/36
+because the delayed-proposal retry test sampled the editor immediately after
+its HTTP response, before client-side completion cleared the unchanged draft.
+The test now waits for the observable editor reset before asserting; the
+focused regression passed 1/1, and the refreshed full browser gate passed.
+
+The final credential-free validation ran on native macOS with .NET SDK
+`10.0.401` and isolated Simulator/SQLite data:
+
+| Command | Result |
+| --- | --- |
+| `tools/validate.sh build` | Passed; Release build, formatting/analyzers, zero warnings/errors. |
+| `tools/validate.sh architecture` | Passed; 6/6 discovered tests. |
+| `tools/validate.sh unit` | Passed; 352/352 discovered tests. |
+| `tools/validate.sh integration` | Passed; 476/476 discovered tests. |
+| `tools/validate.sh sdk-contracts` | Passed; actual pinned-runtime probes and 57/57 contract tests. |
+| `tools/validate.sh coverage` | Passed; changed executable lines 96.4% (1030/1068); Application 98.4% lines / 93.6% branches; all configured unit-only, runtime, and critical-module thresholds met. |
+| `tools/validate.sh aspire-e2e` | Passed; 15/15 out-of-process scenarios. |
+| `tools/validate.sh browser-e2e` | Passed; 36/36 Playwright scenarios, and the deliberately failing browser probe was discovered and failed as expected. |
+| `tools/validate.sh docs` | Passed; all internal Markdown links resolve. |
+| `git diff --check` | Passed. |
+
+The follow-up remains uncommitted at this checkpoint. Independent exact-commit
+review, replies/resolutions for all outstanding review threads, and GitHub
+checks on the pushed revision remain pending. Linux CI, live Home Assistant
+and provider availability, physical-effect causality, human observations,
+and assistive-technology certification remain unexercised. No live Home
+Assistant credentials, private household data, cloud inference, or
+physical-device writes were used.

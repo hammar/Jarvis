@@ -1249,6 +1249,7 @@ async function openActivity() {
             const title = `${item.actionType} · ${item.status}`;
             const detail = [
                 item.reasonCode ? `Reason: ${item.reasonCode}` : "",
+                item.recoveryError ? `Recovery issue: ${item.recoveryError}` : "",
                 `Updated ${new Date(item.updatedAtUtc).toLocaleString()}`,
                 item.memoryInvalidated ? "Sensitive action content invalidated" : ""
             ].filter(Boolean).join(" · ");

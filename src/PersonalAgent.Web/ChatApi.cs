@@ -133,7 +133,8 @@ internal static class ChatApi
             CancellationToken ct) =>
         {
             var owner = OwnerHttpSecurity.GetOwnerId(context.User)!;
-            await approvalWorkflow.RecoverUnapprovedExecutingActionsAsync(owner, ct);
+            var recoveryIssues = await approvalWorkflow.RecoverUnapprovedExecutingActionsAsync(owner, ct);
+            var recoveryIssueIds = recoveryIssues.Select(issue => issue.ActionId).ToHashSet();
             var actions = await journal.ReadRecentForOwnerAsync(owner, 100, ct);
             return Results.Ok(actions.Select(action => new
             {
@@ -150,6 +151,7 @@ internal static class ChatApi
                     _ => action.Status
                 },
                 reasonCode = action.Outcome?.ReasonCode,
+                recoveryError = recoveryIssueIds.Contains(action.Id) ? "invalid_action_journal" : null,
                 updatedAtUtc = action.UpdatedAtUtc,
                 memoryInvalidated = action.MemoryInvalidated
             }));

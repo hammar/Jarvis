@@ -111,6 +111,11 @@ public sealed class LiveOllamaChatTests(ITestOutputHelper output)
 
         public ValueTask<ToolDispatchResult> DispatchAsync(ToolDispatchRequest request, CancellationToken cancellationToken) =>
             throw new InvalidOperationException("The synthetic text-only diagnostic must not dispatch tools.");
+
+        public ValueTask<ActionJournalEntry> MarkUnavailableExecutingActionUnknownAsync(
+            ActionJournalEntry action,
+            CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
     }
 
     private sealed class LiveOllamaTheoryAttribute : TheoryAttribute
