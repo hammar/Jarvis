@@ -77,9 +77,14 @@ public sealed class MemoryProposalService(
         var turnId = TurnId.New();
         var sourceText = SourceText(change);
         var requestKey = requestId.ToString("N");
-        var requestFingerprint = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(sourceText))).ToLowerInvariant();
+        var requestFingerprint = Convert.ToHexString(
+            SHA256.HashData(Encoding.UTF8.GetBytes(RequestFingerprintText(change)))).ToLowerInvariant();
         var submission = await conversations.FindSubmittedTurnAsync(
             conversationId, requestKey, requestFingerprint, cancellationToken, ownerId);
+        var dispatchSource = submission is { IsDuplicate: true }
+            ? await memories.ReadSourceAsync(ownerId, submission.Turn.Id, cancellationToken)
+            : null;
+        var dispatchText = dispatchSource?.Content ?? sourceText;
         if (submission is null)
         {
             if (change.Operation is "update" or "delete")
@@ -117,7 +122,7 @@ public sealed class MemoryProposalService(
                 "memory.propose_change",
                 JsonSerializer.Serialize(MemoryToolRegistrations.Arguments(change)),
                 ownerId,
-                sourceText), cancellationToken);
+                dispatchText), cancellationToken);
             if (!submission.IsDuplicate)
             {
                 var turn = await conversations.GetTurnAsync(submission.Turn.Id, cancellationToken)
@@ -203,7 +208,11 @@ public sealed class MemoryProposalService(
         return (entry, command);
     }
 
-    private static string SourceText(MemoryChange change) => JsonSerializer.Serialize(new
+    private static string SourceText(MemoryChange change) =>
+        $"Owner-entered memory proposal ({change.Operation}); exact reviewed mutation is stored in its durable action.";
+
+    // Preserve pre-marker request fingerprints so accepted retries remain idempotent across upgrades.
+    private static string RequestFingerprintText(MemoryChange change) => JsonSerializer.Serialize(new
     {
         kind = "owner-entered-memory-proposal",
         change.Operation,

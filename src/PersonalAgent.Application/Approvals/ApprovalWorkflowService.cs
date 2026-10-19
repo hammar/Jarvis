@@ -72,6 +72,7 @@ public sealed class ApprovalWorkflowService
 
         var records = await approvalStore.ReadRecentForOwnerAsync(ownerId, maximumRequests, cancellationToken);
         var summaries = new List<ApprovalActionSummary>(records.Count);
+        var recoveredExecutions = 0;
         foreach (var record in records)
         {
             if (!string.Equals(record.OwnerId, ownerId, StringComparison.Ordinal))
@@ -81,6 +82,40 @@ public sealed class ApprovalWorkflowService
 
             var action = await journal.GetAsync(record.ActionId, cancellationToken)
                 ?? throw new InvalidDataException("An approval is missing its durable action.");
+            var approval = new ApprovalRequest(
+                record.Id, record.ActionId, record.OwnerId, record.ExpiresAtUtc, record.Version, record.Status);
+            if (approval.Status == "Pending" && clock.UtcNow.ToUniversalTime() >= approval.ExpiresAtUtc)
+            {
+                try
+                {
+                    approval = await approvals.ResolveAsync(
+                        approval.Id, ownerId, approval.ExpectedVersion, approved: false, cancellationToken);
+                }
+                catch (PersistenceConcurrencyException)
+                {
+                    approval = await approvals.GetAsync(approval.Id, cancellationToken)
+                        ?? throw new PersistenceConcurrencyException("The approval disappeared during expiry settlement.");
+                    action = await journal.GetAsync(action.Id, cancellationToken)
+                        ?? throw new InvalidDataException("The expired action disappeared.");
+                    if (approval.Status == "Pending")
+                    {
+                        throw;
+                    }
+                }
+
+                if (approval.Status == "Expired")
+                {
+                    dispatcher.ReleaseApproval(action.Id);
+                    action = await journal.GetAsync(action.Id, cancellationToken)
+                        ?? throw new InvalidDataException("The expired action disappeared.");
+                }
+            }
+            else if (approval.Status == "Approved" && action.Status == "Executing" && recoveredExecutions < 8)
+            {
+                action = await RecoverExecutingActionAsync(ownerId, action, cancellationToken);
+                recoveredExecutions++;
+            }
+
             if (action.MemoryInvalidated)
             {
                 if (!string.Equals(action.MemoryOwnerId, ownerId, StringComparison.Ordinal))
@@ -120,7 +155,7 @@ public sealed class ApprovalWorkflowService
             }
 
             summaries.Add(new(
-                new(record.Id, record.ActionId, record.OwnerId, record.ExpiresAtUtc, record.Version, record.Status),
+                approval,
                 action.Id,
                 envelope.ToolName,
                 envelope.ActionType,
@@ -130,6 +165,68 @@ public sealed class ApprovalWorkflowService
                 arguments));
         }
         return summaries;
+    }
+
+    private async ValueTask<ActionJournalEntry> RecoverExecutingActionAsync(
+        string ownerId,
+        ActionJournalEntry action,
+        CancellationToken cancellationToken)
+    {
+        var envelope = ReadEnvelope(action);
+        if (!string.Equals(envelope.OwnerId, ownerId)
+            || envelope.ToolName is not ("home.set_light" or "home.set_temperature" or "memory.propose_change"))
+        {
+            throw new InvalidDataException("An executing approval is not bound to a recoverable owner action.");
+        }
+
+        var turnId = new TurnId(Guid.Parse(envelope.TurnId));
+        try
+        {
+            if (envelope.ToolName == "memory.propose_change")
+            {
+                await memoryProposals.CompleteAsync(ownerId, action.Id, cancellationToken);
+            }
+            else
+            {
+                var source = await memories.ReadSourceAsync(ownerId, turnId, cancellationToken);
+                if (source is null)
+                {
+                    action = await journal.UpdateStatusAsync(
+                        action.Id,
+                        "Unknown",
+                        action.Version,
+                        clock.UtcNow.ToUniversalTime(),
+                        cancellationToken,
+                        new("Unknown", null, "interrupted_execution_source_unavailable", action.Id,
+                            new ApprovalId(action.Id.Value)));
+                }
+                else
+                {
+                    await dispatcher.DispatchAsync(new(
+                        turnId,
+                        envelope.CallId,
+                        envelope.ToolName,
+                        envelope.CanonicalArguments,
+                        ownerId,
+                        source.Content)
+                    {
+                        ReplayCurrentRequestHash = envelope.CurrentRequestHash
+                    }, cancellationToken);
+                }
+            }
+        }
+        finally
+        {
+            dispatcher.ReleaseTurn(turnId);
+        }
+
+        action = await journal.GetAsync(action.Id, cancellationToken)
+            ?? throw new InvalidDataException("The recovered action disappeared.");
+        if (action.Status != "Executing")
+        {
+            dispatcher.ReleaseApproval(action.Id);
+        }
+        return action;
     }
 
     /// <summary>

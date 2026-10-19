@@ -130,7 +130,9 @@ data are used by credential-free validation.
 - Approval exactness, rejection, expiry, replay and stale-version/owner
   protection: `ToolDispatcherTests.OwnerWorkflowReviewsAndExecutesOnlyTheExactApprovedHomeAction`,
   `ToolDispatcherTests.ExpiredApprovalIsJournaledExpiredWithoutExecution`,
+  `ToolDispatcherTests.ApprovalListExpiresPendingActionsAndKeepsNewerApprovalPending`,
   `ToolDispatcherTests.ChangedProposalWhileApprovalIsPendingInvalidatesTheAction`,
+  `ToolDispatcherTests.ApprovalListRecoversInterruptedApprovedHomeActionByObservationOnly`,
   `ToolDispatcherTests.AlreadyApprovedUnclaimedHomeActionCanResumeAfterDispatcherRestart`,
   `BrowserSmokeTests.ApprovedUnclaimedActionOffersAnExplicitResumeControl`,
   `ToolDispatcherTests.ExpiredApprovedUnclaimedActionCanBeFinalizedWithoutExecution`,
@@ -146,7 +148,22 @@ data are used by credential-free validation.
   `ConfirmedMemoryTests.ConflictsRequireExplicitResolutionAndRetainedFactsNeedDistinctContext`,
   `ConfirmedMemoryTests.RetainedFactCanBeEditedInPlaceWithExactSiblingSnapshotAndDistinctContext`,
   `ConfirmedMemoryTests.DeleteRedactsDerivedCopiesAndOldCallsCannotRestoreThem`,
+  `ConfirmedMemoryTests.BoundedProposalSourcePreservesPreviouslyAcceptedRequestFingerprints`,
+  `ConfirmedMemoryTests.LargeEscapedProposalAndConflictSnapshotStayOutsideTheChatMessageLimit`,
+  `ConfirmedMemoryTests.ApprovalListRecoversInterruptedMemoryCommitFromItsReceipt`,
   and `ConfirmedMemoryTests.ReceiptRecoversInterruptedSettlementWithoutRepeatingTheMutation`.
+- Simulator tool-result answers and same-conversation command matching:
+  `AspireSimulatorTests.WebChatShowsSimulatorToolResultsAndMatchesCommandsAfterConversationHistory`.
+- Stale browser proposal responses cannot change the selected conversation or
+  reset the current draft:
+  `BrowserSmokeTests.DelayedMemoryProposalCannotResetFormOrSelectionAfterConversationSwitch`.
+- Real Aspire host restart recovers household actions by observation without
+  another write and settles memory actions from their receipt:
+  `AspireSimulatorTests.ApprovalListRecoversInterruptedActionsAfterHostRestartWithoutCrossingHomeInstallationBoundary`.
+  When a full AppHost restart changes the managed simulator endpoint, the
+  E2E asserts fail-closed observation-scope behavior; stable-scope
+  observation-only recovery is independently covered by the SQLite-backed
+  integration regression.
 - Browser owner surfaces, status-endpoint failure independence, keyboard
   focus, responsive widths, long-content wrapping, and privacy-safe screenshots:
   `BrowserSmokeTests.HouseholdMemoryApprovalAndActivitySurfacesReflowAndKeepKeyboardFocusVisible`.
@@ -329,3 +346,49 @@ No live Home Assistant credentials, private household data, cloud inference,
 or physical devices were used. Linux CI, live HA/provider availability,
 physical-effect causality, human observations, and assistive-technology
 certification remain unexercised.
+
+### Exact-commit review follow-up: R16–R21
+
+PR #48 review identified six additional actionable findings. The fixes and
+their regressions are tracked below; full validation results and the exact
+review revision will be recorded after this follow-up is verified.
+
+| Reference | Severity | Finding | Follow-up disposition |
+| --- | --- | --- | --- |
+| M2-04-R16 | High | Approved actions left `Executing` after process interruption had no owner-workflow recovery path; household writes could remain unsettled and committed memory receipts could be missed. | `ApprovalWorkflowService.ReadRecentAsync` now performs bounded recovery of Approved+Executing actions from durable owner/action data. Household actions go through the dispatcher's observation-only restart branch; missing source is settled as Unknown. Memory actions use receipt recovery. Real SQLite and Aspire host-restart regressions are `ApprovalListRecoversInterruptedApprovedHomeActionByObservationOnly`, `ApprovalListRecoversInterruptedMemoryCommitFromItsReceipt`, and `ApprovalListRecoversInterruptedActionsAfterHostRestartWithoutCrossingHomeInstallationBoundary`. The Aspire scenario also proves a changed managed simulator endpoint is not observed as the previously approved installation. |
+| M2-04-R17 | Medium | Valid memory proposals could exceed the 8,000-character conversation-message limit when serialized values, escaping, and conflict references were used as source text. | Persist the original owner message as a short provenance marker while retaining the exact canonical mutation and request fingerprint in the durable action. The fingerprint preserves its pre-change serialization for upgrade-safe retries. `LargeEscapedProposalAndConflictSnapshotStayOutsideTheChatMessageLimit` checks an 8,192-character escaped value, all 100 conflict references, exact preview/commit, and bounded source text; `BoundedProposalSourcePreservesPreviouslyAcceptedRequestFingerprints` verifies old accepted request IDs remain idempotent. |
+| M2-04-R18 | Medium | Expired Pending approvals remained `AwaitingApproval` and retained in-process dispatcher budget holds after the UI removed their decision controls. | Approval-list reads now settle expired Pending approvals using the host clock and release the corresponding hold only after durable settlement. `ApprovalListExpiresPendingActionsAndKeepsNewerApprovalPending` advances a controlled clock without redispatch, settles an expired approval, and preserves a newer actionable sibling. |
+| M2-04-R19 | Medium | A delayed memory-proposal response could restore an old conversation selection and clear the editor after the owner switched conversations. | Capture the local proposal conversation and selection generation; stale responses no longer change selection, reset the draft, or show stale errors. The delayed Playwright regression switches conversations while the POST is held and checks both selection and draft after response. |
+| M2-04-R20 | Medium | The Simulator emitted registered tool calls but did not display their results as final answers. | The controlled model now unwraps the production tool-result envelope and emits bounded, deterministic answers from actual household, memory, and action results, preserving freshness/availability and non-causality. `WebChatShowsSimulatorToolResultsAndMatchesCommandsAfterConversationHistory` exercises the production Aspire Web/SDK composition and asserts visible final answers. |
+| M2-04-R21 | Medium | Literal Simulator commands stopped matching when prior conversation history prefixed the current user request. | Strip only the known `LocalChatPrompt` current-request framing before matching documented demo commands. The protocol test supplies that framing, and the same-conversation Aspire scenario follows household and memory turns with a simulated light command. |
+
+### R16–R21 refreshed validation
+
+The refreshed credential-free checks ran on native macOS with .NET SDK
+`10.0.401` and isolated Simulator/SQLite data. `origin/main` was fetched and
+the branch is up to date with it. The earlier one-off simulator readiness 404
+did not recur after rebuilding the Release simulator and rerunning the
+affected browser scenarios.
+
+| Command | Result |
+| --- | --- |
+| `tools/validate.sh build` | Passed after the final simulator/test adjustment; Release build, formatting and analyzers, zero warnings/errors. |
+| `tools/validate.sh architecture` | Passed; 6/6 discovered tests. |
+| `tools/validate.sh unit` | Passed; 340/340 discovered tests, including expiry, interrupted execution, concurrent settlement, and missing-journal regressions. |
+| `tools/validate.sh integration` | Passed; 461/461 discovered tests, including durable recovery, proposal provenance, and expiry/budget behavior. |
+| `tools/validate.sh sdk-contracts` | Passed; actual pinned-runtime probes and 57/57 contract tests. |
+| `tools/validate.sh coverage` | Passed; changed executable lines 96.1% (872/907). Application 98.3% lines / 93.7% branches; Infrastructure 94.2% / 82.9%; Web 98.0% / 79.0%; all configured runtime and critical-module thresholds met. |
+| `tools/validate.sh aspire-e2e` | Passed after the final simulator adjustment; 14/14 out-of-process scenarios. |
+| `tools/validate.sh browser-e2e` | Passed after a Release rebuild; 35/35 Playwright scenarios. The deliberately incorrect browser assertion was discovered and failed as expected by the gate probe. |
+| `tools/validate.sh docs` | Passed; all internal Markdown links resolve. |
+| `git diff --check` | Passed. |
+
+The full browser gate includes the delayed-proposal selection/draft regression
+and the simulator response streaming check. The previously failing isolated
+scenarios also passed 2/2 after rebuilding. Independent exact-commit review of
+the complete implementation delta, including the full M2-01/02/03 cumulative
+ledgers, and GitHub thread replies/resolutions remain pending. No live Home
+Assistant credentials, private household data, cloud inference, or physical
+devices were used; Linux CI, live provider availability, physical-effect
+causality, human observations, and assistive-technology certification remain
+unexercised.

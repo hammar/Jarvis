@@ -107,7 +107,7 @@ public sealed class ApprovalWorkflowExpiryTests
         fixture.ApprovalStore.Records =
         [
             new(fixture.Approval.Id, fixture.Approval.ActionId, "owner", "Pending",
-                Now, fixture.Approval.ExpiresAtUtc, null, fixture.Approval.ExpectedVersion)
+                Now, Now.AddMinutes(5), null, fixture.Approval.ExpectedVersion)
         ];
         var summary = Assert.Single(await fixture.Workflow.ReadRecentAsync("owner", 10, default));
         Assert.Equal("home.set_light", summary.ToolName);
@@ -122,6 +122,78 @@ public sealed class ApprovalWorkflowExpiryTests
             await fixture.Workflow.ReadRecentAsync("owner", 10, default));
     }
 
+    [Fact]
+    public async Task RecentApprovalReadExpiresStalePendingApprovalAndReleasesItsBudget()
+    {
+        var fixture = new Fixture(approvalStatus: "Pending");
+        fixture.ApprovalStore.Records =
+        [
+            new(fixture.Approval.Id, fixture.Approval.ActionId, "owner", "Pending",
+                Now, Now.AddMinutes(-1), null, fixture.Approval.ExpectedVersion)
+        ];
+
+        var summary = Assert.Single(await fixture.Workflow.ReadRecentAsync("owner", 10, default));
+
+        Assert.Equal("Expired", summary.Approval.Status);
+        Assert.Equal([fixture.Journal.Entry.Id], fixture.Dispatcher.ReleasedApprovals);
+        Assert.Equal(0, fixture.Dispatcher.Dispatches);
+    }
+
+    [Fact]
+    public async Task RecentApprovalReadMarksInterruptedExecutionUnknownWhenSourceIsUnavailable()
+    {
+        var fixture = new Fixture(actionStatus: "Executing", expiry: Now.AddMinutes(5));
+        fixture.ApprovalStore.Records =
+        [
+            new(fixture.Approval.Id, fixture.Approval.ActionId, "owner", "Approved",
+                Now, fixture.Approval.ExpiresAtUtc, Now, fixture.Approval.ExpectedVersion)
+        ];
+
+        var summary = Assert.Single(await fixture.Workflow.ReadRecentAsync("owner", 10, default));
+
+        Assert.Equal("Unknown", summary.ActionStatus);
+        Assert.Equal("interrupted_execution_source_unavailable", fixture.Journal.Entry.Outcome?.ReasonCode);
+        Assert.Equal([fixture.Journal.Entry.Id], fixture.Dispatcher.ReleasedApprovals);
+        Assert.Equal(0, fixture.Dispatcher.Dispatches);
+    }
+
+    [Fact]
+    public async Task RecentApprovalReadAcceptsExpirySettledConcurrently()
+    {
+        var fixture = new Fixture(approvalStatus: "Pending");
+        fixture.Approvals.ThrowOnResolve = true;
+        fixture.Approvals.Current = fixture.Approval with { Status = "Expired" };
+        fixture.ApprovalStore.Records =
+        [
+            new(fixture.Approval.Id, fixture.Approval.ActionId, "owner", "Pending",
+                Now, Now.AddMinutes(-1), null, fixture.Approval.ExpectedVersion)
+        ];
+
+        var summary = Assert.Single(await fixture.Workflow.ReadRecentAsync("owner", 10, default));
+
+        Assert.Equal("Expired", summary.Approval.Status);
+        Assert.Equal([fixture.Journal.Entry.Id], fixture.Dispatcher.ReleasedApprovals);
+        Assert.Equal(0, fixture.Dispatcher.Dispatches);
+    }
+
+    [Fact]
+    public async Task RecentApprovalReadFailsWhenExpiredActionDisappearsAfterSettlement()
+    {
+        var fixture = new Fixture(approvalStatus: "Pending");
+        fixture.ApprovalStore.Records =
+        [
+            new(fixture.Approval.Id, fixture.Approval.ActionId, "owner", "Pending",
+                Now, Now.AddMinutes(-1), null, fixture.Approval.ExpectedVersion)
+        ];
+        fixture.Journal.MissingOnGetCall = 2;
+
+        await Assert.ThrowsAsync<InvalidDataException>(async () =>
+            await fixture.Workflow.ReadRecentAsync("owner", 10, default));
+
+        Assert.Equal([fixture.Journal.Entry.Id], fixture.Dispatcher.ReleasedApprovals);
+        Assert.Equal(0, fixture.Dispatcher.Dispatches);
+    }
+
     private sealed class Fixture
     {
         internal readonly ApprovalRequest Approval;
@@ -129,6 +201,7 @@ public sealed class ApprovalWorkflowExpiryTests
         internal readonly Dispatcher Dispatcher = new();
         internal readonly Clock Clock;
         internal readonly ApprovalStore ApprovalStore = new();
+        internal readonly Approvals Approvals;
         internal readonly ApprovalWorkflowService Workflow;
 
         internal Fixture(
@@ -144,11 +217,11 @@ public sealed class ApprovalWorkflowExpiryTests
             Approval = new(new(actionId.Value), actionId, approvalOwner, expiry ?? Now.AddMinutes(-1), 7, approvalStatus);
             Journal = new(CreateEntry(actionId, envelopeOwner, toolName, actionStatus, memoryOwner));
             Clock = new(Now);
-            var approvals = new Approvals(Approval);
+            Approvals = new Approvals(Approval);
             Workflow = new(
                 ApprovalStore,
                 Journal,
-                approvals,
+                Approvals,
                 Dispatcher,
                 new MemoryStore(),
                 new MemoryProposalService(null!, null!, null!, null!, null!, Clock),
@@ -197,25 +270,47 @@ public sealed class ApprovalWorkflowExpiryTests
             DateTimeOffset resolvedAtUtc, CancellationToken cancellationToken) => throw new NotImplementedException();
     }
 
-    private sealed class Approvals(ApprovalRequest approval) : IApprovalService
+    private sealed class Approvals : IApprovalService
     {
+        private readonly ApprovalRequest approval;
+
+        internal Approvals(ApprovalRequest approval)
+        {
+            this.approval = approval;
+            Current = approval;
+        }
+
+        internal ApprovalRequest Current { get; set; }
+        internal bool ThrowOnResolve { get; set; }
+
         public ValueTask<ApprovalRequest> CreateAsync(ActionId actionId, string ownerId, CancellationToken cancellationToken) =>
             throw new NotImplementedException();
         public ValueTask<ApprovalRequest?> GetAsync(ApprovalId approvalId, CancellationToken cancellationToken) =>
-            ValueTask.FromResult<ApprovalRequest?>(approvalId == approval.Id ? approval : null);
+            ValueTask.FromResult<ApprovalRequest?>(approvalId == approval.Id ? Current : null);
         public ValueTask<ApprovalRequest> ResolveAsync(ApprovalId approvalId, string ownerId, long expectedVersion, bool approved,
-            CancellationToken cancellationToken) => throw new NotImplementedException();
+            CancellationToken cancellationToken)
+        {
+            if (ThrowOnResolve)
+            {
+                throw new PersistenceConcurrencyException("Concurrent approval settlement.");
+            }
+
+            Current = approval with { Status = approved ? "Approved" : "Expired" };
+            return ValueTask.FromResult(Current);
+        }
     }
 
     private sealed class Journal(ActionJournalEntry entry) : IActionJournalStore
     {
         internal ActionJournalEntry Entry { get; set; } = entry;
         internal Func<string, ActionJournalEntry>? OnUpdate { get; set; }
+        internal int GetCalls { get; private set; }
+        internal int MissingOnGetCall { get; set; }
 
         public ValueTask<ActionJournalEntry> CreateAsync(ActionJournalEntry value, CancellationToken cancellationToken) =>
             throw new NotImplementedException();
         public ValueTask<ActionJournalEntry?> GetAsync(ActionId id, CancellationToken cancellationToken) =>
-            ValueTask.FromResult<ActionJournalEntry?>(id == Entry.Id ? Entry : null);
+            ValueTask.FromResult<ActionJournalEntry?>(++GetCalls == MissingOnGetCall || id != Entry.Id ? null : Entry);
         public ValueTask<IReadOnlyList<ActionJournalEntry>> ReadRecentForOwnerAsync(string ownerId, int maximumActions, CancellationToken cancellationToken) =>
             throw new NotImplementedException();
         public ValueTask<IReadOnlyList<ActionJournalEntry>> ReadForTurnAsync(string ownerId, TurnId turnId, CancellationToken cancellationToken) =>
@@ -250,7 +345,7 @@ public sealed class ApprovalWorkflowExpiryTests
     private sealed class MemoryStore : IConfirmedMemoryStore
     {
         public ValueTask<ConversationMessage?> ReadSourceAsync(string ownerId, TurnId turnId, CancellationToken cancellationToken) =>
-            throw new NotImplementedException();
+            ValueTask.FromResult<ConversationMessage?>(null);
         public ValueTask<IReadOnlyList<MemoryFact>> ReadActiveAsync(string ownerId, int maximumFacts, CancellationToken cancellationToken) =>
             throw new NotImplementedException();
         public ValueTask<IReadOnlyList<MemoryFact>> SearchAsync(string ownerId, string query, int limit, CancellationToken cancellationToken) =>

@@ -1177,6 +1177,58 @@ public sealed class ToolDispatcherTests
 
     [Fact]
     [Trait("Category", "Integration")]
+    public async Task ApprovalListRecoversInterruptedApprovedHomeActionByObservationOnly()
+    {
+        using var fixture = await Fixture.CreateAsync(
+            riskClass: ToolRiskClass.ApprovalRequired,
+            verification: (_, _, _, _) =>
+                ValueTask.FromResult(new ToolVerificationOutcome(ToolVerificationStatus.Unknown, "not_confirmed")));
+        var pending = await fixture.CreatePendingHomeApprovalAsync(PorchRequest);
+        var approval = await fixture.Approvals.ResolveAsync(
+            pending.ApprovalId!.Value, "owner", 1, approved: true, CancellationToken.None);
+        var executing = await fixture.Journal.GetAsync(pending.ActionId!.Value, CancellationToken.None)
+            ?? throw new InvalidOperationException("The approved action was not journaled.");
+        await fixture.Journal.UpdateStatusAsync(
+            executing.Id, "Executing", executing.Version, fixture.Clock.UtcNow, CancellationToken.None);
+        var restartedWorkflow = fixture.ApprovalWorkflow(fixture.CreateRestartedDispatcher());
+
+        var summary = Assert.Single(await restartedWorkflow.ReadRecentAsync("owner", 10, CancellationToken.None));
+
+        Assert.Equal("Approved", summary.Approval.Status);
+        Assert.Equal("Unknown", summary.ActionStatus);
+        Assert.Equal("Unknown", (await fixture.Journal.GetAsync(executing.Id, CancellationToken.None))!.Status);
+        Assert.Equal(0, fixture.ExecutionCount);
+        Assert.Equal(1, fixture.VerificationCount);
+        Assert.Equal(approval.ExpectedVersion, summary.Approval.ExpectedVersion);
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task ApprovalListExpiresPendingActionsAndKeepsNewerApprovalPending()
+    {
+        using var fixture = await Fixture.CreateAsync(riskClass: ToolRiskClass.ApprovalRequired);
+        var firstRequest = PorchRequest with { TurnId = TurnId.New(), CallId = "first-approval" };
+        var first = await fixture.CreatePendingHomeApprovalAsync(firstRequest);
+        fixture.Clock.Advance(TimeSpan.FromMinutes(4));
+        var secondRequest = firstRequest with { CallId = "newer-approval" };
+        var second = await fixture.Dispatcher.DispatchAsync(secondRequest, CancellationToken.None);
+        fixture.Dispatcher.ReleaseTurn(firstRequest.TurnId);
+        fixture.Clock.Advance(TimeSpan.FromMinutes(1));
+
+        var summaries = await fixture.ApprovalWorkflow().ReadRecentAsync("owner", 10, CancellationToken.None);
+
+        var firstSummary = Assert.Single(summaries, item => item.ActionId == first.ActionId);
+        var secondSummary = Assert.Single(summaries, item => item.ActionId == second.ActionId);
+        Assert.Equal("Expired", firstSummary.Approval.Status);
+        Assert.Equal("Expired", firstSummary.ActionStatus);
+        Assert.Equal("Pending", secondSummary.Approval.Status);
+        Assert.Equal("AwaitingApproval", secondSummary.ActionStatus);
+        Assert.Equal("Expired", (await fixture.Journal.GetAsync(first.ActionId!.Value, CancellationToken.None))!.Status);
+        Assert.Equal(0, fixture.ExecutionCount);
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
     public async Task LowRiskWriteWithoutVerifiedExplicitOwnerIntentRequiresApproval()
     {
         using var fixture = await Fixture.CreateAsync();

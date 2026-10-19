@@ -1182,7 +1182,7 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
 
             const string firstMessage = "  A distinct   first request asks about café plans.  ";
             using (var delayFrameControl = await isolated.ModelClient.PostAsync(
-                "/fixture/control/delay-after-first-frame",
+                "/fixture/control/delay-after-first-content-frame",
                 content: null))
             {
                 delayFrameControl.EnsureSuccessStatusCode();
@@ -1194,7 +1194,7 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
             Assert.Equal(
                 "A distinct first request asks about café plans.",
                 await page.Locator("#conversation-title").InnerTextAsync());
-            using (var firstFrame = await isolated.ModelClient.GetAsync("/fixture/control/wait-for-first-frame"))
+            using (var firstFrame = await isolated.ModelClient.GetAsync("/fixture/control/wait-for-first-content-frame"))
             {
                 firstFrame.EnsureSuccessStatusCode();
             }
@@ -1644,7 +1644,7 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
                 await route.FulfillAsync(new RouteFulfillOptions { Response = response });
             });
             using (var delayFrameControl = await fixture.ModelClient.PostAsync(
-                "/fixture/control/delay-after-first-frame",
+                "/fixture/control/delay-after-first-content-frame",
                 content: null))
             {
                 delayFrameControl.EnsureSuccessStatusCode();
@@ -1675,7 +1675,7 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
 
             await page.UnrouteAsync("**/api/conversations/*/turns");
             using (var firstFrame = await fixture.ModelClient.GetAsync(
-                "/fixture/control/wait-for-first-frame"))
+                "/fixture/control/wait-for-first-content-frame"))
             {
                 firstFrame.EnsureSuccessStatusCode();
             }
@@ -2380,6 +2380,82 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
         }
         finally
         {
+            await isolated.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "BrowserE2E")]
+    public async Task DelayedMemoryProposalCannotResetFormOrSelectionAfterConversationSwitch()
+    {
+        var isolated = new SimulatorHostFixture();
+        await isolated.InitializeAsync();
+        var proposalReached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseProposal = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        try
+        {
+            async Task<Guid> CreateConversationAsync(string title)
+            {
+                using var response = await isolated.WebClient.PostAsJsonAsync(
+                    "/api/conversations", new { title });
+                response.EnsureSuccessStatusCode();
+                using var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+                return body.RootElement.GetProperty("id").GetProperty("value").GetGuid();
+            }
+
+            var proposalConversationId = await CreateConversationAsync("Proposal source");
+            var selectedConversationId = await CreateConversationAsync("Current selection");
+            using var playwright = await Playwright.CreateAsync();
+            await using var browser = await playwright.Chromium.LaunchAsync(
+                new BrowserTypeLaunchOptions { Headless = true });
+            var page = await browser.NewPageAsync();
+            await page.GotoAsync(isolated.WebClient.BaseAddress!.ToString());
+            await page.WaitForFunctionAsync(
+                "() => !document.getElementById('auth').hidden || !document.getElementById('chat').hidden");
+            if (!await page.Locator("#auth").IsHiddenAsync())
+            {
+                await page.GetByLabel("Passphrase").FillAsync(SimulatorHostFixture.OwnerPassphrase);
+                await page.Locator("#auth-submit").ClickAsync();
+                await page.WaitForFunctionAsync(
+                    "() => !authenticationInFlight && !document.getElementById('chat').hidden");
+            }
+
+            await page.Locator(
+                $"#conversation-list button[data-conversation-id='{proposalConversationId:D}']").ClickAsync();
+            await page.GetByRole(AriaRole.Button, new PageGetByRoleOptions { Name = "Memory" }).ClickAsync();
+            await page.GetByLabel("Subject").FillAsync("stale response room");
+            await page.GetByLabel("Fact key").FillAsync("curtain");
+            await page.GetByLabel("Exact fact value").FillAsync("preserve this draft");
+            await page.RouteAsync("**/api/memory/proposals", async route =>
+            {
+                proposalReached.TrySetResult();
+                await releaseProposal.Task.WaitAsync(TimeSpan.FromSeconds(15));
+                await route.ContinueAsync();
+            });
+            var responseTask = page.WaitForResponseAsync(response =>
+                response.Url.EndsWith("/api/memory/proposals", StringComparison.Ordinal)
+                && response.Request.Method == "POST");
+            await page.GetByRole(AriaRole.Button, new PageGetByRoleOptions { Name = "Prepare exact proposal" }).ClickAsync();
+            await proposalReached.Task.WaitAsync(TimeSpan.FromSeconds(15));
+
+            await page.Locator(
+                $"#conversation-list button[data-conversation-id='{selectedConversationId:D}']").ClickAsync();
+            await page.WaitForFunctionAsync(
+                $"() => conversationId === '{selectedConversationId:D}'");
+            await page.GetByRole(AriaRole.Button, new PageGetByRoleOptions { Name = "Memory", Exact = true }).ClickAsync();
+            releaseProposal.SetResult();
+            Assert.Equal(200, (await responseTask).Status);
+
+            Assert.Equal(selectedConversationId.ToString("D"),
+                await page.EvaluateAsync<string>("conversationId"));
+            Assert.Equal("preserve this draft", await page.GetByLabel("Exact fact value").InputValueAsync());
+            Assert.Equal(selectedConversationId.ToString("D"),
+                await page.Locator("#conversation-list button[aria-current='page']")
+                    .GetAttributeAsync("data-conversation-id"));
+        }
+        finally
+        {
+            releaseProposal.TrySetResult();
             await isolated.DisposeAsync();
         }
     }
