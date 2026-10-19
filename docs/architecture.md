@@ -226,6 +226,13 @@ Approval-waiting proposals retain their equivalent-proposal budget across
 completion of the originating model turn. Settling an approval releases its
 hold only after dispatch has produced a terminal durable outcome; unresolved
 sibling approvals keep the shared uncertainty budget alive.
+If an owner approval is persisted but the action remains `AwaitingApproval`
+because the host stopped before dispatch claimed it, the owner may explicitly
+resume that same action from the approvals surface while its five-minute
+approval window remains open. This path accepts only the already-approved
+version and exact journal identity; startup never auto-submits it. Actions
+already `Executing` or terminal are not offered as resumable work, preserving
+observation-only recovery for uncertain physical outcomes.
 On a fresh dispatcher, recovery seeds uncertainty from the persisted action's
 original risk before observing, not from the new policy/registration risk.
 Unresolved writes are tracked by action ID as a set so reconciling one orphan

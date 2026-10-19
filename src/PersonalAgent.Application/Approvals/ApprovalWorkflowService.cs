@@ -24,7 +24,7 @@ public sealed record ApprovalActionSummary(
     string ActionStatus,
     string ArgumentsJson);
 
-/// <summary>Coordinates trusted approval decisions with exact durable action replay.</summary>
+/// <summary>Coordinates trusted approval decisions and owner-initiated resumption of exact approved actions.</summary>
 public sealed class ApprovalWorkflowService
 {
     private readonly IApprovalStore approvalStore;
@@ -129,7 +129,9 @@ public sealed class ApprovalWorkflowService
         return summaries;
     }
 
-    /// <summary>Resolves an exact owner-bound approval and executes approved work at most once.</summary>
+    /// <summary>
+    /// Resolves an exact owner-bound approval or resumes its already-approved, unclaimed action and executes at most once.
+    /// </summary>
     /// <param name="ownerId">Authenticated owner deciding the action.</param>
     /// <param name="approvalId">Approval identifier from the trusted UI.</param>
     /// <param name="expectedVersion">Version displayed to the owner.</param>
@@ -187,10 +189,29 @@ public sealed class ApprovalWorkflowService
         }
 
         var turnId = new TurnId(Guid.Parse(envelope.TurnId));
-        var source = await memories.ReadSourceAsync(ownerId, turnId, cancellationToken)
-            ?? throw new PersistenceConcurrencyException("The original owner request is unavailable.");
-        var resolved = await approvals.ResolveAsync(
-            approvalId, ownerId, expectedVersion, approved, cancellationToken);
+        ConversationMessage? source = null;
+        ApprovalRequest resolved;
+        if (approval.Status == "Approved")
+        {
+            if (!approved || approval.ExpectedVersion != expectedVersion)
+            {
+                throw new PersistenceConcurrencyException(
+                    "The approved action cannot be changed or its version has changed.");
+            }
+            if (action.Status != "AwaitingApproval")
+            {
+                return action.Outcome ?? new(action.Status, null, "recorded_action_outcome", action.Id, approvalId);
+            }
+
+            resolved = approval;
+        }
+        else
+        {
+            source = await memories.ReadSourceAsync(ownerId, turnId, cancellationToken)
+                ?? throw new PersistenceConcurrencyException("The original owner request is unavailable.");
+            resolved = await approvals.ResolveAsync(
+                approvalId, ownerId, expectedVersion, approved, cancellationToken);
+        }
         if (resolved.Status != "Approved")
         {
             dispatcher.ReleaseApproval(action.Id);
@@ -200,13 +221,15 @@ public sealed class ApprovalWorkflowService
                 settled.Id, approvalId, resolved.ExpiresAtUtc);
         }
 
+        var approvedSource = source ?? await memories.ReadSourceAsync(ownerId, turnId, cancellationToken)
+            ?? throw new PersistenceConcurrencyException("The original owner request is unavailable.");
         var request = new ToolDispatchRequest(
             turnId,
             envelope.CallId,
             envelope.ToolName,
             envelope.CanonicalArguments,
             ownerId,
-            source.Content)
+            approvedSource.Content)
         {
             ReplayCurrentRequestHash = envelope.CurrentRequestHash
         };

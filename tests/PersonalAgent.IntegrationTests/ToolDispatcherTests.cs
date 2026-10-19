@@ -126,6 +126,32 @@ public sealed class ToolDispatcherTests
 
     [Fact]
     [Trait("Category", "Integration")]
+    public async Task AlreadyApprovedUnclaimedHomeActionCanResumeAfterDispatcherRestart()
+    {
+        using var fixture = await Fixture.CreateAsync(ToolRiskClass.ApprovalRequired);
+        var pending = await fixture.CreatePendingHomeApprovalAsync(PorchRequest);
+        var workflow = fixture.ApprovalWorkflow();
+        var summary = Assert.Single(await workflow.ReadRecentAsync("owner", 10, default));
+        var approval = await fixture.Approvals.ResolveAsync(
+            pending.ApprovalId!.Value, "owner", summary.Approval.ExpectedVersion, true, default);
+        Assert.Equal("Approved", approval.Status);
+        Assert.Equal("AwaitingApproval", (await fixture.Journal.GetAsync(pending.ActionId!.Value, default))!.Status);
+
+        var restartedWorkflow = fixture.ApprovalWorkflow(fixture.CreateRestartedDispatcher());
+        var approvedSummary = Assert.Single(await restartedWorkflow.ReadRecentAsync("owner", 10, default));
+        var resumed = await restartedWorkflow.ResolveAsync(
+            "owner", pending.ApprovalId.Value, approvedSummary.Approval.ExpectedVersion, true, default);
+
+        Assert.Equal("Succeeded", resumed.Status);
+        Assert.Equal(1, fixture.ExecutionCount);
+        Assert.Equal(1, fixture.VerificationCount);
+        Assert.Equal(resumed, await restartedWorkflow.ResolveAsync(
+            "owner", pending.ApprovalId.Value, approvedSummary.Approval.ExpectedVersion, true, default));
+        Assert.Equal(1, fixture.ExecutionCount);
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
     public async Task UnknownApprovedWriteRemainsProtectedAcrossTurnReleaseWhileSiblingApprovalIsPending()
     {
         using var fixture = await Fixture.CreateAsync(

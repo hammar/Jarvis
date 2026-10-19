@@ -279,6 +279,12 @@ async function openApprovals() {
         list.replaceChildren();
         const pending = approvals.filter(item =>
             item.approval.status === "Pending" && item.actionStatus === "AwaitingApproval");
+        const resumable = approvals.filter(item =>
+            item.approval.status === "Approved" && item.actionStatus === "AwaitingApproval");
+        const resumableCount = resumable.filter(item => {
+            const expiresAt = new Date(item.approval.expiresAtUtc);
+            return !Number.isNaN(expiresAt.getTime()) && expiresAt.getTime() > Date.now();
+        }).length;
         if (approvals.length === 0) {
             setListMessage(list, "No recent approval requests.");
         } else {
@@ -287,6 +293,7 @@ async function openApprovals() {
                 const expiresAt = new Date(approval.expiresAtUtc);
                 const expired = Number.isNaN(expiresAt.getTime()) || expiresAt.getTime() <= Date.now();
                 const isPending = approval.status === "Pending" && item.actionStatus === "AwaitingApproval";
+                const isResumable = approval.status === "Approved" && item.actionStatus === "AwaitingApproval";
                 const details = [
                     `Tool: ${item.toolName}`,
                     `Operation: ${item.operation}`,
@@ -306,17 +313,22 @@ async function openApprovals() {
                 args.append(summary, pre);
                 entry.append(args);
 
-                if (isPending && !expired && !activeTurnId && !turnSubmissionInFlight) {
+                if ((isPending || isResumable) && !expired && !activeTurnId && !turnSubmissionInFlight) {
                     const actions = document.createElement("div");
                     actions.className = "activity-actions";
-                    for (const [label, approved] of [["Approve exact action", true], ["Reject", false]]) {
+                    const decisions = isResumable
+                        ? [["Resume approved action", true]]
+                        : [["Approve exact action", true], ["Reject", false]];
+                    for (const [label, approved] of decisions) {
                         const button = document.createElement("button");
                         button.type = "button";
                         button.className = approved ? "button button-primary" : "button button-secondary";
                         button.textContent = label;
                         button.addEventListener("click", async () => {
                             button.disabled = true;
-                            status.textContent = `${approved ? "Submitting approval" : "Rejecting"}…`;
+                            status.textContent = isResumable
+                                ? "Resuming the exact approved action…"
+                                : `${approved ? "Submitting approval" : "Rejecting"}…`;
                             try {
                                 const result = await api(
                                     `/api/approvals/${encodeURIComponent(approval.id.value || approval.id)}/decision`,
@@ -327,8 +339,10 @@ async function openApprovals() {
                                     });
                                 if (!isCurrentView(generation)) return;
                                 const outcome = result.status || result.Status || "Recorded";
-                                status.textContent = approved
-                                    ? `Approval decision recorded. Durable action outcome: ${outcome}. Check Activity before retrying.`
+                                status.textContent = isResumable
+                                    ? `Resume request recorded. Durable action outcome: ${outcome}. Check Activity before retrying.`
+                                    : approved
+                                        ? `Approval decision recorded. Durable action outcome: ${outcome}. Check Activity before retrying.`
                                     : `Rejection recorded. Durable action outcome: ${outcome}.`;
                                 await openApprovals();
                             } catch (error) {
@@ -353,11 +367,21 @@ async function openApprovals() {
                     busy.className = "approval-expiry";
                     busy.textContent = "Finish the active assistant turn before deciding this request.";
                     entry.append(busy);
+                } else if (isResumable && expired) {
+                    const expiry = document.createElement("p");
+                    expiry.className = "approval-expiry";
+                    expiry.textContent = "Approval expired before execution resumed; submit a new request to try again.";
+                    entry.append(expiry);
+                } else if (isResumable) {
+                    const busy = document.createElement("p");
+                    busy.className = "approval-expiry";
+                    busy.textContent = "Finish the active assistant turn before resuming this approved action.";
+                    entry.append(busy);
                 }
                 list.append(entry);
             }
         }
-        status.textContent = `${pending.length} pending approval${pending.length === 1 ? "" : "s"}. Approval is limited to the exact displayed request.`;
+        status.textContent = `${pending.length} pending approval${pending.length === 1 ? "" : "s"}; ${resumableCount} approved action${resumableCount === 1 ? "" : "s"} resumable. Decisions apply only to the exact displayed request.`;
     } catch (error) {
         if (!isCurrentView(generation)) return;
         status.textContent = `Approvals could not be loaded: ${error.message}`;

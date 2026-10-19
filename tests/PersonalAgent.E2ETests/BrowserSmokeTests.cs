@@ -2084,6 +2084,83 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
 
     [Fact]
     [Trait("Category", "BrowserE2E")]
+    public async Task ApprovedUnclaimedActionOffersAnExplicitResumeControl()
+    {
+        var isolated = new SimulatorHostFixture();
+        await isolated.InitializeAsync();
+        try
+        {
+            using var playwright = await Playwright.CreateAsync();
+            await using var browser = await playwright.Chromium.LaunchAsync(
+                new BrowserTypeLaunchOptions { Headless = true });
+            var page = await browser.NewPageAsync();
+            await page.GotoAsync(isolated.WebClient.BaseAddress!.ToString());
+            await page.GetByLabel("Passphrase").FillAsync(SimulatorHostFixture.OwnerPassphrase);
+            await page.Locator("#auth-submit").ClickAsync();
+            await page.WaitForFunctionAsync("() => !authenticationInFlight && !document.getElementById('chat').hidden");
+
+            var approvalId = Guid.NewGuid();
+            var actionId = approvalId;
+            var actionStatus = "AwaitingApproval";
+            string? decisionBody = null;
+            await page.RouteAsync("**/api/approvals", route =>
+            {
+                var responseBody = JsonSerializer.Serialize(new[]
+                {
+                    new
+                    {
+                        approval = new
+                        {
+                            id = new { value = approvalId },
+                            actionId = new { value = actionId },
+                            expiresAtUtc = DateTimeOffset.UtcNow.AddMinutes(3),
+                            expectedVersion = 2,
+                            status = "Approved"
+                        },
+                        actionId = new { value = actionId },
+                        toolName = "home.set_light",
+                        actionType = "home.set_light",
+                        operation = "turn_on",
+                        entityId = "light.porch",
+                        actionStatus,
+                        argumentsJson = """{"Entity":"light.porch","On":true}"""
+                    }
+                });
+                return route.FulfillAsync(new RouteFulfillOptions { Status = 200, Body = responseBody });
+            });
+            await page.RouteAsync("**/api/approvals/*/decision", async route =>
+            {
+                decisionBody = route.Request.PostData;
+                actionStatus = "Succeeded";
+                await route.FulfillAsync(new RouteFulfillOptions
+                {
+                    Status = 200,
+                    Body = """{"status":"Succeeded"}"""
+                });
+            });
+
+            await page.GetByRole(AriaRole.Button, new PageGetByRoleOptions { Name = "Approvals" }).ClickAsync();
+            await page.GetByRole(AriaRole.Button, new PageGetByRoleOptions { Name = "Resume approved action" })
+                .WaitForAsync();
+            Assert.Equal(0, await page.GetByRole(
+                AriaRole.Button, new PageGetByRoleOptions { Name = "Approve exact action" }).CountAsync());
+            await page.GetByRole(
+                AriaRole.Button, new PageGetByRoleOptions { Name = "Resume approved action" }).ClickAsync();
+            await page.GetByText("0 approved actions resumable").WaitForAsync();
+
+            Assert.NotNull(decisionBody);
+            using var submitted = JsonDocument.Parse(decisionBody);
+            Assert.True(submitted.RootElement.GetProperty("approved").GetBoolean());
+            Assert.Equal(2, submitted.RootElement.GetProperty("expectedVersion").GetInt64());
+        }
+        finally
+        {
+            await isolated.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "BrowserE2E")]
     public async Task MemoryProposalRequiresExactOwnerApprovalBeforeItAppearsAsAFact()
     {
         var isolated = new SimulatorHostFixture();

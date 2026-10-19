@@ -131,7 +131,9 @@ data are used by credential-free validation.
   protection: `ToolDispatcherTests.OwnerWorkflowReviewsAndExecutesOnlyTheExactApprovedHomeAction`,
   `ToolDispatcherTests.ExpiredApprovalIsJournaledExpiredWithoutExecution`,
   `ToolDispatcherTests.ChangedProposalWhileApprovalIsPendingInvalidatesTheAction`,
-  and `ConfirmedMemoryTests.RejectionExpiryAndForgedSourceCannotCommit`.
+  `ToolDispatcherTests.AlreadyApprovedUnclaimedHomeActionCanResumeAfterDispatcherRestart`,
+  `BrowserSmokeTests.ApprovedUnclaimedActionOffersAnExplicitResumeControl`, and
+  `ConfirmedMemoryTests.RejectionExpiryAndForgedSourceCannotCommit`.
 - An Unknown approved write remains blocked for an equivalent pending sibling
   across turn completion and dispatcher restart:
   `ToolDispatcherTests.UnknownApprovedWriteRemainsProtectedAcrossTurnReleaseWhileSiblingApprovalIsPending`
@@ -204,11 +206,11 @@ isolated simulator/SQLite data, against merge base
 | `tools/validate.sh build` | Passed; Release build, formatting/analyzers, zero warnings/errors. |
 | `tools/validate.sh architecture` | Passed; 6/6 discovered tests. |
 | `tools/validate.sh unit` | Passed; 326/326 discovered tests. |
-| `tools/validate.sh integration` | Passed; 448/448 discovered tests, including schema-v8 upgrade backfill and malformed/unattributed journal recovery coverage. |
+| `tools/validate.sh integration` | Passed; 449/449 discovered tests, including schema-v8 upgrade backfill, malformed/unattributed journal recovery, and approved-action resumption. |
 | `tools/validate.sh sdk-contracts` | Passed; actual pinned-runtime probes plus 57/57 contract tests. |
-| `tools/validate.sh coverage` | Passed; changed executable lines 96.9% (501/517), all configured runtime/critical-module gates met. Application: 98.6% lines / 94.9% branches; Infrastructure: 94.3% / 82.9%; Web: 98.8% / 79.0%. |
+| `tools/validate.sh coverage` | Passed; changed executable lines 97.0% (511/527), all configured runtime/critical-module gates met. Application: 98.5% lines / 94.7% branches; Infrastructure: 94.3% / 82.9%; Web: 98.8% / 79.0%. |
 | `tools/validate.sh aspire-e2e` | Passed; 10/10 out-of-process scenarios, including the managed simulator write and bounded/audited owner APIs. |
-| `tools/validate.sh browser-e2e` | Passed; 31/31 Playwright scenarios, and the required deliberately failing browser probe was discovered and failed as expected. |
+| `tools/validate.sh browser-e2e` | Passed; 32/32 Playwright scenarios, and the required deliberately failing browser probe was discovered and failed as expected. |
 | `tools/validate.sh docs` | Passed; all internal Markdown links resolve. |
 
 No live Home
@@ -233,8 +235,11 @@ not replace the complete earlier M2 ledgers above.
 | M2-04-R4 | Medium | The approval workflow had no explicit critical-module 95% line / 90% branch coverage ownership. | Added `ApprovalWorkflowService.cs` to the critical-module gate and behavioral integration coverage for invalidation/redaction, owner binding, malformed/missing state, expiry, rejection, replay and execution. The refreshed coverage gate must pass before this record is complete. |
 | M2-04-R5 | High | A follow-up review reproduced that dispatcher-local approval holds and write uncertainty disappear on restart; approving an equivalent pending sibling could submit a second physical write after the first was Unknown. | Added a complete SQLite owner/turn action-history read, then seed the equivalent proposal budget from persisted Unknown/orphaned Executing actions before dispatch or approval execution. The new real-SQLite restart regression asserts the sibling is rejected with `equivalent_write_outcome_unknown` and execution count remains one. Full validation and an independent exact-commit follow-up review are still required. |
 | M2-04-R6 | High | A persisted unresolved action with invalid JSON could not be assigned to an owner/turn by SQLite JSON extraction and was omitted from restart uncertainty seeding. | Added migration 008 with indexed durable owner/turn columns, backfilled from valid historical envelopes. New rows retain attribution independently of later envelope integrity; any unresolved non-invalidated row without attribution fails closed. `VersionSevenUpgradeBackfillsDurableActionOwnerAndTurnAttribution`, `MalformedSameTurnUnknownEnvelopeFailsClosedBeforeFreshWrite`, and `UnattributedUnknownJournalRowFailsClosedBeforeFreshWrite` exercise upgrade and recovery boundaries. Full validation and independent exact-commit review remain required. |
+| M2-04-R7 | Medium | An approval could persist as Approved while a process interruption left its Home Assistant action AwaitingApproval; the UI and workflow then had no recovery path. | Added an owner-initiated “Resume approved action” control only for an exact already-approved action that remains unclaimed and within its approval expiry. Repeated resume is idempotent; startup does not auto-submit, and Executing/Unknown actions remain outside the resume path. `AlreadyApprovedUnclaimedHomeActionCanResumeAfterDispatcherRestart` and `ApprovedUnclaimedActionOffersAnExplicitResumeControl` cover service and UI behavior. The fix and refreshed gates need independent exact-commit follow-up review. |
 
-The restart recovery follow-up includes migration 008. The final gate results
-above include this migration and the invalid-JSON regression. The exact implementation revision, independent review disposition, and
-explicit finding ledger dispositions remain required before owner acceptance;
-the owner retains the merge decision.
+The restart recovery follow-up includes migration 008 and owner-initiated
+approval resumption. All listed gates passed with R7 implementation; browser
+E2E and docs were rerun after the final UI text adjustment. The independent
+review of commit `cbb6c98` identified R7; the follow-up implementation and
+exact-commit review disposition are recorded below. The owner retains the
+acceptance and merge decisions.
