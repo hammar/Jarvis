@@ -1204,6 +1204,99 @@ public sealed class ToolDispatcherTests
 
     [Fact]
     [Trait("Category", "Integration")]
+    public async Task UnapprovedExecutingActionRecoveryPrioritizesOlderUnresolvedActions()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var request = PorchRequest with { TurnId = TurnId.New(), CallId = "older-orphan" };
+        var completed = await fixture.Dispatcher.DispatchAsync(request, CancellationToken.None);
+        var action = await fixture.Journal.GetAsync(completed.ActionId!.Value, CancellationToken.None)
+            ?? throw new InvalidOperationException("The action was not journaled.");
+        await fixture.Journal.UpdateStatusAsync(
+            action.Id, "Executing", action.Version, Start.AddMinutes(-1), CancellationToken.None);
+        await fixture.SqlAsync($"""
+            WITH RECURSIVE numbers(value) AS (
+                SELECT 1 UNION ALL SELECT value + 1 FROM numbers WHERE value < 101
+            )
+            INSERT INTO actions
+                (id, action_type, canonical_arguments, request_hash, status, created_at_utc,
+                 updated_at_utc, version, action_owner_id)
+            SELECT lower(substr(hex(randomblob(16)), 1, 8) || '-' ||
+                         substr(hex(randomblob(16)), 9, 4) || '-' ||
+                         substr(hex(randomblob(16)), 13, 4) || '-' ||
+                         substr(hex(randomblob(16)), 17, 4) || '-' ||
+                         substr(hex(randomblob(16)), 21, 12)),
+                   action_type, canonical_arguments,
+                   'terminal-seed-' || value, 'Succeeded', '2026-10-15T00:00:00+00:00',
+                   '2026-10-15T00:00:00+00:00', 1, 'owner'
+            FROM numbers
+            CROSS JOIN actions
+            WHERE actions.id = '{action.Id.Value:D}';
+            """);
+
+        await fixture.ApprovalWorkflow().RecoverUnapprovedExecutingActionsAsync("owner", CancellationToken.None);
+
+        Assert.Equal(1, fixture.ExecutionCount);
+        Assert.Equal("Unknown", (await fixture.Journal.GetAsync(action.Id, CancellationToken.None))!.Status);
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task ApprovalListPrioritizesOlderPendingApprovalsOverRecentResolvedRequests()
+    {
+        using var fixture = await Fixture.CreateAsync(riskClass: ToolRiskClass.ApprovalRequired);
+        var pending = await fixture.CreatePendingHomeApprovalAsync(
+            PorchRequest with { TurnId = TurnId.New(), CallId = "older-pending" });
+        await fixture.SqlAsync($"""
+            UPDATE approval_requests
+            SET created_at_utc = '2026-10-01T00:00:00+00:00'
+            WHERE id = '{pending.ApprovalId!.Value.Value:D}';
+
+            WITH RECURSIVE numbers(value) AS (
+                SELECT 1 UNION ALL SELECT value + 1 FROM numbers WHERE value < 101
+            )
+            INSERT INTO actions
+                (id, action_type, canonical_arguments, request_hash, status, created_at_utc,
+                 updated_at_utc, version, action_owner_id)
+            SELECT lower(substr(hex(randomblob(16)), 1, 8) || '-' ||
+                         substr(hex(randomblob(16)), 9, 4) || '-' ||
+                         substr(hex(randomblob(16)), 13, 4) || '-' ||
+                         substr(hex(randomblob(16)), 17, 4) || '-' ||
+                         substr(hex(randomblob(16)), 21, 12)),
+                   action_type, canonical_arguments,
+                   'terminal-seed-' || value, 'Rejected', '2026-10-15T00:00:00+00:00',
+                   '2026-10-15T00:00:00+00:00', 1, 'owner'
+            FROM numbers
+            CROSS JOIN actions
+            WHERE actions.id = '{pending.ActionId!.Value.Value:D}';
+
+            WITH RECURSIVE numbers(value) AS (
+                SELECT 1 UNION ALL SELECT value + 1 FROM numbers WHERE value < 101
+            )
+            INSERT INTO approval_requests
+                (id, action_id, owner_id, status, created_at_utc, expires_at_utc, resolved_at_utc, version)
+            SELECT lower(substr(hex(randomblob(16)), 1, 8) || '-' ||
+                         substr(hex(randomblob(16)), 9, 4) || '-' ||
+                         substr(hex(randomblob(16)), 13, 4) || '-' ||
+                         substr(hex(randomblob(16)), 17, 4) || '-' ||
+                         substr(hex(randomblob(16)), 21, 12)),
+                   actions.id, 'owner', 'Rejected',
+                   '2026-10-15T00:00:00+00:00', '2026-10-15T01:00:00+00:00',
+                   '2026-10-15T00:00:00+00:00', 2
+            FROM actions
+            WHERE actions.request_hash LIKE 'terminal-seed-%';
+            """);
+        fixture.Clock.Advance(TimeSpan.FromMinutes(6));
+
+        var summaries = await fixture.ApprovalWorkflow().ReadRecentAsync("owner", 100, CancellationToken.None);
+
+        var recovered = Assert.Single(summaries, summary => summary.ActionId == pending.ActionId);
+        Assert.Equal("Expired", recovered.Approval.Status);
+        Assert.Equal("Expired", recovered.ActionStatus);
+        Assert.Equal(100, summaries.Count);
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
     public async Task ApprovalListExpiresPendingActionsAndKeepsNewerApprovalPending()
     {
         using var fixture = await Fixture.CreateAsync(riskClass: ToolRiskClass.ApprovalRequired);

@@ -119,7 +119,9 @@ public sealed class SqliteActionJournalStore : IActionJournalStore
                    created_at_utc, updated_at_utc, version, outcome_json, memory_invalidated, memory_owner_id
             FROM actions
             WHERE action_owner_id = $owner OR memory_owner_id = $owner
-            ORDER BY updated_at_utc DESC, id
+            ORDER BY CASE WHEN status IN ('Prepared', 'AwaitingApproval', 'Executing', 'Unknown')
+                          THEN 0 ELSE 1 END,
+                     updated_at_utc DESC, id
             LIMIT $limit;
             """;
         command.Parameters.AddWithValue("$owner", ownerId);

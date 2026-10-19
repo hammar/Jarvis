@@ -479,3 +479,37 @@ to PR #48. GitHub checks therefore have not run against this source revision.
 Linux CI, live provider availability, physical-effect causality, human
 observations, and assistive-technology certification remain unexercised.
 These limits are not represented as passing evidence.
+
+### Exact-commit review follow-up: R33
+
+Independent review of `9c529ed41abdf9fd0e47b8875bd416976a9c640d` identified
+that recent terminal action/approval records could displace older unresolved
+records from their bounded owner queries, preventing recovery and expiry
+settlement. The persistence reads now prioritize unresolved action states and
+pending approvals or approvals linked to AwaitingApproval/Executing actions
+before filling the remaining page with recent history. Regressions seed 101
+newer terminal records and verify both an older orphaned execution is recovered
+without resubmission and an older pending approval is expired by the owner
+workflow.
+
+The R33 follow-up validation ran on native macOS with .NET SDK `10.0.401`,
+isolated Simulator/SQLite data, and no live Home Assistant credentials,
+private household data, cloud inference, or physical-device writes.
+
+| Command | Result |
+| --- | --- |
+| `tools/validate.sh build` | Passed; Release build, formatting and analyzers, zero warnings/errors. |
+| `tools/validate.sh architecture` | Passed; 6/6 discovered tests. |
+| `tools/validate.sh unit` | Passed; 352/352 discovered tests. |
+| `tools/validate.sh integration` | Passed; 465/465 discovered tests, including both 101-record overflow regressions. |
+| `tools/validate.sh sdk-contracts` | Passed; actual pinned-runtime probes and 57/57 contract tests. |
+| `tools/validate.sh coverage` | Passed; changed executable lines 96.9% (943/973). Application 98.7% lines / 94.3% branches; Infrastructure 94.2% / 82.9%; ServiceDefaults 100% / 100%; Web 98.0% / 79.0%; all critical-module and unit-only thresholds met. |
+| `tools/validate.sh aspire-e2e` | Passed; 14/14 out-of-process scenarios. |
+| `tools/validate.sh browser-e2e` | Passed on full rerun; 36/36 Playwright scenarios and the deliberately failing browser gate probe behaved as expected. An earlier run had one layout-test failure at 768px in Dark mode; the focused rerun passed 1/1 and the full rerun passed. |
+| `tools/validate.sh docs` | Passed; all internal Markdown links resolve. |
+| `git diff --check` | Passed. |
+
+Independent exact-commit review of the R33 follow-up and current-head GitHub
+checks remain pending after commit and push. Linux CI, live provider
+availability, physical-effect causality, human observations, and
+assistive-technology certification remain unexercised.

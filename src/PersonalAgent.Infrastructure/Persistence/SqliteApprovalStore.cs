@@ -94,7 +94,13 @@ public sealed class SqliteApprovalStore : IApprovalStore
             SELECT id, action_id, owner_id, status, created_at_utc, expires_at_utc, resolved_at_utc, version
             FROM approval_requests
             WHERE owner_id = $owner
-            ORDER BY created_at_utc DESC, id
+            ORDER BY CASE WHEN status = 'Pending' OR EXISTS (
+                              SELECT 1 FROM actions
+                              WHERE actions.id = approval_requests.action_id
+                                AND actions.status IN ('AwaitingApproval', 'Executing')
+                          )
+                          THEN 0 ELSE 1 END,
+                     created_at_utc DESC, id
             LIMIT $limit;
             """;
         command.Parameters.AddWithValue("$owner", ownerId);
