@@ -264,7 +264,7 @@ are in progress; the previous full-gate evidence above predates these changes.
 | M2-04-R12 | High | A stale action-history snapshot could register uncertainty after a matching write had already succeeded, blocking equivalent future writes. | Candidate uncertainty is provisionally seeded, then serialized through the proposal gate and refreshed from durable action state before retention. `HistorySeedingDoesNotResurrectUncertaintyAfterMatchingExecutionSucceeds` pauses the history read, completes the matching write, then resumes stale history and verifies the durable success is not converted to uncertainty. Full gates and exact-commit review remain required. |
 | M2-04-R13 | Medium | The ordinary Simulator model returned fixed text rather than deterministic tool calls, making the documented household/memory demo non-runnable without E2E-only injection. | The managed Simulator/E2E model now recognizes a small documented set of literal read/write/memory commands and emits only registered tool calls. Every call still passes the production authorization, explicit-intent, exact-approval, and memory provenance boundaries. `SimulatorDemoMapsDocumentedCommandsToBoundedRegisteredTools` and `WebChatRunsDocumentedSimulatorLightCommandWithoutFixtureInjection` verify the model protocol and full controlled Web/HA path. Local/Hybrid never launch the fixture; full gates and exact-commit review remain required. |
 | M2-04-R14 | Medium | Activity read the oldest bounded audit page and filtered afterward, omitting recent action/approval events. | Added a dedicated SQLite `ReadRecentActivityAsync` query that filters the requested event families before applying a newest-first bound; general audit reads retain their previous ordering. `AuditPageIncludesNewestEventsBeforeApplyingItsBoundedLimit` adds 205 unrelated events and 202 approval events, then verifies the newest bounded activity page. Full gates and exact-commit review remain required. |
-| M2-04-R15 | Medium | The typed owner-proposal path dispatched directly without releasing its dispatcher turn state, retaining per-turn failure-budget entries for process lifetime. | `MemoryProposalService.ProposeAsync` now calls `ReleaseTurn` in `finally` after dispatch and turn-status settlement, including dispatch exceptions. `OwnerEnteredProposalReleasesItsDispatcherTurnAfterSuccessOrFailure` verifies release both after an approval-required result and a thrown dispatch. Post-fix native validation passed; the independent exact-commit review below remains required. |
+| M2-04-R15 | Medium | The typed owner-proposal path dispatched directly without releasing its dispatcher turn state, retaining per-turn failure-budget entries for process lifetime. | Fixed in `4fd3e2e99589366c07f56f016cd4424bd92b7280`: `MemoryProposalService.ProposeAsync` now calls `ReleaseTurn` in `finally` after dispatch and turn-status settlement, including dispatch exceptions. `OwnerEnteredProposalReleasesItsDispatcherTurnAfterSuccessOrFailure` verifies release both after an approval-required result and a thrown dispatch. Independent exact-commit review found no new finding and passed the focused unit regression plus the related real-dispatcher approval-hold and typed-proposal integration cases. |
 
 ### R10–R14 validation baseline
 
@@ -311,7 +311,21 @@ coverage.
 | `tools/validate.sh docs` | Passed; all internal Markdown links resolve. |
 
 An independent exact-commit review of the R15 fix and complete M2-01/02/03
-cumulative ledgers is still required. No live Home Assistant credentials,
-private household data, cloud inference, or physical devices were used. Linux
-CI, live HA/provider availability, physical-effect causality, human
-observations, and assistive-technology certification remain unexercised.
+cumulative ledgers reviewed `4fd3e2e99589366c07f56f016cd4424bd92b7280`
+(parent `f574ef0a08d6b0cca1b50b449f746b8f88e2b244`,
+merge base `ede7885ca87cc6bf1919f3b670f031f905f04f23`). The reviewer read the
+full M2-04 and M2-01/02/03 task ledgers, issue #29, the relevant specification
+acceptance excerpts and ADRs 0001, 0003, 0004, 0005 and 0006. It independently
+ran the focused R15 unit regression (1/1) and related integration cases for
+typed proposals and approval-hold preservation (2/2) from the exact checkout;
+it did not rerun the full validation matrix. The review found no new issue and
+confirmed the R15 release preserves pending approval holds: turn release
+defers cleanup until the last approval hold is released. This disposition
+applies to the bounded R15 delta; earlier findings retain their recorded
+evidence and were not all rerun. The reviewer inspected relevant specification
+excerpts, not the entire specification end-to-end.
+
+No live Home Assistant credentials, private household data, cloud inference,
+or physical devices were used. Linux CI, live HA/provider availability,
+physical-effect causality, human observations, and assistive-technology
+certification remain unexercised.
