@@ -230,8 +230,10 @@ If an owner approval is persisted but the action remains `AwaitingApproval`
 because the host stopped before dispatch claimed it, the owner may explicitly
 resume that same action from the approvals surface while its five-minute
 approval window remains open. This path accepts only the already-approved
-version and exact journal identity; startup never auto-submits it. Actions
-already `Executing` or terminal are not offered as resumable work, preserving
+version and exact journal identity; startup never auto-submits it. An expired
+approved action can be explicitly finalized as `Expired` without execution,
+which also releases its in-process approval hold. Actions already `Executing`
+or terminal are not offered as resumable or finalizable work, preserving
 observation-only recovery for uncertain physical outcomes.
 On a fresh dispatcher, recovery seeds uncertainty from the persisted action's
 original risk before observing, not from the new policy/registration risk.

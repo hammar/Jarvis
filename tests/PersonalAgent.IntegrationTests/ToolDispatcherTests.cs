@@ -152,6 +152,34 @@ public sealed class ToolDispatcherTests
 
     [Fact]
     [Trait("Category", "Integration")]
+    public async Task ExpiredApprovedUnclaimedActionCanBeFinalizedWithoutExecution()
+    {
+        using var fixture = await Fixture.CreateAsync(ToolRiskClass.ApprovalRequired);
+        var pending = await fixture.CreatePendingHomeApprovalAsync(PorchRequest);
+        var workflow = fixture.ApprovalWorkflow();
+        var summary = Assert.Single(await workflow.ReadRecentAsync("owner", 10, default));
+        var approval = await fixture.Approvals.ResolveAsync(
+            pending.ApprovalId!.Value, "owner", summary.Approval.ExpectedVersion, true, default);
+        var action = await fixture.Journal.GetAsync(pending.ActionId!.Value, default);
+
+        await Assert.ThrowsAsync<PersistenceConcurrencyException>(async () =>
+            await workflow.ExpireApprovedUnclaimedAsync("owner", approval.Id, approval.ExpectedVersion, default));
+        Assert.Equal("AwaitingApproval", (await fixture.Journal.GetAsync(action!.Id, default))!.Status);
+
+        fixture.Clock.Advance(TimeSpan.FromMinutes(5));
+        var expired = await workflow.ExpireApprovedUnclaimedAsync(
+            "owner", approval.Id, approval.ExpectedVersion, default);
+
+        Assert.Equal("Expired", expired.Status);
+        Assert.Equal("approval_expired_before_execution", expired.ReasonCode);
+        Assert.Equal("Expired", (await fixture.Journal.GetAsync(action.Id, default))!.Status);
+        Assert.Equal(0, fixture.ExecutionCount);
+        Assert.Equal(expired, await workflow.ExpireApprovedUnclaimedAsync(
+            "owner", approval.Id, approval.ExpectedVersion, default));
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
     public async Task UnknownApprovedWriteRemainsProtectedAcrossTurnReleaseWhileSiblingApprovalIsPending()
     {
         using var fixture = await Fixture.CreateAsync(
@@ -300,6 +328,10 @@ public sealed class ToolDispatcherTests
         await fixture.SqlAsync(
             $"UPDATE actions SET canonical_arguments = 'not-json' " +
             $"WHERE id = '{unknown.ActionId!.Value.Value:D}';");
+        Assert.Contains(
+            await fixture.Journal.ReadRecentForOwnerAsync("owner", 10, default),
+            entry => entry.Id == unknown.ActionId);
+        Assert.Empty(await fixture.Journal.ReadRecentForOwnerAsync("another-owner", 10, default));
 
         var restarted = fixture.CreateRestartedDispatcher();
         await Assert.ThrowsAsync<InvalidDataException>(async () =>
@@ -1782,7 +1814,7 @@ public sealed class ToolDispatcherTests
             dispatcher ??= Dispatcher;
             var memories = new SqliteConfirmedMemoryStore(Database, Clock);
             var proposals = new MemoryProposalService(memories, Journal, Approvals, dispatcher);
-            return new(ApprovalStore, Journal, Approvals, dispatcher, memories, proposals);
+            return new(ApprovalStore, Journal, Approvals, dispatcher, memories, proposals, Clock);
         }
 
         public void Dispose() => file.Dispose();

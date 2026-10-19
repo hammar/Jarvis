@@ -118,10 +118,7 @@ public sealed class SqliteActionJournalStore : IActionJournalStore
             SELECT id, action_type, canonical_arguments, request_hash, status,
                    created_at_utc, updated_at_utc, version, outcome_json, memory_invalidated, memory_owner_id
             FROM actions
-            WHERE memory_owner_id = $owner
-               OR json_extract(
-                    CASE WHEN json_valid(canonical_arguments) THEN canonical_arguments ELSE '{}' END,
-                    '$.OwnerId') = $owner
+            WHERE action_owner_id = $owner OR memory_owner_id = $owner
             ORDER BY updated_at_utc DESC, id
             LIMIT $limit;
             """;

@@ -1760,6 +1760,35 @@ public sealed class ToolDispatcherUnitTests
         Assert.Equal(0, fixture.ExecutionCount);
     }
 
+    [Fact]
+    [Trait("Category", "Unit")]
+    public async Task ApprovalSettlementAcceptsConcurrentMatchingActionOutcome()
+    {
+        using var fixture = new Fixture(ToolRiskClass.ApprovalRequired);
+        var pending = await fixture.Dispatcher.DispatchAsync(Request, CancellationToken.None);
+        fixture.Journal.SettleThenConflictStatus = "Rejected";
+
+        var result = await fixture.Approvals.ResolveAsync(
+            pending.ApprovalId!.Value, "owner", 1, false, CancellationToken.None);
+
+        Assert.Equal("Rejected", result.Status);
+        Assert.Equal("Rejected", fixture.Journal.Entries.Single().Status);
+        Assert.Equal(0, fixture.ExecutionCount);
+    }
+
+    [Fact]
+    [Trait("Category", "Unit")]
+    public async Task ApprovalSettlementRejectsConcurrentRemovalOfAction()
+    {
+        using var fixture = new Fixture(ToolRiskClass.ApprovalRequired);
+        var pending = await fixture.Dispatcher.DispatchAsync(Request, CancellationToken.None);
+        fixture.Journal.RemoveOnTerminalConflict = true;
+
+        await Assert.ThrowsAsync<PersistenceConcurrencyException>(async () =>
+            await fixture.Approvals.ResolveAsync(
+                pending.ApprovalId!.Value, "owner", 1, false, CancellationToken.None));
+    }
+
     [Theory]
     [InlineData(false, false)]
     [InlineData(false, true)]
@@ -2712,6 +2741,8 @@ public sealed class ToolDispatcherUnitTests
 
         public bool FailNextExecutingUpdate { get; set; }
         public bool FailTerminalUpdate { get; set; }
+        public string? SettleThenConflictStatus { get; set; }
+        public bool RemoveOnTerminalConflict { get; set; }
         public bool FailCompletionUpdate { get; set; }
         public string? ReturnStatusAfterExecuting { get; set; }
         public string? ReturnStatusAfterAwaitingApproval { get; set; }
@@ -2831,6 +2862,20 @@ public sealed class ToolDispatcherUnitTests
                 if (FailTerminalUpdate && status is "Expired" or "Rejected")
                 {
                     throw new InvalidOperationException("Controlled terminal persistence failure.");
+                }
+
+                if (SettleThenConflictStatus == status)
+                {
+                    entries[id] = entries[id] with { Status = status, Version = expectedVersion + 1 };
+                    SettleThenConflictStatus = null;
+                    throw new PersistenceConcurrencyException("Concurrent matching settlement.");
+                }
+
+                if (RemoveOnTerminalConflict && status is "Expired" or "Rejected")
+                {
+                    entries.Remove(id);
+                    RemoveOnTerminalConflict = false;
+                    throw new PersistenceConcurrencyException("Concurrent action removal.");
                 }
 
                 if (status == "Executing" && FailNextExecutingUpdate)

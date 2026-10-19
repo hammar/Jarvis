@@ -33,6 +33,7 @@ public sealed class ApprovalWorkflowService
     private readonly IToolDispatcher dispatcher;
     private readonly IConfirmedMemoryStore memories;
     private readonly MemoryProposalService memoryProposals;
+    private readonly IClock clock;
 
     /// <summary>Creates approval list, preview, and exact-action decision use cases.</summary>
     public ApprovalWorkflowService(
@@ -41,7 +42,8 @@ public sealed class ApprovalWorkflowService
         IApprovalService approvals,
         IToolDispatcher dispatcher,
         IConfirmedMemoryStore memories,
-        MemoryProposalService memoryProposals)
+        MemoryProposalService memoryProposals,
+        IClock clock)
     {
         this.approvalStore = approvalStore ?? throw new ArgumentNullException(nameof(approvalStore));
         this.journal = journal ?? throw new ArgumentNullException(nameof(journal));
@@ -49,6 +51,7 @@ public sealed class ApprovalWorkflowService
         this.dispatcher = dispatcher ?? throw new ArgumentNullException(nameof(dispatcher));
         this.memories = memories ?? throw new ArgumentNullException(nameof(memories));
         this.memoryProposals = memoryProposals ?? throw new ArgumentNullException(nameof(memoryProposals));
+        this.clock = clock ?? throw new ArgumentNullException(nameof(clock));
     }
 
     /// <summary>Lists bounded recent approvals belonging to one authenticated owner.</summary>
@@ -234,6 +237,82 @@ public sealed class ApprovalWorkflowService
             ReplayCurrentRequestHash = envelope.CurrentRequestHash
         };
         return await dispatcher.DispatchAsync(request, cancellationToken);
+    }
+
+    /// <summary>Settles an already-approved Home Assistant action that expired before execution was claimed.</summary>
+    /// <param name="ownerId">Authenticated owner finalizing the exact action.</param>
+    /// <param name="approvalId">Approval identifier from the owner UI.</param>
+    /// <param name="expectedVersion">Approval version displayed to the owner.</param>
+    /// <param name="cancellationToken">Token that cancels persistence before the expiry transition commits.</param>
+    /// <returns>The durable expired action outcome; this operation never dispatches or executes the action.</returns>
+    public async ValueTask<ToolDispatchResult> ExpireApprovedUnclaimedAsync(
+        string ownerId,
+        ApprovalId approvalId,
+        long expectedVersion,
+        CancellationToken cancellationToken)
+    {
+        MemoryPolicy.ValidateOwner(ownerId);
+        var approval = await approvals.GetAsync(approvalId, cancellationToken)
+            ?? throw new KeyNotFoundException("The approval request is unavailable.");
+        if (!string.Equals(approval.OwnerId, ownerId, StringComparison.Ordinal))
+        {
+            throw new KeyNotFoundException("The approval request is unavailable.");
+        }
+        if (approval.Status != "Approved" || approval.ExpectedVersion != expectedVersion)
+        {
+            throw new PersistenceConcurrencyException("The approval is not the expected approved version.");
+        }
+
+        var action = await journal.GetAsync(approval.ActionId, cancellationToken)
+            ?? throw new PersistenceConcurrencyException("The approved action is unavailable.");
+        if (action.MemoryInvalidated)
+        {
+            dispatcher.ReleaseApproval(action.Id);
+            return new("Rejected", null, "memory_result_invalidated", action.Id, approvalId);
+        }
+
+        var envelope = ReadEnvelope(action);
+        if (!string.Equals(envelope.OwnerId, ownerId, StringComparison.Ordinal)
+            || envelope.ToolName is not ("home.set_light" or "home.set_temperature"))
+        {
+            throw new InvalidDataException("Only an owner-bound Home Assistant action can be finalized as expired.");
+        }
+        if (action.Status != "AwaitingApproval")
+        {
+            return action.Outcome ?? new(action.Status, null, "recorded_action_outcome", action.Id, approvalId);
+        }
+        var nowUtc = clock.UtcNow.ToUniversalTime();
+        if (nowUtc < approval.ExpiresAtUtc)
+        {
+            throw new PersistenceConcurrencyException("The approved action has not expired.");
+        }
+
+        ActionJournalEntry settled;
+        try
+        {
+            settled = await journal.UpdateStatusAsync(
+                action.Id,
+                "Expired",
+                action.Version,
+                nowUtc,
+                cancellationToken,
+                new("Expired", null, "approval_expired_before_execution", action.Id, approvalId));
+        }
+        catch (PersistenceConcurrencyException)
+        {
+            settled = await journal.GetAsync(action.Id, cancellationToken)
+                ?? throw new PersistenceConcurrencyException("The approved action is unavailable.");
+            if (settled.Status == "AwaitingApproval")
+            {
+                throw;
+            }
+        }
+
+        if (settled.Status != "AwaitingApproval")
+        {
+            dispatcher.ReleaseApproval(action.Id);
+        }
+        return settled.Outcome ?? new(settled.Status, null, "recorded_action_outcome", action.Id, approvalId);
     }
 
     private static CanonicalActionEnvelope ReadEnvelope(ActionJournalEntry action)

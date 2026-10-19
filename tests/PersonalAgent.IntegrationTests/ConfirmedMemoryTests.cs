@@ -23,17 +23,19 @@ public sealed class ConfirmedMemoryTests
         var valid = fixture.ApprovalWorkflow();
 
         Assert.Throws<ArgumentNullException>(() => new ApprovalWorkflowService(
-            null!, fixture.Journal, fixture.Approvals, fixture.Dispatcher, fixture.Memory, fixture.Proposals));
+            null!, fixture.Journal, fixture.Approvals, fixture.Dispatcher, fixture.Memory, fixture.Proposals, fixture.Clock));
         Assert.Throws<ArgumentNullException>(() => new ApprovalWorkflowService(
-            fixture.ApprovalStore, null!, fixture.Approvals, fixture.Dispatcher, fixture.Memory, fixture.Proposals));
+            fixture.ApprovalStore, null!, fixture.Approvals, fixture.Dispatcher, fixture.Memory, fixture.Proposals, fixture.Clock));
         Assert.Throws<ArgumentNullException>(() => new ApprovalWorkflowService(
-            fixture.ApprovalStore, fixture.Journal, null!, fixture.Dispatcher, fixture.Memory, fixture.Proposals));
+            fixture.ApprovalStore, fixture.Journal, null!, fixture.Dispatcher, fixture.Memory, fixture.Proposals, fixture.Clock));
         Assert.Throws<ArgumentNullException>(() => new ApprovalWorkflowService(
-            fixture.ApprovalStore, fixture.Journal, fixture.Approvals, null!, fixture.Memory, fixture.Proposals));
+            fixture.ApprovalStore, fixture.Journal, fixture.Approvals, null!, fixture.Memory, fixture.Proposals, fixture.Clock));
         Assert.Throws<ArgumentNullException>(() => new ApprovalWorkflowService(
-            fixture.ApprovalStore, fixture.Journal, fixture.Approvals, fixture.Dispatcher, null!, fixture.Proposals));
+            fixture.ApprovalStore, fixture.Journal, fixture.Approvals, fixture.Dispatcher, null!, fixture.Proposals, fixture.Clock));
         Assert.Throws<ArgumentNullException>(() => new ApprovalWorkflowService(
-            fixture.ApprovalStore, fixture.Journal, fixture.Approvals, fixture.Dispatcher, fixture.Memory, null!));
+            fixture.ApprovalStore, fixture.Journal, fixture.Approvals, fixture.Dispatcher, fixture.Memory, null!, fixture.Clock));
+        Assert.Throws<ArgumentNullException>(() => new ApprovalWorkflowService(
+            fixture.ApprovalStore, fixture.Journal, fixture.Approvals, fixture.Dispatcher, fixture.Memory, fixture.Proposals, null!));
 
         await Assert.ThrowsAsync<ArgumentException>(async () =>
             await valid.ReadRecentAsync(" ", 10, default));
@@ -801,7 +803,7 @@ public sealed class ConfirmedMemoryTests
         }
 
         internal ApprovalWorkflowService ApprovalWorkflow() =>
-            new(ApprovalStore, Journal, Approvals, Dispatcher, Memory, Proposals);
+            new(ApprovalStore, Journal, Approvals, Dispatcher, Memory, Proposals, Clock);
 
         internal ToolDispatcher RestartedDispatcher(IActionJournalStore? journal = null) => new(
             new ToolRegistry(MemoryToolRegistrations.Create(Memory)),

@@ -208,6 +208,54 @@ internal static class ChatApi
                 return Results.Conflict(new { title = "The approval changed or is no longer available." });
             }
         });
+        api.MapPost("/approvals/{id:guid}/expire", async (
+            Guid id,
+            ApprovalExpiryRequest request,
+            HttpContext context,
+            IAntiforgery antiforgery,
+            ApprovalWorkflowService workflow,
+            IAuditStore audit,
+            IClock clock,
+            CancellationToken ct) =>
+        {
+            if (!await OwnerHttpSecurity.ValidateCsrfAsync(antiforgery, context, ct))
+            {
+                return Results.Problem(statusCode: StatusCodes.Status400BadRequest, title: "Invalid request token.");
+            }
+            if (request.ExpectedVersion is null or < 1)
+            {
+                return Results.Problem(statusCode: StatusCodes.Status400BadRequest, title: "An approval version is required.");
+            }
+
+            var owner = OwnerHttpSecurity.GetOwnerId(context.User)!;
+            var approvalId = new ApprovalId(id);
+            await audit.AppendAsync(new(
+                Guid.NewGuid(),
+                "approval.expiry_finalization_requested",
+                id.ToString("D"),
+                JsonSerializer.Serialize(new { expectedVersion = request.ExpectedVersion }),
+                clock.UtcNow), ct);
+            try
+            {
+                var result = await workflow.ExpireApprovedUnclaimedAsync(
+                    owner, approvalId, request.ExpectedVersion.Value, ct);
+                await audit.AppendAsync(new(
+                    Guid.NewGuid(),
+                    "approval.expiry_finalization_completed",
+                    id.ToString("D"),
+                    JsonSerializer.Serialize(new { status = result.Status, actionId = result.ActionId?.Value }),
+                    clock.UtcNow), ct);
+                return Results.Ok(result);
+            }
+            catch (KeyNotFoundException)
+            {
+                return Results.NotFound();
+            }
+            catch (PersistenceConcurrencyException)
+            {
+                return Results.Conflict(new { title = "The approval changed, is not expired, or is no longer available." });
+            }
+        });
         api.MapGet("/memory", async (
             string? query,
             int? limit,
@@ -583,6 +631,7 @@ internal static class ChatApi
     internal sealed record RenameConversationRequest(string? Title);
     internal sealed record SubmitTurnRequest(string RequestId, string Text);
     internal sealed record ApprovalDecisionRequest(long? ExpectedVersion, bool? Approved);
+    internal sealed record ApprovalExpiryRequest(long? ExpectedVersion);
 }
 
 internal sealed record HomeUiStatus(HomeEntityCatalog? Catalog);

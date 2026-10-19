@@ -370,8 +370,35 @@ async function openApprovals() {
                 } else if (isResumable && expired) {
                     const expiry = document.createElement("p");
                     expiry.className = "approval-expiry";
-                    expiry.textContent = "Approval expired before execution resumed; submit a new request to try again.";
-                    entry.append(expiry);
+                    expiry.textContent = "This approved action expired before execution was claimed. Finalize it to record that it will not run.";
+                    const finalize = document.createElement("button");
+                    finalize.type = "button";
+                    finalize.className = "button button-secondary";
+                    finalize.textContent = "Finalize expired action";
+                    finalize.addEventListener("click", async () => {
+                        finalize.disabled = true;
+                        status.textContent = "Finalizing expired action without execution…";
+                        try {
+                            const result = await api(
+                                `/api/approvals/${encodeURIComponent(approval.id.value || approval.id)}/expire`,
+                                {
+                                    method: "POST",
+                                    headers: { "Content-Type": "application/json" },
+                                    body: JSON.stringify({ expectedVersion: approval.expectedVersion })
+                                });
+                            if (!isCurrentView(generation)) return;
+                            status.textContent = `Expired action finalized. Durable action outcome: ${result.status || result.Status || "Expired"}.`;
+                            await openApprovals();
+                        } catch (error) {
+                            if (!isCurrentView(generation)) return;
+                            status.textContent = error.status === 409
+                                ? "This approval changed or has not expired according to the host clock. The list has been refreshed."
+                                : `Expired action could not be finalized: ${error.message}.`;
+                            if (error.status === 409) await openApprovals();
+                            else finalize.disabled = false;
+                        }
+                    });
+                    entry.append(expiry, finalize);
                 } else if (isResumable) {
                     const busy = document.createElement("p");
                     busy.className = "approval-expiry";
