@@ -713,6 +713,20 @@ public interface IApprovalService
         long expectedVersion,
         bool approved,
         CancellationToken cancellationToken);
+
+    /// <summary>Repairs action settlement for an approval already recorded as expired.</summary>
+    /// <param name="approvalId">Persisted expired approval request.</param>
+    /// <param name="ownerId">Authenticated owner bound to the approval.</param>
+    /// <param name="expectedVersion">Approval version read by the owner workflow.</param>
+    /// <param name="cancellationToken">Token that cancels settlement before commit.</param>
+    /// <returns>The current durable action; an already terminal or executing action is not overwritten.</returns>
+    /// <remarks>Approval and action records are stored separately. This idempotent operation recovers an expired
+    /// approval whose process stopped after the approval decision committed but before its action was settled.</remarks>
+    ValueTask<ActionJournalEntry> SettleExpiredAsync(
+        ApprovalId approvalId,
+        string ownerId,
+        long expectedVersion,
+        CancellationToken cancellationToken);
 }
 
 /// <summary>Describes a memory fact with provenance and optimistic concurrency version.</summary>

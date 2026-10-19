@@ -123,16 +123,29 @@ public sealed class MemoryProposalService(
                 JsonSerializer.Serialize(MemoryToolRegistrations.Arguments(change)),
                 ownerId,
                 dispatchText), cancellationToken);
-            if (!submission.IsDuplicate)
+            var turn = await conversations.GetTurnAsync(submission.Turn.Id, cancellationToken)
+                ?? throw new InvalidOperationException("The persisted memory proposal turn is unavailable.");
+            if (turn.Status is not (TurnStatus.Completed or TurnStatus.Failed or TurnStatus.Cancelled or TurnStatus.Interrupted))
             {
-                var turn = await conversations.GetTurnAsync(submission.Turn.Id, cancellationToken)
-                    ?? throw new InvalidOperationException("The persisted memory proposal turn is unavailable.");
-                await conversations.UpdateTurnStatusAsync(
-                    submission.Turn.Id,
-                    result.Status is "Failed" or "Rejected" ? TurnStatus.Failed : TurnStatus.Completed,
-                    turn.Version,
-                    clock.UtcNow,
-                    cancellationToken);
+                try
+                {
+                    await conversations.UpdateTurnStatusAsync(
+                        submission.Turn.Id,
+                        result.Status is "Failed" or "Rejected" ? TurnStatus.Failed : TurnStatus.Completed,
+                        turn.Version,
+                        clock.UtcNow,
+                        cancellationToken);
+                }
+                catch (PersistenceConcurrencyException)
+                {
+                    var current = await conversations.GetTurnAsync(submission.Turn.Id, cancellationToken);
+                    if (current is null
+                        || current.Status is not (TurnStatus.Completed or TurnStatus.Failed
+                            or TurnStatus.Cancelled or TurnStatus.Interrupted))
+                    {
+                        throw;
+                    }
+                }
             }
             return new(conversationId, result);
         }

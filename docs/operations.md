@@ -48,6 +48,11 @@ Interrupted home actions also bind their original connection/catalog observation
 scope. An endpoint/reference/catalog change, or a legacy action without that
 scope, remains Unknown without querying a replacement installation. Retain the
 original journal; configuration changes are not evidence of physical success.
+The authenticated `/api/actions` read also attempts observation-only recovery
+for at most eight recent unapproved actions still marked Executing. It never
+resubmits a write; an action that is actively executing remains unresolved,
+and missing or changed observation scope remains Unknown. This recovery is
+owner-triggered by reading the action list, not an automatic startup replay.
 Service HTTP errors (including 400) may be returned after a device effect and
 are not proof of rejection without application. Jarvis observes them without
 resubmission; an unchanged/unavailable state remains Unknown and blocks an

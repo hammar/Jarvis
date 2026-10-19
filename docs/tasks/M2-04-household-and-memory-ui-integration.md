@@ -138,6 +138,12 @@ data are used by credential-free validation.
   `ToolDispatcherTests.ExpiredApprovedUnclaimedActionCanBeFinalizedWithoutExecution`,
   `BrowserSmokeTests.ExpiredApprovedActionOffersNoExecutionFinalization`, and
   `ConfirmedMemoryTests.RejectionExpiryAndForgedSourceCannotCommit`.
+- Interrupted expiry settlement, invalidated memory approval expiry, and
+  active-action budget preservation:
+  `ApprovalWorkflowExpiryTests.RecentApprovalReadSettlesPreviouslyExpiredApprovalWhoseActionIsStillPending`,
+  `ApprovalWorkflowExpiryTests.RecentApprovalReadDoesNotReleaseTurnBudgetWhileActionIsStillExecuting`,
+  `ConfirmedMemoryTests.DeleteRedactsDerivedCopiesAndOldCallsCannotRestoreThem`,
+  and `ToolDispatcherTests.ApprovalListRecoversExpiredDecisionWhoseActionSettlementWasInterrupted`.
 - An Unknown approved write remains blocked for an equivalent pending sibling
   across turn completion and dispatcher restart:
   `ToolDispatcherTests.UnknownApprovedWriteRemainsProtectedAcrossTurnReleaseWhileSiblingApprovalIsPending`
@@ -154,9 +160,21 @@ data are used by credential-free validation.
   and `ConfirmedMemoryTests.ReceiptRecoversInterruptedSettlementWithoutRepeatingTheMutation`.
 - Simulator tool-result answers and same-conversation command matching:
   `AspireSimulatorTests.WebChatShowsSimulatorToolResultsAndMatchesCommandsAfterConversationHistory`.
+- Simulator memory citations, explicit dispatch status, and observation-only
+  recovery of an automatic light write are covered by the same Aspire
+  production-composition scenario.
 - Stale browser proposal responses cannot change the selected conversation or
   reset the current draft:
   `BrowserSmokeTests.DelayedMemoryProposalCannotResetFormOrSelectionAfterConversationSwitch`.
+- A delayed proposal response preserves newer editor changes, and approval
+  arguments remain visible before a decision:
+  `BrowserSmokeTests.DelayedMemoryProposalResponsePreservesAnEditedDraft`,
+  `BrowserSmokeTests.MemoryProposalRequiresExactOwnerApprovalBeforeItAppearsAsAFact`,
+  and `BrowserSmokeTests.MemoryUiCreatesAndApprovesTypedProposalWithoutInference`.
+- Duplicate proposal retries settle a nonterminal turn after interruption,
+  and upgrade backfill rejects malformed turn identities:
+  `ConfirmedMemoryTests.DuplicateProposalRetrySettlesATurnAfterItsFirstSettlementWasInterrupted`
+  and `ActionOutcomePersistenceTests.VersionSevenUpgradeBackfillsDurableActionOwnerAndTurnAttribution`.
 - Real Aspire host restart recovers household actions by observation without
   another write and settles memory actions from their receipt:
   `AspireSimulatorTests.ApprovalListRecoversInterruptedActionsAfterHostRestartWithoutCrossingHomeInstallationBoundary`.
@@ -361,6 +379,17 @@ review revision will be recorded after this follow-up is verified.
 | M2-04-R19 | Medium | A delayed memory-proposal response could restore an old conversation selection and clear the editor after the owner switched conversations. | Capture the local proposal conversation and selection generation; stale responses no longer change selection, reset the draft, or show stale errors. The delayed Playwright regression switches conversations while the POST is held and checks both selection and draft after response. |
 | M2-04-R20 | Medium | The Simulator emitted registered tool calls but did not display their results as final answers. | The controlled model now unwraps the production tool-result envelope and emits bounded, deterministic answers from actual household, memory, and action results, preserving freshness/availability and non-causality. `WebChatShowsSimulatorToolResultsAndMatchesCommandsAfterConversationHistory` exercises the production Aspire Web/SDK composition and asserts visible final answers. |
 | M2-04-R21 | Medium | Literal Simulator commands stopped matching when prior conversation history prefixed the current user request. | Strip only the known `LocalChatPrompt` current-request framing before matching documented demo commands. The protocol test supplies that framing, and the same-conversation Aspire scenario follows household and memory turns with a simulated light command. |
+| M2-04-R22 | Medium | A process interruption after persisting an expired approval but before settling its action left the action AwaitingApproval; later owner-list reads skipped it because the approval was no longer Pending. | Added owner/version-checked `IApprovalService.SettleExpiredAsync` and invoke it for every durable Expired approval. It settles only AwaitingApproval actions, accepts concurrent terminal outcomes without overwriting them, and does not release an executing action's hold. `RecentApprovalReadSettlesPreviouslyExpiredApprovalWhoseActionIsStillPending` and the real-SQLite `ApprovalListRecoversExpiredDecisionWhoseActionSettlementWasInterrupted` cover recovery and no-execution behavior. |
+| M2-04-R23 | Medium | A successful proposal response held during a conversation switch retained its request ID but lost the originating conversation ID; retrying the draft from another conversation therefore created a second proposal. | Retain the originating conversation ID together with the request ID and replay that pair. Editing the proposal clears both; a replay from another selected conversation does not switch away from that selection. The extended `DelayedMemoryProposalCannotResetFormOrSelectionAfterConversationSwitch` regression checks both request IDs/conversation IDs and the preserved selection. |
+| M2-04-R24 | Medium | An expired invalidated memory proposal still attempted approval expiry settlement, which rejects its already-Rejected action and could fail the entire approvals list. | Pending expiry settlement now skips invalidated memory actions so they reach the owner-checked redacted summary. `DeleteRedactsDerivedCopiesAndOldCallsCannotRestoreThem` advances the controlled clock past expiry and verifies the invalidated item remains listable. |
+| M2-04-R25 | High | Listing an actively executing action could release its shared turn budget while an equivalent sibling was waiting to enter execution. | Interrupted-action recovery releases the turn budget only after a non-Executing durable result; an active Executing result retains the shared budget. `RecentApprovalReadDoesNotReleaseTurnBudgetWhileActionIsStillExecuting` interleaves list recovery with active execution arbitration and verifies no turn release. |
+| M2-04-R26 | Medium | Migration 008 accepted malformed legacy TurnId text as durable attribution, allowing unresolved actions to evade valid-turn recovery checks. | Backfill now requires a valid GUID shape and leaves both attribution columns null for malformed rows. `VersionSevenUpgradeBackfillsDurableActionOwnerAndTurnAttribution` verifies valid normalization, malformed null attribution, and fail-closed history reads. |
+| M2-04-R27 | Medium | A duplicate proposal retry could dispatch successfully but leave its original turn nonterminal after interruption between dispatch and status persistence. | Proposal status settlement now runs for any persisted nonterminal turn, including exact duplicate retries, and preserves concurrent terminal outcomes. `DuplicateProposalRetrySettlesATurnAfterItsFirstSettlementWasInterrupted` injects a SQLite settlement failure and verifies retry completion without duplicating the approval. |
+| M2-04-R28 | High | An automatic light write interrupted after submission had no approval record and was invisible to approval-list recovery. | The owner-scoped `/api/actions` read now performs bounded recovery of recent unapproved Executing actions through the observation-only dispatcher path; it never resubmits a write and leaves active Executing actions untouched. The real Aspire restart regression verifies a terminal outcome and no second write. |
+| M2-04-R29 | Medium | Exact action arguments were hidden in a closed disclosure while approval controls were immediately available. | Redacted exact arguments now render inline before decision controls. Browser approval scenarios assert the proposal subject and value are visible without opening a disclosure, while owner/provenance fields remain absent. |
+| M2-04-R30 | Medium | A delayed successful proposal response could clear editor changes made while the request was in flight. | Memory editor revision tracking prevents stale preflight submissions and preserves newer edits after a successful response. `DelayedMemoryProposalResponsePreservesAnEditedDraft` verifies the posted value and retained newer draft separately. |
+| M2-04-R31 | Medium | Simulator memory search answers omitted fact identity and update time, losing citations and freshness information. | Bounded memory answers now include each fact ID, source, and `UpdatedAtUtc`; a non-empty search through production Web/SDK composition asserts those fields. |
+| M2-04-R32 | Medium | An accepted write with an unconfirmed outcome was rendered identically to a verified success because the simulator answer discarded dispatch status. | Simulator action answers include the outer dispatch status separately from submission acceptance and causality. Aspire coverage compares verified and accepted-but-unconfirmed outcomes and asserts Unknown remains explicit. |
 
 ### R16–R21 refreshed validation
 
@@ -392,3 +421,61 @@ Assistant credentials, private household data, cloud inference, or physical
 devices were used; Linux CI, live provider availability, physical-effect
 causality, human observations, and assistive-technology certification remain
 unexercised.
+
+### R22–R23 validation
+
+The follow-up regressions ran on native macOS with .NET SDK `10.0.401`,
+isolated SQLite data, and the controlled browser simulator. The approval
+settlement recovery coverage initially fell below its 95% critical-module
+line threshold; additional `ToolDispatcherUnitTests` now exercise input
+validation, stale ownership/version, idempotent replay, settlement failure,
+concurrent terminal outcomes, and missing journal state. The refreshed
+coverage gate passes without changing thresholds.
+
+| Command | Result |
+| --- | --- |
+| `tools/validate.sh build` | Passed; Release build, formatting/analyzers, zero warnings/errors. |
+| `tools/validate.sh architecture` | Passed; 6/6 discovered tests. |
+| `tools/validate.sh unit` | Passed; 343/343 discovered tests. |
+| `tools/validate.sh integration` | Passed; 462/462 discovered tests, including real-SQLite interrupted expiry settlement recovery. |
+| `tools/validate.sh sdk-contracts` | Passed; actual pinned-runtime probes and 57/57 contract tests. |
+| `tools/validate.sh coverage` | Passed; changed executable lines 96.3% (900/935); Application 98.3% lines / 93.6% branches; Infrastructure 94.2% / 82.9%; Web 98.0% / 79.0%; all configured critical-module thresholds, including approval settlement, met. |
+| `tools/validate.sh aspire-e2e` | Passed; 14/14 out-of-process scenarios. |
+| `tools/validate.sh browser-e2e` | Passed; 35/35 Playwright scenarios, including delayed proposal retry after conversation switch. The deliberately failing browser probe was discovered and failed as expected. |
+| `tools/validate.sh docs` | Passed; all internal Markdown links resolve. |
+| `git diff --check` | Passed. |
+
+At this historical checkpoint, R22–R23 were uncommitted. The R22–R32
+validation and review status is recorded below. No live Home Assistant
+credentials, private household data, cloud inference, or physical-device
+writes were used. Linux CI, live provider availability, physical-effect
+causality, human observations, and assistive-technology certification remain
+unexercised.
+
+### R22–R32 final validation
+
+The final R22–R32 source was validated on native macOS with .NET SDK
+`10.0.401`, isolated Simulator/SQLite data, and no live Home Assistant
+credentials, private household data, cloud inference, or physical-device
+writes.
+
+| Command | Result |
+| --- | --- |
+| `tools/validate.sh build` | Passed after the final browser assertion; Release build, formatting and analyzers, zero warnings/errors. |
+| `tools/validate.sh architecture` | Passed; 6/6 discovered tests. |
+| `tools/validate.sh unit` | Passed; 352/352 discovered tests. |
+| `tools/validate.sh integration` | Passed; 463/463 discovered tests. |
+| `tools/validate.sh sdk-contracts` | Passed; actual pinned-runtime probes and 57/57 contract tests. |
+| `tools/validate.sh coverage` | Passed; changed executable lines 96.9% (935/965). Application 98.5% lines / 94.0% branches; Infrastructure 94.3% / 82.9%; ServiceDefaults 100% / 100%; Web 98.0% / 79.0%; all critical-module and unit-only thresholds met. |
+| `tools/validate.sh aspire-e2e` | Passed; 14/14 out-of-process scenarios. |
+| `tools/validate.sh browser-e2e` | Passed; 36/36 Playwright scenarios and the deliberately failing browser gate probe behaved as expected. This full run preceded the final resubmit-request-ID assertion. |
+| `dotnet test tests/PersonalAgent.E2ETests/PersonalAgent.E2ETests.csproj -c Release --no-build --no-restore --filter 'FullyQualifiedName~DelayedMemoryProposalResponsePreservesAnEditedDraft'` | Passed on the final source; 1/1 browser regression, including the resubmission request-ID assertion. |
+| `tools/validate.sh docs` | Passed; all internal Markdown links resolve. |
+| `git diff --check` | Passed. |
+
+The final source has not yet received an independent exact-commit review, and
+the corresponding implementation changes have not yet been committed or pushed
+to PR #48. GitHub checks therefore have not run against this source revision.
+Linux CI, live provider availability, physical-effect causality, human
+observations, and assistive-technology certification remain unexercised.
+These limits are not represented as passing evidence.

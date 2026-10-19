@@ -156,6 +156,7 @@ public sealed class ActionOutcomePersistenceTests
     {
         using var file = IsolatedDatabaseFile.Create();
         var actionId = new ActionId(Guid.NewGuid());
+        var malformedActionId = new ActionId(Guid.NewGuid());
         var turnId = TurnId.New();
         await using (var connection = new SqliteConnection($"Data Source={file.Path}"))
         {
@@ -177,19 +178,45 @@ public sealed class ActionOutcomePersistenceTests
                 PRAGMA user_version = 7;
                 INSERT INTO actions(id,action_type,canonical_arguments,request_hash,status,created_at_utc,updated_at_utc,version)
                 VALUES ($id,'home.set_light',$arguments,'hash','Unknown',$now,$now,1);
+                INSERT INTO actions(id,action_type,canonical_arguments,request_hash,status,created_at_utc,updated_at_utc,version)
+                VALUES ($malformedId,'home.set_light',$malformedArguments,'malformed-hash','Unknown',$now,$now,1);
                 """;
             insert.Parameters.AddWithValue("$id", actionId.Value.ToString("D"));
             insert.Parameters.AddWithValue("$arguments", $$"""{"OwnerId":"owner","TurnId":"{{turnId.Value:D}}"}""");
+            insert.Parameters.AddWithValue("$malformedId", malformedActionId.Value.ToString("D"));
+            insert.Parameters.AddWithValue("$malformedArguments", """{"OwnerId":"owner","TurnId":"not-a-turn"}""");
             insert.Parameters.AddWithValue("$now", Now.ToString("O"));
             await insert.ExecuteNonQueryAsync();
         }
 
         var database = new SqliteDatabase(file.Path);
         await database.InitializeAsync();
-        var entries = await new SqliteActionJournalStore(database)
-            .ReadForTurnAsync("owner", turnId, CancellationToken.None);
-
-        Assert.Equal(actionId, Assert.Single(entries).Id);
+        var journal = new SqliteActionJournalStore(database);
+        await using (var connection = await database.OpenConnectionAsync())
+        await using (var command = connection.CreateCommand())
+        {
+            command.CommandText = """
+                SELECT action_owner_id, action_turn_id
+                FROM actions WHERE id = $id;
+                """;
+            command.Parameters.AddWithValue("$id", actionId.Value.ToString("D"));
+            await using (var reader = await command.ExecuteReaderAsync())
+            {
+                Assert.True(await reader.ReadAsync());
+                Assert.Equal("owner", reader.GetString(0));
+                Assert.Equal(turnId.Value.ToString("D"), reader.GetString(1));
+            }
+            command.Parameters.Clear();
+            command.Parameters.AddWithValue("$id", malformedActionId.Value.ToString("D"));
+            await using (var reader = await command.ExecuteReaderAsync())
+            {
+                Assert.True(await reader.ReadAsync());
+                Assert.True(await reader.IsDBNullAsync(0));
+                Assert.True(await reader.IsDBNullAsync(1));
+            }
+        }
+        await Assert.ThrowsAsync<InvalidDataException>(async () =>
+            await journal.ReadForTurnAsync("owner", turnId, CancellationToken.None));
     }
 
     private static ActionJournalEntry Prepared() =>

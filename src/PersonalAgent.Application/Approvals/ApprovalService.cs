@@ -128,6 +128,58 @@ public sealed class ApprovalService : IApprovalService
         return ToRequest(resolved);
     }
 
+    /// <inheritdoc />
+    public async ValueTask<ActionJournalEntry> SettleExpiredAsync(
+        ApprovalId approvalId,
+        string ownerId,
+        long expectedVersion,
+        CancellationToken cancellationToken)
+    {
+        ValidateOwner(ownerId);
+        if (expectedVersion < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(expectedVersion));
+        }
+
+        var approval = await approvals.GetAsync(approvalId, cancellationToken)
+            ?? throw new KeyNotFoundException("The approval request does not exist.");
+        if (!string.Equals(approval.OwnerId, ownerId, StringComparison.Ordinal)
+            || approval.Version != expectedVersion
+            || approval.Status != "Expired")
+        {
+            throw new PersistenceConcurrencyException("The approval is not the expected expired version.");
+        }
+
+        var action = await actions.GetAsync(approval.ActionId, cancellationToken)
+            ?? throw new PersistenceConcurrencyException("The expired action no longer exists.");
+        if (action.Status != "AwaitingApproval")
+        {
+            return action;
+        }
+
+        var settledAtUtc = approval.ResolvedAtUtc ?? approval.ExpiresAtUtc;
+        try
+        {
+            return await actions.UpdateStatusAsync(
+                action.Id,
+                "Expired",
+                action.Version,
+                settledAtUtc,
+                cancellationToken,
+                new("Expired", null, "approval_expired", action.Id, approvalId));
+        }
+        catch (PersistenceConcurrencyException)
+        {
+            var current = await actions.GetAsync(action.Id, cancellationToken);
+            if (current is null || current.Status == "AwaitingApproval")
+            {
+                throw;
+            }
+
+            return current;
+        }
+    }
+
     private async ValueTask SettleActionAsync(
         ActionJournalEntry action,
         string status,

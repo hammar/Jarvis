@@ -242,6 +242,39 @@ public sealed class ConfirmedMemoryTests
 
     [Fact]
     [Trait("Category", "Integration")]
+    public async Task DuplicateProposalRetrySettlesATurnAfterItsFirstSettlementWasInterrupted()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var conversations = new SqliteConversationStore(fixture.Database, fixture.Clock);
+        var conversationId = await fixture.CreateConversationAsync();
+        var requestId = Guid.NewGuid();
+        var change = new MemoryChange(
+            "create", MemoryFactId.New(), 0, "retry room", "curtain", "linen", []);
+        await fixture.SqlAsync("""
+            CREATE TRIGGER fail_first_proposal_turn_settlement
+            BEFORE UPDATE OF status ON turns
+            WHEN NEW.status = 'Completed'
+            BEGIN
+                SELECT RAISE(ABORT, 'simulated turn settlement interruption');
+            END;
+            """);
+
+        await Assert.ThrowsAsync<SqliteException>(async () =>
+            await fixture.Proposals.ProposeAsync("owner", conversationId, requestId, change, default));
+        await fixture.SqlAsync("DROP TRIGGER fail_first_proposal_turn_settlement;");
+
+        var retried = await fixture.Proposals.ProposeAsync(
+            "owner", conversationId, requestId, change, default);
+        var persistedTurn = Assert.Single(
+            await conversations.ReadRecentTurnsForOwnerAsync("owner", 10, default));
+
+        Assert.Equal("AwaitingApproval", retried.Result.Status);
+        Assert.Equal(TurnStatus.Completed, persistedTurn.Status);
+        Assert.Single(await fixture.ApprovalStore.ReadRecentForOwnerAsync("owner", 10, default));
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
     public async Task BoundedProposalSourcePreservesPreviouslyAcceptedRequestFingerprints()
     {
         using var fixture = await Fixture.CreateAsync();
@@ -682,8 +715,14 @@ public sealed class ConfirmedMemoryTests
         Assert.Equal("Invalidated", invalidatedApproval.ActionStatus);
         Assert.Equal("""{"invalidated":true}""", invalidatedApproval.ArgumentsJson);
         Assert.DoesNotContain("private_blue_sentinel", invalidatedApproval.ArgumentsJson, StringComparison.Ordinal);
+        fixture.Clock.UtcNow = fixture.Clock.UtcNow.AddMinutes(6);
+        var expiredInvalidatedApproval = Assert.Single(
+            await fixture.ApprovalWorkflow().ReadRecentAsync("owner", 20, default),
+            summary => summary.ActionId == pending.ActionId);
+        Assert.Equal("Pending", expiredInvalidatedApproval.Approval.Status);
+        Assert.Equal("Invalidated", expiredInvalidatedApproval.ActionStatus);
         var invalidatedDecision = await fixture.ApprovalWorkflow().ResolveAsync(
-            "owner", pending.ApprovalId!.Value, invalidatedApproval.Approval.ExpectedVersion, true, default);
+            "owner", pending.ApprovalId!.Value, expiredInvalidatedApproval.Approval.ExpectedVersion, true, default);
         Assert.Equal("Rejected", invalidatedDecision.Status);
         Assert.Equal("memory_result_invalidated", invalidatedDecision.ReasonCode);
         await Assert.ThrowsAsync<PersistenceConcurrencyException>(async () =>

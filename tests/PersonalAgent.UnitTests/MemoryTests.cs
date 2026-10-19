@@ -267,6 +267,43 @@ public sealed class MemoryTests
     }
 
     [Fact]
+    public async Task OwnerEnteredProposalAcceptsConcurrentTerminalTurnSettlement()
+    {
+        var fixture = new Fixture();
+        var conversations = new ProposalConversations
+        {
+            ThrowOnStatusUpdate = true,
+            StatusAfterConcurrency = TurnStatus.Completed
+        };
+        var dispatcher = new RecordingDispatcher();
+        var service = new MemoryProposalService(
+            fixture.Memory, fixture.Journal, fixture.Approvals, dispatcher, conversations, fixture.Clock);
+
+        var submission = await service.ProposeAsync(
+            "owner", conversations.Conversation.Id, Guid.NewGuid(), Create, default);
+
+        Assert.Equal("AwaitingApproval", submission.Result.Status);
+        Assert.Equal(TurnStatus.Completed, conversations.Turn!.Status);
+        Assert.Equal([conversations.Turn.Id], dispatcher.ReleasedTurns);
+    }
+
+    [Fact]
+    public async Task OwnerEnteredProposalDoesNotSwallowNonterminalTurnSettlementConflict()
+    {
+        var fixture = new Fixture();
+        var conversations = new ProposalConversations { ThrowOnStatusUpdate = true };
+        var dispatcher = new RecordingDispatcher();
+        var service = new MemoryProposalService(
+            fixture.Memory, fixture.Journal, fixture.Approvals, dispatcher, conversations, fixture.Clock);
+
+        await Assert.ThrowsAsync<PersistenceConcurrencyException>(() => service.ProposeAsync(
+            "owner", conversations.Conversation.Id, Guid.NewGuid(), Create, default).AsTask());
+
+        Assert.Equal(TurnStatus.Received, conversations.Turn!.Status);
+        Assert.Equal([conversations.Turn.Id], dispatcher.ReleasedTurns);
+    }
+
+    [Fact]
     public async Task OwnerEnteredProposalReleasesItsDispatcherTurnAfterSuccessOrFailure()
     {
         var fixture = new Fixture();
@@ -463,6 +500,9 @@ public sealed class MemoryTests
             Entries[approvalId] = entry with { ExpectedVersion = expectedVersion + 1, Status = approved ? "Approved" : "Rejected" };
             return ValueTask.FromResult(Entries[approvalId]);
         }
+        public ValueTask<ActionJournalEntry> SettleExpiredAsync(
+            ApprovalId approvalId, string ownerId, long expectedVersion, CancellationToken cancellationToken) =>
+            throw new NotImplementedException();
     }
 
     private sealed class Clock : IClock
@@ -492,6 +532,8 @@ public sealed class MemoryTests
         internal ConversationRecord Conversation { get; } = new(
             ConversationId.New(), "owner", "memory", DateTimeOffset.UtcNow, DateTimeOffset.UtcNow);
         internal ConversationTurn? Turn { get; private set; }
+        internal bool ThrowOnStatusUpdate { get; init; }
+        internal TurnStatus StatusAfterConcurrency { get; init; } = TurnStatus.Received;
 
         public ValueTask<ConversationRecord?> GetConversationAsync(
             ConversationId conversationId, string ownerId, CancellationToken cancellationToken) =>
@@ -523,6 +565,17 @@ public sealed class MemoryTests
             DateTimeOffset updatedAtUtc,
             CancellationToken cancellationToken)
         {
+            if (ThrowOnStatusUpdate)
+            {
+                Turn = Turn! with
+                {
+                    Status = StatusAfterConcurrency,
+                    UpdatedAtUtc = updatedAtUtc,
+                    Version = expectedVersion + 1
+                };
+                throw new PersistenceConcurrencyException("Synthetic concurrent turn settlement.");
+            }
+
             Turn = Turn! with { Status = status, UpdatedAtUtc = updatedAtUtc, Version = expectedVersion + 1 };
             return ValueTask.FromResult(Turn);
         }

@@ -1229,6 +1229,34 @@ public sealed class ToolDispatcherTests
 
     [Fact]
     [Trait("Category", "Integration")]
+    public async Task ApprovalListRecoversExpiredDecisionWhoseActionSettlementWasInterrupted()
+    {
+        using var fixture = await Fixture.CreateAsync(riskClass: ToolRiskClass.ApprovalRequired);
+        var pending = await fixture.CreatePendingHomeApprovalAsync(PorchRequest);
+        fixture.Clock.Advance(TimeSpan.FromMinutes(5));
+        await fixture.ApprovalStore.ResolveAsync(
+            pending.ApprovalId!.Value,
+            "owner",
+            "Expired",
+            1,
+            fixture.Clock.UtcNow,
+            CancellationToken.None);
+
+        Assert.Equal(
+            "AwaitingApproval",
+            (await fixture.Journal.GetAsync(pending.ActionId!.Value, CancellationToken.None))!.Status);
+
+        var summary = Assert.Single(
+            await fixture.ApprovalWorkflow().ReadRecentAsync("owner", 10, CancellationToken.None));
+
+        Assert.Equal("Expired", summary.Approval.Status);
+        Assert.Equal("Expired", summary.ActionStatus);
+        Assert.Equal("Expired", (await fixture.Journal.GetAsync(pending.ActionId.Value, CancellationToken.None))!.Status);
+        Assert.Equal(0, fixture.ExecutionCount);
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
     public async Task LowRiskWriteWithoutVerifiedExplicitOwnerIntentRequiresApproval()
     {
         using var fixture = await Fixture.CreateAsync();

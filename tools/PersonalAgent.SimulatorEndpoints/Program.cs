@@ -416,9 +416,11 @@ static string? CreateDemoToolReply(JsonElement request)
                 var subject = StringProperty(fact, "Subject");
                 var key = StringProperty(fact, "Key");
                 var value = StringProperty(fact, "Value");
+                var id = StringProperty(fact, "Id");
                 var source = StringProperty(fact, "SourceId");
                 var qualifier = StringProperty(fact, "DistinguishingContext");
-                lines.Add($"- {subject}.{key} = {BoundedText(value, 512)}; source={source}"
+                var updatedAtUtc = StringProperty(fact, "UpdatedAtUtc");
+                lines.Add($"- id={id}; {subject}.{key} = {BoundedText(value, 512)}; source={source}; updatedAtUtc={updatedAtUtc}"
                     + (string.IsNullOrEmpty(qualifier) ? "" : $"; context={BoundedText(qualifier, 256)}"));
             }
             if (root.TryGetProperty("Truncated", out var truncated) && truncated.GetBoolean())
@@ -430,7 +432,8 @@ static string? CreateDemoToolReply(JsonElement request)
         if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("submission", out var submission))
         {
             var causality = StringProperty(root, "causality");
-            return $"Action tool result: submission={submission.GetString()}; causality={causality}.";
+            var status = StringProperty(wrapper, "Status");
+            return $"Action tool result: status={status}; submission={submission.GetString()}; causality={causality}.";
         }
         return $"Registered tool result (untrusted data): {BoundedText(JsonSerializer.Serialize(root), 4_000)}";
     }
@@ -448,10 +451,22 @@ static string? CreateDemoToolReply(JsonElement request)
         }
     }
 
-    static string StringProperty(JsonElement element, string name) =>
-        element.TryGetProperty(name, out var property) && property.ValueKind == JsonValueKind.String
-            ? property.GetString() ?? ""
-            : "";
+    static string StringProperty(JsonElement element, string name)
+    {
+        if (!element.TryGetProperty(name, out var property))
+        {
+            return "";
+        }
+        if (property.ValueKind == JsonValueKind.String)
+        {
+            return property.GetString() ?? "";
+        }
+        return property.ValueKind == JsonValueKind.Object
+            && property.TryGetProperty("Value", out var value)
+            && value.ValueKind == JsonValueKind.String
+                ? value.GetString() ?? ""
+                : "";
+    }
 
     static string BoundedText(string value, int maximumCharacters) =>
         value.Length <= maximumCharacters

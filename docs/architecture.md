@@ -127,12 +127,14 @@ No memory context cache is introduced. M3-01 owns cloud packet/consent
 invalidation. Original conversation answers and backups retain separate
 retention; logical deletion is not secure erasure.
 M2-04's Web API applies authenticated owner scoping to bounded approval,
-action and memory reads. The approval UI displays a redacted preview from the
-durable canonical action, and submits the expected approval version through
-the dispatcher; it cannot provide alternate action arguments. Memory edit and
-delete controls only prepare a chat proposal. They do not call the mutation
-store directly. The household view exposes the configured allowlist and
-labels connectivity as unprobed until an operation actually observes it.
+action and memory reads. The action-list read may trigger bounded
+owner-scoped observation-only recovery of unapproved Executing actions; it
+never resubmits a household write. The approval UI displays a redacted preview
+from the durable canonical action, and submits the expected approval version
+through the dispatcher; it cannot provide alternate action arguments. Memory
+edit and delete controls only prepare a chat proposal. They do not call the
+mutation store directly. The household view exposes the configured allowlist
+and labels connectivity as unprobed until an operation actually observes it.
 
 ### Host turn policy
 

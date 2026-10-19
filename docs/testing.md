@@ -135,6 +135,19 @@ Home Assistant path without the E2E call-injection control.
 and `BrowserSmokeTests.MemoryUiCreatesAndApprovesTypedProposalWithoutInference`
 cover the provider-independent typed proposal route, durable action replay,
 exact approval, edit/delete versions, and explicit retain-both conflict review.
+`ConfirmedMemoryTests.DuplicateProposalRetrySettlesATurnAfterItsFirstSettlementWasInterrupted`
+checks real-SQLite retry settlement after an interrupted status write.
+`ApprovalWorkflowExpiryTests.UnapprovedExecutingRecoveryMarksActionUnknownWhenOriginalSourceIsUnavailable`
+and
+`ApprovalWorkflowExpiryTests.UnapprovedExecutingRecoveryNeverCompletesMemoryProposals`
+and
+`AspireSimulatorTests.ApprovalListRecoversInterruptedActionsAfterHostRestartWithoutCrossingHomeInstallationBoundary`
+cover bounded owner-triggered recovery of interrupted automatic writes without
+resubmission. The unit workflow tests also cover malformed owner binding,
+expired approvals, invalidated memory, and concurrent turn-budget retention.
+`BrowserSmokeTests.DelayedMemoryProposalCannotResetFormOrSelectionAfterConversationSwitch`
+verifies that a delayed proposal is retried against its original conversation
+while the current selection and draft are preserved.
 `BrowserSmokeTests.HouseholdMemoryApprovalAndActivitySurfacesReflowAndKeepKeyboardFocusVisible`
 signs in through Playwright, forces a controlled `/api/status` failure, then
 verifies the owner surfaces still load and render empty-state/status content

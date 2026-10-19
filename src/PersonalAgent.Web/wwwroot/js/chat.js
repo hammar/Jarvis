@@ -21,8 +21,20 @@ let eventSource = null;
 let bootstrapRequired = false;
 let reviewedMemoryConflicts = null;
 let pendingMemoryProposalRequestId = "";
+let pendingMemoryProposalConversationId = "";
 let memoryProposalInFlight = false;
+let memoryDraftRevision = 0;
 const workspaceViews = ["conversation", "settings", "activity", "approvals", "memory", "household"];
+
+function clearPendingMemoryProposalRequest() {
+    pendingMemoryProposalRequestId = "";
+    pendingMemoryProposalConversationId = "";
+}
+
+function markMemoryDraftChanged() {
+    memoryDraftRevision++;
+    clearPendingMemoryProposalRequest();
+}
 
 function hideWorkspaceViews() {
     for (const id of workspaceViews) document.getElementById(id).hidden = true;
@@ -308,13 +320,12 @@ async function openApprovals() {
                 const entry = createActivityEntry(`${item.actionType} · ${item.actionId.value || item.actionId}`, details,
                     "approval-card");
                 entry.dataset.status = item.actionStatus;
-                const args = document.createElement("details");
-                const summary = document.createElement("summary");
-                summary.textContent = "Review exact action details";
+                const argsLabel = document.createElement("strong");
+                argsLabel.textContent = "Exact action arguments";
                 const pre = document.createElement("pre");
+                pre.className = "approval-arguments";
                 pre.textContent = item.argumentsJson;
-                args.append(summary, pre);
-                entry.append(args);
+                entry.append(argsLabel, pre);
 
                 if ((isPending || isResumable) && !expired && !activeTurnId && !turnSubmissionInFlight) {
                     const actions = document.createElement("div");
@@ -577,8 +588,12 @@ document.getElementById("memory-request-form").addEventListener("submit", async 
     event.preventDefault();
     if (memoryProposalInFlight) return;
     const proposalSelectionGeneration = conversationSelectionGeneration;
+    const proposalDraftRevision = memoryDraftRevision;
     const originalConversationId = conversationId;
-    let proposalConversationId = originalConversationId;
+    const retryingPendingProposal = Boolean(pendingMemoryProposalRequestId);
+    let proposalConversationId = retryingPendingProposal
+        ? pendingMemoryProposalConversationId
+        : originalConversationId;
     memoryProposalInFlight = true;
     const submitButton = event.currentTarget.querySelector('button[type="submit"]');
     submitButton.disabled = true;
@@ -599,6 +614,10 @@ document.getElementById("memory-request-form").addEventListener("submit", async 
             if (operation === "update" && targetId) query.set("excludeId", targetId);
             conflicts = await api(`/api/memory/conflicts?${query}`);
             if (proposalSelectionGeneration !== conversationSelectionGeneration) return;
+            if (proposalDraftRevision !== memoryDraftRevision) {
+                status.textContent = "The editor changed while conflicts were loading. Review the current draft and submit again.";
+                return;
+            }
             const previous = reviewedMemoryConflicts;
             const sameReview = previous
                 && previous.queryKey === conflictQueryKey
@@ -658,13 +677,21 @@ document.getElementById("memory-request-form").addEventListener("submit", async 
             proposalConversationId = created.id.value || created.id;
         }
         if (proposalSelectionGeneration !== conversationSelectionGeneration) return;
-        if (!pendingMemoryProposalRequestId) pendingMemoryProposalRequestId = crypto.randomUUID();
+        if (proposalDraftRevision !== memoryDraftRevision) {
+            status.textContent = "The editor changed while the proposal was being prepared. Review the current draft and submit again.";
+            return;
+        }
+        if (!pendingMemoryProposalRequestId) {
+            pendingMemoryProposalRequestId = crypto.randomUUID();
+            pendingMemoryProposalConversationId = proposalConversationId;
+        }
+        const proposalRequestId = pendingMemoryProposalRequestId;
         const result = await api("/api/memory/proposals", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
                 conversationId: proposalConversationId,
-                requestId: pendingMemoryProposalRequestId,
+                requestId: proposalRequestId,
                 operation: proposalOperation,
                 factId: proposalFactId,
                 expectedVersion: proposalVersion,
@@ -678,25 +705,36 @@ document.getElementById("memory-request-form").addEventListener("submit", async 
         await loadConversations();
         if (proposalSelectionGeneration === conversationSelectionGeneration
             && conversationId === originalConversationId) {
-            conversationId = result.conversationId.value || result.conversationId;
-            for (const button of document.querySelectorAll("#conversation-list button")) {
-                if (button.dataset.conversationId === conversationId) button.setAttribute("aria-current", "page");
-                else button.removeAttribute("aria-current");
+            const draftUnchanged = proposalDraftRevision === memoryDraftRevision;
+            if (!retryingPendingProposal || originalConversationId === proposalConversationId) {
+                conversationId = result.conversationId.value || result.conversationId;
+                for (const button of document.querySelectorAll("#conversation-list button")) {
+                    if (button.dataset.conversationId === conversationId) button.setAttribute("aria-current", "page");
+                    else button.removeAttribute("aria-current");
+                }
             }
-            pendingMemoryProposalRequestId = "";
-            reviewedMemoryConflicts = null;
-            document.getElementById("memory-request-form").reset();
-            syncMemoryEditor();
-            resetMemoryConflictReview();
-            await loadMemory(document.getElementById("memory-query").value.trim());
-            status.textContent = result.result.status === "AwaitingApproval"
-                ? "Exact proposal saved for review. Open Approvals to approve or reject it; inference was not required."
-                : `Proposal outcome: ${result.result.status}. Review Activity before retrying.`;
+            if (draftUnchanged) {
+                clearPendingMemoryProposalRequest();
+                reviewedMemoryConflicts = null;
+                document.getElementById("memory-request-form").reset();
+                syncMemoryEditor();
+                resetMemoryConflictReview();
+            }
+            if (!retryingPendingProposal || originalConversationId === proposalConversationId) {
+                if (draftUnchanged) {
+                    await loadMemory(document.getElementById("memory-query").value.trim());
+                }
+            }
+            status.textContent = !draftUnchanged
+                ? "The exact proposal was saved; your newer editor changes were preserved."
+                : result.result.status === "AwaitingApproval"
+                    ? "Exact proposal saved for review. Open Approvals to approve or reject it; inference was not required."
+                    : `Proposal outcome: ${result.result.status}. Review Activity before retrying.`;
         }
     } catch (error) {
         if (error.status === 409) {
             if (proposalSelectionGeneration === conversationSelectionGeneration) {
-                pendingMemoryProposalRequestId = "";
+                clearPendingMemoryProposalRequest();
                 reviewedMemoryConflicts = null;
                 resetMemoryConflictReview();
                 status.textContent = "A fact or conflict changed. Review the refreshed facts before preparing another proposal.";
@@ -714,21 +752,21 @@ document.getElementById("memory-request-form").addEventListener("submit", async 
 });
 
 document.getElementById("memory-operation").addEventListener("change", () => {
-    pendingMemoryProposalRequestId = "";
+    markMemoryDraftChanged();
     syncMemoryEditor();
     resetMemoryConflictReview();
 });
 for (const id of ["memory-subject", "memory-key", "memory-target-id", "memory-target-version"]) {
     document.getElementById(id).addEventListener("input", () => {
-        pendingMemoryProposalRequestId = "";
+        markMemoryDraftChanged();
         resetMemoryConflictReview();
     });
 }
 for (const id of ["memory-value", "memory-distinguishing-context"]) {
-    document.getElementById(id).addEventListener("input", () => pendingMemoryProposalRequestId = "");
+    document.getElementById(id).addEventListener("input", markMemoryDraftChanged);
 }
 document.getElementById("memory-conflict-choice").addEventListener("change", () => {
-    pendingMemoryProposalRequestId = "";
+    markMemoryDraftChanged();
 });
 
 document.getElementById("rename-conversation").addEventListener("click", () => {

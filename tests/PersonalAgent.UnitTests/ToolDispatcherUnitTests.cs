@@ -2125,6 +2125,105 @@ public sealed class ToolDispatcherUnitTests
 
     [Fact]
     [Trait("Category", "Unit")]
+    public async Task ApprovalServiceRepairsAnExpiredDecisionAfterInterruptedActionSettlement()
+    {
+        using var fixture = new Fixture(ToolRiskClass.ApprovalRequired);
+        var pending = await fixture.Dispatcher.DispatchAsync(Request, CancellationToken.None);
+        var approvalId = pending.ApprovalId
+            ?? throw new InvalidOperationException("The approval-required dispatch returned no approval ID.");
+        var approval = Assert.Single(fixture.ApprovalStore.Entries);
+        fixture.Clock.Advance(TimeSpan.FromMinutes(5));
+        fixture.ApprovalStore.Replace(approval with
+        {
+            Status = "Expired",
+            ResolvedAtUtc = fixture.Clock.UtcNow,
+            Version = approval.Version + 1
+        });
+
+        await Assert.ThrowsAsync<ArgumentException>(async () =>
+            await fixture.Approvals.SettleExpiredAsync(approvalId, " ", 2, CancellationToken.None));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(async () =>
+            await fixture.Approvals.SettleExpiredAsync(approvalId, "owner", 0, CancellationToken.None));
+        await Assert.ThrowsAsync<PersistenceConcurrencyException>(async () =>
+            await fixture.Approvals.SettleExpiredAsync(approvalId, "another-owner", 2, CancellationToken.None));
+        await Assert.ThrowsAsync<PersistenceConcurrencyException>(async () =>
+            await fixture.Approvals.SettleExpiredAsync(approvalId, "owner", 1, CancellationToken.None));
+
+        var settled = await fixture.Approvals.SettleExpiredAsync(
+            approvalId, "owner", 2, CancellationToken.None);
+        var replay = await fixture.Approvals.SettleExpiredAsync(
+            approvalId, "owner", 2, CancellationToken.None);
+
+        Assert.Equal("Expired", settled.Status);
+        Assert.Equal("approval_expired", settled.Outcome?.ReasonCode);
+        Assert.Equal(settled, replay);
+        Assert.Equal(0, fixture.ExecutionCount);
+
+        using var pendingFixture = new Fixture(ToolRiskClass.ApprovalRequired);
+        var pendingAction = await pendingFixture.Dispatcher.DispatchAsync(Request, CancellationToken.None);
+        var pendingApprovalId = pendingAction.ApprovalId
+            ?? throw new InvalidOperationException("The approval-required dispatch returned no approval ID.");
+        await Assert.ThrowsAsync<PersistenceConcurrencyException>(async () =>
+            await pendingFixture.Approvals.SettleExpiredAsync(
+                pendingApprovalId, "owner", 1, CancellationToken.None));
+    }
+
+    [Fact]
+    [Trait("Category", "Unit")]
+    public async Task ApprovalServiceExpiryRepairPreservesConcurrentActionWinners()
+    {
+        using var settled = new Fixture(ToolRiskClass.ApprovalRequired);
+        var first = await settled.Dispatcher.DispatchAsync(Request, CancellationToken.None);
+        var firstApprovalId = first.ApprovalId
+            ?? throw new InvalidOperationException("The approval-required dispatch returned no approval ID.");
+        var firstApproval = Assert.Single(settled.ApprovalStore.Entries);
+        settled.ApprovalStore.Replace(firstApproval with
+        {
+            Status = "Expired",
+            ResolvedAtUtc = settled.Clock.UtcNow,
+            Version = firstApproval.Version + 1
+        });
+        settled.Journal.SettleThenConflictStatus = "Expired";
+
+        var winner = await settled.Approvals.SettleExpiredAsync(
+            firstApprovalId, "owner", firstApproval.Version + 1, CancellationToken.None);
+        Assert.Equal("Expired", winner.Status);
+
+        using var stillPending = new Fixture(ToolRiskClass.ApprovalRequired);
+        var second = await stillPending.Dispatcher.DispatchAsync(Request, CancellationToken.None);
+        var secondApprovalId = second.ApprovalId
+            ?? throw new InvalidOperationException("The approval-required dispatch returned no approval ID.");
+        var secondApproval = Assert.Single(stillPending.ApprovalStore.Entries);
+        stillPending.ApprovalStore.Replace(secondApproval with
+        {
+            Status = "Expired",
+            ResolvedAtUtc = stillPending.Clock.UtcNow,
+            Version = secondApproval.Version + 1
+        });
+        stillPending.Journal.ThrowWithoutTerminalSettlement = true;
+        await Assert.ThrowsAsync<PersistenceConcurrencyException>(async () =>
+            await stillPending.Approvals.SettleExpiredAsync(
+                secondApprovalId, "owner", secondApproval.Version + 1, CancellationToken.None));
+
+        using var removed = new Fixture(ToolRiskClass.ApprovalRequired);
+        var third = await removed.Dispatcher.DispatchAsync(Request, CancellationToken.None);
+        var thirdApprovalId = third.ApprovalId
+            ?? throw new InvalidOperationException("The approval-required dispatch returned no approval ID.");
+        var thirdApproval = Assert.Single(removed.ApprovalStore.Entries);
+        removed.ApprovalStore.Replace(thirdApproval with
+        {
+            Status = "Expired",
+            ResolvedAtUtc = removed.Clock.UtcNow,
+            Version = thirdApproval.Version + 1
+        });
+        removed.Journal.RemoveOnTerminalConflict = true;
+        await Assert.ThrowsAsync<PersistenceConcurrencyException>(async () =>
+            await removed.Approvals.SettleExpiredAsync(
+                thirdApprovalId, "owner", thirdApproval.Version + 1, CancellationToken.None));
+    }
+
+    [Fact]
+    [Trait("Category", "Unit")]
     public async Task ApprovalServiceValidatesDependenciesAndReturnsAnExistingExactBinding()
     {
         using var fixture = new Fixture(ToolRiskClass.ApprovalRequired);
@@ -2741,6 +2840,7 @@ public sealed class ToolDispatcherUnitTests
 
         public bool FailNextExecutingUpdate { get; set; }
         public bool FailTerminalUpdate { get; set; }
+        public bool ThrowWithoutTerminalSettlement { get; set; }
         public string? SettleThenConflictStatus { get; set; }
         public bool RemoveOnTerminalConflict { get; set; }
         public bool FailCompletionUpdate { get; set; }
@@ -2862,6 +2962,12 @@ public sealed class ToolDispatcherUnitTests
                 if (FailTerminalUpdate && status is "Expired" or "Rejected")
                 {
                     throw new InvalidOperationException("Controlled terminal persistence failure.");
+                }
+
+                if (ThrowWithoutTerminalSettlement && status == "Expired")
+                {
+                    ThrowWithoutTerminalSettlement = false;
+                    throw new PersistenceConcurrencyException("Concurrent status update did not settle the action.");
                 }
 
                 if (SettleThenConflictStatus == status)

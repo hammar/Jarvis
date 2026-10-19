@@ -84,7 +84,9 @@ public sealed class ApprovalWorkflowService
                 ?? throw new InvalidDataException("An approval is missing its durable action.");
             var approval = new ApprovalRequest(
                 record.Id, record.ActionId, record.OwnerId, record.ExpiresAtUtc, record.Version, record.Status);
-            if (approval.Status == "Pending" && clock.UtcNow.ToUniversalTime() >= approval.ExpiresAtUtc)
+            if (approval.Status == "Pending"
+                && !action.MemoryInvalidated
+                && clock.UtcNow.ToUniversalTime() >= approval.ExpiresAtUtc)
             {
                 try
                 {
@@ -102,12 +104,14 @@ public sealed class ApprovalWorkflowService
                         throw;
                     }
                 }
-
-                if (approval.Status == "Expired")
+            }
+            if (approval.Status == "Expired")
+            {
+                action = await approvals.SettleExpiredAsync(
+                    approval.Id, ownerId, approval.ExpectedVersion, cancellationToken);
+                if (action.Status != "Executing" && !action.MemoryInvalidated)
                 {
                     dispatcher.ReleaseApproval(action.Id);
-                    action = await journal.GetAsync(action.Id, cancellationToken)
-                        ?? throw new InvalidDataException("The expired action disappeared.");
                 }
             }
             else if (approval.Status == "Approved" && action.Status == "Executing" && recoveredExecutions < 8)
@@ -167,6 +171,41 @@ public sealed class ApprovalWorkflowService
         return summaries;
     }
 
+    /// <summary>Recovers bounded owner-bound Home Assistant actions that have no approval record.</summary>
+    /// <param name="ownerId">Authenticated owner whose recent actions may be reconciled.</param>
+    /// <param name="cancellationToken">Token that cancels recovery before a durable outcome is recorded.</param>
+    /// <returns>A task completing after at most eight observation-only recovery attempts.</returns>
+    public async ValueTask RecoverUnapprovedExecutingActionsAsync(
+        string ownerId,
+        CancellationToken cancellationToken)
+    {
+        MemoryPolicy.ValidateOwner(ownerId);
+        var actions = await journal.ReadRecentForOwnerAsync(ownerId, 100, cancellationToken);
+        var recovered = 0;
+        foreach (var action in actions)
+        {
+            if (recovered >= 8)
+            {
+                break;
+            }
+            if (action.Status != "Executing"
+                || action.MemoryInvalidated
+                || action.ActionType is not ("home.set_light" or "home.set_temperature"))
+            {
+                continue;
+            }
+
+            var approval = await approvalStore.GetAsync(new(action.Id.Value), cancellationToken);
+            if (approval is not null)
+            {
+                continue;
+            }
+
+            await RecoverExecutingActionAsync(ownerId, action, cancellationToken);
+            recovered++;
+        }
+    }
+
     private async ValueTask<ActionJournalEntry> RecoverExecutingActionAsync(
         string ownerId,
         ActionJournalEntry action,
@@ -180,11 +219,13 @@ public sealed class ApprovalWorkflowService
         }
 
         var turnId = new TurnId(Guid.Parse(envelope.TurnId));
+        var releaseTurn = false;
         try
         {
             if (envelope.ToolName == "memory.propose_change")
             {
-                await memoryProposals.CompleteAsync(ownerId, action.Id, cancellationToken);
+                var result = await memoryProposals.CompleteAsync(ownerId, action.Id, cancellationToken);
+                releaseTurn = result.Status != "Executing";
             }
             else
             {
@@ -199,10 +240,11 @@ public sealed class ApprovalWorkflowService
                         cancellationToken,
                         new("Unknown", null, "interrupted_execution_source_unavailable", action.Id,
                             new ApprovalId(action.Id.Value)));
+                    releaseTurn = true;
                 }
                 else
                 {
-                    await dispatcher.DispatchAsync(new(
+                    var result = await dispatcher.DispatchAsync(new(
                         turnId,
                         envelope.CallId,
                         envelope.ToolName,
@@ -212,12 +254,16 @@ public sealed class ApprovalWorkflowService
                     {
                         ReplayCurrentRequestHash = envelope.CurrentRequestHash
                     }, cancellationToken);
+                    releaseTurn = result.Status != "Executing";
                 }
             }
         }
         finally
         {
-            dispatcher.ReleaseTurn(turnId);
+            if (releaseTurn)
+            {
+                dispatcher.ReleaseTurn(turnId);
+            }
         }
 
         action = await journal.GetAsync(action.Id, cancellationToken)

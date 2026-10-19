@@ -2269,10 +2269,10 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
             await page.Locator("#approval-list").GetByText(
                 "Tool: memory.propose_change",
                 new LocatorGetByTextOptions { Exact = false }).WaitForAsync();
-            await page.Locator("#approval-list details summary").ClickAsync();
             var preview = await page.Locator("#approval-list").InnerTextAsync();
             Assert.Contains("Pending", preview, StringComparison.Ordinal);
             Assert.Contains("synthetic room", preview, StringComparison.Ordinal);
+            Assert.True(await page.Locator("#approval-list .approval-arguments").IsVisibleAsync());
             Assert.DoesNotContain("OwnerId", preview, StringComparison.Ordinal);
             var decisionResponseTask = page.WaitForResponseAsync(response =>
                 response.Url.Contains("/api/approvals/", StringComparison.Ordinal)
@@ -2341,8 +2341,10 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
             await page.Locator("#approval-list").GetByText(
                 "Tool: memory.propose_change",
                 new LocatorGetByTextOptions { Exact = false }).WaitForAsync();
-            await page.Locator("#approval-list details summary").ClickAsync();
-            Assert.Contains("typed room", await page.Locator("#approval-list").InnerTextAsync(), StringComparison.Ordinal);
+            var approvalPreview = await page.Locator("#approval-list").InnerTextAsync();
+            Assert.Contains("typed room", approvalPreview, StringComparison.Ordinal);
+            Assert.Contains("linen", approvalPreview, StringComparison.Ordinal);
+            Assert.True(await page.Locator("#approval-list .approval-arguments").IsVisibleAsync());
             var decisionResponseTask = page.WaitForResponseAsync(response =>
                 response.Url.Contains("/api/approvals/", StringComparison.Ordinal)
                 && response.Request.Method == "POST");
@@ -2392,19 +2394,10 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
         await isolated.InitializeAsync();
         var proposalReached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var releaseProposal = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        string? firstProposalRequestJson = null;
+        var proposalRequestCount = 0;
         try
         {
-            async Task<Guid> CreateConversationAsync(string title)
-            {
-                using var response = await isolated.WebClient.PostAsJsonAsync(
-                    "/api/conversations", new { title });
-                response.EnsureSuccessStatusCode();
-                using var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
-                return body.RootElement.GetProperty("id").GetProperty("value").GetGuid();
-            }
-
-            var proposalConversationId = await CreateConversationAsync("Proposal source");
-            var selectedConversationId = await CreateConversationAsync("Current selection");
             using var playwright = await Playwright.CreateAsync();
             await using var browser = await playwright.Chromium.LaunchAsync(
                 new BrowserTypeLaunchOptions { Headless = true });
@@ -2420,6 +2413,23 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
                     "() => !authenticationInFlight && !document.getElementById('chat').hidden");
             }
 
+            async Task<Guid> CreateConversationAsync(string title) =>
+                await page.EvaluateAsync<Guid>(
+                    """
+                    async title => {
+                        const created = await api("/api/conversations", {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ title })
+                        });
+                        await loadConversations();
+                        return created.id.value || created.id;
+                    }
+                    """,
+                    title);
+
+            var proposalConversationId = await CreateConversationAsync("Proposal source");
+            var selectedConversationId = await CreateConversationAsync("Current selection");
             await page.Locator(
                 $"#conversation-list button[data-conversation-id='{proposalConversationId:D}']").ClickAsync();
             await page.GetByRole(AriaRole.Button, new PageGetByRoleOptions { Name = "Memory" }).ClickAsync();
@@ -2428,8 +2438,12 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
             await page.GetByLabel("Exact fact value").FillAsync("preserve this draft");
             await page.RouteAsync("**/api/memory/proposals", async route =>
             {
-                proposalReached.TrySetResult();
-                await releaseProposal.Task.WaitAsync(TimeSpan.FromSeconds(15));
+                if (++proposalRequestCount == 1)
+                {
+                    firstProposalRequestJson = route.Request.PostData;
+                    proposalReached.TrySetResult();
+                    await releaseProposal.Task.WaitAsync(TimeSpan.FromSeconds(15));
+                }
                 await route.ContinueAsync();
             });
             var responseTask = page.WaitForResponseAsync(response =>
@@ -2452,6 +2466,101 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
             Assert.Equal(selectedConversationId.ToString("D"),
                 await page.Locator("#conversation-list button[aria-current='page']")
                     .GetAttributeAsync("data-conversation-id"));
+
+            using var firstProposalRequest = JsonDocument.Parse(firstProposalRequestJson!);
+            var firstConversation = firstProposalRequest.RootElement.GetProperty("conversationId").GetString();
+            var firstRequestId = firstProposalRequest.RootElement.GetProperty("requestId").GetGuid();
+            Assert.Equal(proposalConversationId.ToString("D"), firstConversation);
+
+            var retryResponseTask = page.WaitForResponseAsync(response =>
+                response.Url.EndsWith("/api/memory/proposals", StringComparison.Ordinal)
+                && response.Request.Method == "POST");
+            await page.GetByRole(AriaRole.Button, new PageGetByRoleOptions { Name = "Prepare exact proposal" }).ClickAsync();
+            var retryResponse = await retryResponseTask;
+            Assert.Equal(200, retryResponse.Status);
+            using var retryProposalRequest = JsonDocument.Parse(retryResponse.Request.PostData!);
+            Assert.Equal(firstConversation,
+                retryProposalRequest.RootElement.GetProperty("conversationId").GetString());
+            Assert.Equal(firstRequestId,
+                retryProposalRequest.RootElement.GetProperty("requestId").GetGuid());
+            Assert.Equal(selectedConversationId.ToString("D"),
+                await page.EvaluateAsync<string>("conversationId"));
+            Assert.Equal(string.Empty, await page.GetByLabel("Exact fact value").InputValueAsync());
+            Assert.Equal(2, proposalRequestCount);
+        }
+        finally
+        {
+            releaseProposal.TrySetResult();
+            await isolated.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "BrowserE2E")]
+    public async Task DelayedMemoryProposalResponsePreservesAnEditedDraft()
+    {
+        var isolated = new SimulatorHostFixture();
+        await isolated.InitializeAsync();
+        var proposalReached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseProposal = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        string? proposalRequestJson = null;
+        try
+        {
+            using var playwright = await Playwright.CreateAsync();
+            await using var browser = await playwright.Chromium.LaunchAsync(
+                new BrowserTypeLaunchOptions { Headless = true });
+            var page = await browser.NewPageAsync();
+            await page.GotoAsync(isolated.WebClient.BaseAddress!.ToString());
+            await page.WaitForFunctionAsync(
+                "() => !document.getElementById('auth').hidden || !document.getElementById('chat').hidden");
+            if (!await page.Locator("#auth").IsHiddenAsync())
+            {
+                await page.GetByLabel("Passphrase").FillAsync(SimulatorHostFixture.OwnerPassphrase);
+                await page.Locator("#auth-submit").ClickAsync();
+                await page.WaitForFunctionAsync(
+                    "() => !authenticationInFlight && !document.getElementById('chat').hidden");
+            }
+
+            await page.GetByRole(AriaRole.Button, new PageGetByRoleOptions { Name = "Memory" }).ClickAsync();
+            await page.GetByLabel("Subject").FillAsync("draft room");
+            await page.GetByLabel("Fact key").FillAsync("curtain");
+            await page.GetByLabel("Exact fact value").FillAsync("submitted value");
+            await page.RouteAsync("**/api/memory/proposals", async route =>
+            {
+                proposalRequestJson = route.Request.PostData;
+                proposalReached.TrySetResult();
+                await releaseProposal.Task.WaitAsync(TimeSpan.FromSeconds(15));
+                await route.ContinueAsync();
+            });
+
+            var responseTask = page.WaitForResponseAsync(response =>
+                response.Url.EndsWith("/api/memory/proposals", StringComparison.Ordinal)
+                && response.Request.Method == "POST");
+            await page.GetByRole(AriaRole.Button, new PageGetByRoleOptions { Name = "Prepare exact proposal" }).ClickAsync();
+            await proposalReached.Task.WaitAsync(TimeSpan.FromSeconds(15));
+            await page.GetByLabel("Exact fact value").FillAsync("newer unsent value");
+            releaseProposal.SetResult();
+            Assert.Equal(200, (await responseTask).Status);
+
+            using var sentProposal = JsonDocument.Parse(proposalRequestJson!);
+            Assert.Equal("submitted value", sentProposal.RootElement.GetProperty("value").GetString());
+            Assert.Equal("newer unsent value", await page.GetByLabel("Exact fact value").InputValueAsync());
+            Assert.Contains(
+                "your newer editor changes were preserved",
+                await page.Locator("#memory-status").InnerTextAsync(),
+                StringComparison.OrdinalIgnoreCase);
+
+            var retryResponseTask = page.WaitForResponseAsync(response =>
+                response.Url.EndsWith("/api/memory/proposals", StringComparison.Ordinal)
+                && response.Request.Method == "POST");
+            await page.GetByRole(AriaRole.Button, new PageGetByRoleOptions { Name = "Prepare exact proposal" }).ClickAsync();
+            var retryResponse = await retryResponseTask;
+            Assert.Equal(200, retryResponse.Status);
+            using var retryProposal = JsonDocument.Parse(retryResponse.Request.PostData!);
+            Assert.Equal("newer unsent value", retryProposal.RootElement.GetProperty("value").GetString());
+            Assert.NotEqual(
+                sentProposal.RootElement.GetProperty("requestId").GetGuid(),
+                retryProposal.RootElement.GetProperty("requestId").GetGuid());
         }
         finally
         {

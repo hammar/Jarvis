@@ -339,17 +339,108 @@ public sealed class AspireSimulatorTests(SimulatorHostFixture fixture)
             Assert.Contains("available=True", temperature, StringComparison.Ordinal);
             Assert.Contains("observedAtUtc=", temperature, StringComparison.Ordinal);
 
+            using var memoryConversationResponse = await isolated.WebClient.PostAsJsonAsync(
+                "/api/conversations", new { title = "Simulator memory evidence" });
+            memoryConversationResponse.EnsureSuccessStatusCode();
+            using var memoryConversation = JsonDocument.Parse(
+                await memoryConversationResponse.Content.ReadAsStringAsync());
+            var memoryConversationId = memoryConversation.RootElement.GetProperty("id").GetProperty("value").GetGuid();
+            using var proposalResponse = await isolated.WebClient.PostAsJsonAsync(
+                "/api/memory/proposals",
+                new
+                {
+                    conversationId = memoryConversationId,
+                    requestId = Guid.NewGuid(),
+                    operation = "create",
+                    expectedVersion = 0,
+                    subject = "simulator room",
+                    key = "curtain",
+                    value = "linen",
+                    conflicts = Array.Empty<object>()
+                });
+            Assert.Equal(HttpStatusCode.OK, proposalResponse.StatusCode);
+            using var memoryApprovalsResponse = await isolated.WebClient.GetAsync("/api/approvals");
+            using var memoryApprovals = JsonDocument.Parse(
+                await memoryApprovalsResponse.Content.ReadAsStringAsync());
+            var memoryApproval = Assert.Single(
+                memoryApprovals.RootElement.EnumerateArray(),
+                item => item.GetProperty("toolName").GetString() == "memory.propose_change");
+            var memoryApprovalId = memoryApproval.GetProperty("approval").GetProperty("id").GetProperty("value").GetGuid();
+            var memoryApprovalVersion = memoryApproval.GetProperty("approval").GetProperty("expectedVersion").GetInt64();
+            using (var decision = await isolated.WebClient.PostAsJsonAsync(
+                $"/api/approvals/{memoryApprovalId:D}/decision",
+                new { expectedVersion = memoryApprovalVersion, approved = true }))
+            {
+                Assert.Equal(HttpStatusCode.OK, decision.StatusCode);
+            }
+
             var memory = await SubmitAndReadEventsAsync("search memory: curtain");
             Assert.Contains("event: TurnCompleted", memory, StringComparison.Ordinal);
-            Assert.Contains("Memory search returned 0 fact(s)", memory, StringComparison.Ordinal);
+            Assert.Contains("Memory search returned 1 fact(s)", memory, StringComparison.Ordinal);
+            Assert.Contains("simulator room.curtain = linen", memory, StringComparison.Ordinal);
+            Assert.Contains("id=", memory, StringComparison.Ordinal);
+            Assert.Contains("updatedAtUtc=", memory, StringComparison.Ordinal);
+            Assert.Contains("source=", memory, StringComparison.Ordinal);
 
             var write = await SubmitAndReadEventsAsync("turn on simulator lamp");
             Assert.Contains("event: TurnCompleted", write, StringComparison.Ordinal);
-            Assert.Contains("Action tool result: submission=", write, StringComparison.Ordinal);
+            Assert.Contains("Action tool result: status=Succeeded; submission=Accepted;", write, StringComparison.Ordinal);
             Assert.Contains("causality=", write, StringComparison.Ordinal);
             using var counts = JsonDocument.Parse(
                 await isolated.HomeAssistantClient.GetStringAsync("/fixture/control/counts"));
             Assert.Equal(writesBefore + 1, counts.RootElement.GetProperty("writes").GetInt32());
+
+            using var actionsResponse = await isolated.WebClient.GetAsync("/api/actions");
+            using var actions = JsonDocument.Parse(await actionsResponse.Content.ReadAsStringAsync());
+            var lightAction = Assert.Single(
+                actions.RootElement.EnumerateArray(),
+                item => item.GetProperty("actionType").GetString() == "home.set_light");
+            var lightActionId = lightAction.GetProperty("actionId").GetGuid();
+            using var approvalsResponse = await isolated.WebClient.GetAsync("/api/approvals");
+            using var approvals = JsonDocument.Parse(await approvalsResponse.Content.ReadAsStringAsync());
+            Assert.DoesNotContain(
+                approvals.RootElement.EnumerateArray(),
+                item => item.GetProperty("actionId").GetProperty("value").GetGuid() == lightActionId);
+            var simulatorEndpointBeforeRestart = isolated.HomeAssistantClient.BaseAddress;
+            await using (var database = new SqliteConnection(
+                $"Data Source={Path.Combine(isolated.DataDirectoryPath, "jarvis.db")}"))
+            {
+                await database.OpenAsync();
+                await using var setExecuting = database.CreateCommand();
+                setExecuting.CommandText = """
+                    UPDATE actions SET status = 'Executing', version = version + 1, outcome_json = NULL
+                    WHERE id = $id AND status = 'Succeeded';
+                    """;
+                setExecuting.Parameters.AddWithValue("$id", lightActionId.ToString("D"));
+                Assert.Equal(1, await setExecuting.ExecuteNonQueryAsync());
+            }
+            await isolated.RestartAsync();
+            using var recoveredActionsResponse = await isolated.WebClient.GetAsync("/api/actions");
+            using var recoveredActions = JsonDocument.Parse(
+                await recoveredActionsResponse.Content.ReadAsStringAsync());
+            var recoveredLight = Assert.Single(
+                recoveredActions.RootElement.EnumerateArray(),
+                item => item.GetProperty("actionId").GetGuid() == lightActionId);
+            Assert.NotEqual("Executing", recoveredLight.GetProperty("status").GetString());
+            using var recoveredCounts = JsonDocument.Parse(
+                await isolated.HomeAssistantClient.GetStringAsync("/fixture/control/counts"));
+            if (simulatorEndpointBeforeRestart == isolated.HomeAssistantClient.BaseAddress)
+            {
+                Assert.Equal(writesBefore + 1, recoveredCounts.RootElement.GetProperty("writes").GetInt32());
+                Assert.Equal("Verified", recoveredLight.GetProperty("status").GetString());
+            }
+            else
+            {
+                Assert.Equal(0, recoveredCounts.RootElement.GetProperty("writes").GetInt32());
+                Assert.Equal("Unknown", recoveredLight.GetProperty("status").GetString());
+            }
+
+            var configureFailures = await isolated.HomeAssistantClient.PostAsJsonAsync(
+                "/fixture/control/configure",
+                new { readFailures = Enumerable.Repeat(503, 64).ToArray(), applyWrites = true, writeStatus = 200 });
+            Assert.Equal(HttpStatusCode.NoContent, configureFailures.StatusCode);
+            var uncertain = await SubmitAndReadEventsAsync("turn off simulator lamp");
+            Assert.Contains("Action tool result: status=Unknown; submission=Accepted;", uncertain, StringComparison.Ordinal);
         }
         finally
         {

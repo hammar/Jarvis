@@ -129,9 +129,11 @@ internal static class ChatApi
         api.MapGet("/actions", async (
             HttpContext context,
             IActionJournalStore journal,
+            ApprovalWorkflowService approvalWorkflow,
             CancellationToken ct) =>
         {
             var owner = OwnerHttpSecurity.GetOwnerId(context.User)!;
+            await approvalWorkflow.RecoverUnapprovedExecutingActionsAsync(owner, ct);
             var actions = await journal.ReadRecentForOwnerAsync(owner, 100, ct);
             return Results.Ok(actions.Select(action => new
             {
