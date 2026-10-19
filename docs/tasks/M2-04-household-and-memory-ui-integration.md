@@ -82,9 +82,8 @@ data are used by credential-free validation.
   `tests/PersonalAgent.E2ETests/`, and simulator endpoint composition only
   where required for deterministic acceptance.
 - Directly affected scenario, architecture, development, testing, and
-  operations guidance. Do not alter migrations unless a demonstrated
-  integration requirement exists; any migration/recovery changes require
-  their own upgrade/recovery tests and documentation.
+  operations guidance. Migration/recovery changes require focused upgrade
+  tests and documentation.
 - Web handlers call Application use cases, never raw SQLite/provider/Home
   Assistant clients. Infrastructure references remain confined to the Web
   composition root.
@@ -133,6 +132,10 @@ data are used by credential-free validation.
   `ToolDispatcherTests.ExpiredApprovalIsJournaledExpiredWithoutExecution`,
   `ToolDispatcherTests.ChangedProposalWhileApprovalIsPendingInvalidatesTheAction`,
   and `ConfirmedMemoryTests.RejectionExpiryAndForgedSourceCannotCommit`.
+- An Unknown approved write remains blocked for an equivalent pending sibling
+  across turn completion and dispatcher restart:
+  `ToolDispatcherTests.UnknownApprovedWriteRemainsProtectedAcrossTurnReleaseWhileSiblingApprovalIsPending`
+  and `ToolDispatcherTests.UnknownApprovedWriteRemainsProtectedAfterDispatcherRestartWhileSiblingApprovalIsPending`.
 - Memory confirmation, restart/runtime loss, conflicts, retained edits,
   deletion/redaction and receipt recovery:
   `ConfirmedMemoryTests.ExplicitSensitiveFactRequiresApprovalAndSurvivesRuntimeAndStoreLoss`,
@@ -167,7 +170,10 @@ data are used by credential-free validation.
   prior finding ledgers. Disposition every new finding with verifying
   evidence; owner acceptance is required for any residual risk.
 - Required automated gates pass; acceptance scenarios and changed executable
-  line coverage meet existing thresholds. No schema change is expected.
+  line coverage meet existing thresholds. Migration 008 adds indexed
+  owner/turn attribution to action journal rows so malformed canonical JSON
+  cannot hide unresolved writes from restart recovery; its upgrade backfill
+  and malformed-envelope behavior require dedicated integration coverage.
 - Report the exact revision and commands/results, changed files, contract or
   schema impact, exercised and unexercised platforms/runtime behavior,
   independent review dispositions, blockers, and residual risks. Live HA,
@@ -197,15 +203,15 @@ isolated simulator/SQLite data, against merge base
 | --- | --- |
 | `tools/validate.sh build` | Passed; Release build, formatting/analyzers, zero warnings/errors. |
 | `tools/validate.sh architecture` | Passed; 6/6 discovered tests. |
-| `tools/validate.sh unit` | Passed; 325/325 discovered tests. |
-| `tools/validate.sh integration` | Passed; 433/433 discovered tests. |
+| `tools/validate.sh unit` | Passed; 326/326 discovered tests. |
+| `tools/validate.sh integration` | Passed; 448/448 discovered tests, including schema-v8 upgrade backfill and malformed/unattributed journal recovery coverage. |
 | `tools/validate.sh sdk-contracts` | Passed; actual pinned-runtime probes plus 57/57 contract tests. |
-| `tools/validate.sh coverage` | Passed; changed executable lines 95.1% (313/329), all configured runtime/critical-module gates met. |
+| `tools/validate.sh coverage` | Passed; changed executable lines 96.9% (501/517), all configured runtime/critical-module gates met. Application: 98.6% lines / 94.9% branches; Infrastructure: 94.3% / 82.9%; Web: 98.8% / 79.0%. |
 | `tools/validate.sh aspire-e2e` | Passed; 10/10 out-of-process scenarios, including the managed simulator write and bounded/audited owner APIs. |
 | `tools/validate.sh browser-e2e` | Passed; 31/31 Playwright scenarios, and the required deliberately failing browser probe was discovered and failed as expected. |
 | `tools/validate.sh docs` | Passed; all internal Markdown links resolve. |
 
-The implementation changes no database schema or migration. No live Home
+No live Home
 Assistant credentials, real household data, cloud inference, or physical
 devices were used. Linux CI, live HA/provider availability, physical effect
 causality, human observations, and assistive-technology certification remain
@@ -225,25 +231,10 @@ not replace the complete earlier M2 ledgers above.
 | M2-04-R2 | Medium | Listing an invalidated memory approval parsed its redacted `{}` envelope before checking invalidation and failed the approval-list request. | Implemented an invalidation-first, owner-bound redacted summary with no stale content and a non-actionable `Invalidated` presentation state. `ConfirmedMemoryTests.DeleteRedactsDerivedCopiesAndOldCallsCannotRestoreThem` checks the real SQLite invalidation/list path and content redaction. |
 | M2-04-R3 | Medium | Owner navigation remained enabled during an active turn and could hide the only Cancel control. | Implemented active-turn disabling for Approvals, Memory and Household navigation. `BrowserSmokeTests` asserts all three remain disabled while the delayed streaming turn and Cancel control are active. |
 | M2-04-R4 | Medium | The approval workflow had no explicit critical-module 95% line / 90% branch coverage ownership. | Added `ApprovalWorkflowService.cs` to the critical-module gate and behavioral integration coverage for invalidation/redaction, owner binding, malformed/missing state, expiry, rejection, replay and execution. The refreshed coverage gate must pass before this record is complete. |
+| M2-04-R5 | High | A follow-up review reproduced that dispatcher-local approval holds and write uncertainty disappear on restart; approving an equivalent pending sibling could submit a second physical write after the first was Unknown. | Added a complete SQLite owner/turn action-history read, then seed the equivalent proposal budget from persisted Unknown/orphaned Executing actions before dispatch or approval execution. The new real-SQLite restart regression asserts the sibling is rejected with `equivalent_write_outcome_unknown` and execution count remains one. Full validation and an independent exact-commit follow-up review are still required. |
+| M2-04-R6 | High | A persisted unresolved action with invalid JSON could not be assigned to an owner/turn by SQLite JSON extraction and was omitted from restart uncertainty seeding. | Added migration 008 with indexed durable owner/turn columns, backfilled from valid historical envelopes. New rows retain attribution independently of later envelope integrity; any unresolved non-invalidated row without attribution fails closed. `VersionSevenUpgradeBackfillsDurableActionOwnerAndTurnAttribution`, `MalformedSameTurnUnknownEnvelopeFailsClosedBeforeFreshWrite`, and `UnattributedUnknownJournalRowFailsClosedBeforeFreshWrite` exercise upgrade and recovery boundaries. Full validation and independent exact-commit review remain required. |
 
-The follow-up implementation adds no migration or schema change. The review
-dispositions, final revision, refreshed gate results, and independent review of
-these fixes will be recorded before handoff.
-
-Follow-up validation ran on native macOS with isolated simulator/SQLite test
-data:
-
-| Command | Result |
-| --- | --- |
-| `tools/validate.sh build` | Passed Release build, formatting/analyzers, zero warnings/errors. |
-| `tools/validate.sh architecture` | Passed; 6/6 discovered tests. |
-| `tools/validate.sh unit` | Passed; 325/325 discovered tests. |
-| `tools/validate.sh integration` | Passed; 444/444 discovered tests, including the R1/R2 regressions and critical workflow boundary cases. |
-| `tools/validate.sh sdk-contracts` | Passed actual pinned-runtime probes and 57/57 SDK contract tests. |
-| `tools/validate.sh coverage artifacts/coverage/unit/20261019T083120Z-43461 artifacts/coverage/integration/20261019T082946Z-42714` | Passed all assembly and critical-module thresholds; changed executable lines 98.0% (383/391). |
-| `tools/validate.sh aspire-e2e` | Passed; 10/10 out-of-process scenarios. |
-| `tools/validate.sh browser-e2e` | Passed; 31/31 Playwright scenarios; required deliberately failing browser probe was discovered and failed as expected. |
-| `tools/validate.sh docs` | Passed; all internal Markdown links resolve. |
-
-The final implementation revision and independent review disposition are
-recorded below after review. The owner retains the merge decision.
+The restart recovery follow-up includes migration 008. The final gate results
+above include this migration and the invalid-JSON regression. The exact implementation revision, independent review disposition, and
+explicit finding ledger dispositions remain required before owner acceptance;
+the owner retains the merge decision.

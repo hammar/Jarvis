@@ -176,6 +176,136 @@ public sealed class ToolDispatcherTests
 
     [Fact]
     [Trait("Category", "Integration")]
+    public async Task UnknownApprovedWriteRemainsProtectedAfterDispatcherRestartWhileSiblingApprovalIsPending()
+    {
+        using var fixture = await Fixture.CreateAsync(
+            ToolRiskClass.ApprovalRequired,
+            execution: (_, _, _) => ValueTask.FromResult(
+                new ToolExecutionOutcome(ToolExecutionStatus.Unknown, null, "transport_timeout")),
+            verification: (_, _, _, _) => ValueTask.FromResult(
+                new ToolVerificationOutcome(ToolVerificationStatus.Unknown, "unconfirmed")));
+        var conversations = new SqliteConversationStore(fixture.Database, fixture.Clock);
+        var conversationId = ConversationId.New();
+        await conversations.CreateConversationAsync(new(
+            conversationId, "owner", "Approval workflow", fixture.Clock.UtcNow, fixture.Clock.UtcNow), default);
+        await conversations.SubmitTurnAsync(new(
+            PorchRequest.TurnId,
+            conversationId,
+            Guid.NewGuid().ToString(),
+            new string('a', 64),
+            Guid.NewGuid(),
+            PorchRequest.CurrentUserRequest!,
+            fixture.Clock.UtcNow,
+            RequiredOwnerId: "owner"), default);
+
+        var first = await fixture.Dispatcher.DispatchAsync(PorchRequest, default);
+        var siblingRequest = PorchRequest with { CallId = "call-2" };
+        var sibling = await fixture.Dispatcher.DispatchAsync(siblingRequest, default);
+        Assert.Equal("AwaitingApproval", first.Status);
+        Assert.Equal("AwaitingApproval", sibling.Status);
+
+        var firstWorkflow = fixture.ApprovalWorkflow();
+        var firstSummary = (await firstWorkflow.ReadRecentAsync("owner", 10, default))
+            .Single(summary => summary.ActionId == first.ActionId);
+        var firstOutcome = await firstWorkflow.ResolveAsync(
+            "owner", first.ApprovalId!.Value, firstSummary.Approval.ExpectedVersion, true, default);
+        Assert.Equal("Unknown", firstOutcome.Status);
+        Assert.Equal(1, fixture.ExecutionCount);
+
+        var recentTimestamp = fixture.Clock.UtcNow.AddMinutes(1);
+        for (var index = 0; index < 101; index++)
+        {
+            var envelope = JsonSerializer.Serialize(new
+            {
+                FormatVersion = 1,
+                TurnId = TurnId.New().Value.ToString("D"),
+                CallId = $"unrelated-{index}",
+                OwnerId = "owner",
+                ToolName = "home.set_light",
+                ActionType = "home.set_light",
+                Operation = "turn_on",
+                EntityId = "light.porch",
+                PolicyVersion = "policy-v1",
+                RiskClass = ToolRiskClass.ReadOnly,
+                CurrentRequestHash = new string('a', 64),
+                CanonicalArguments = """{"Entity":"light.porch","On":true}"""
+            });
+            var id = new ActionId(Guid.NewGuid());
+            await fixture.Journal.CreateAsync(new(
+                id,
+                "home.set_light",
+                envelope,
+                Guid.NewGuid().ToString("N"),
+                "Prepared",
+                fixture.Clock.UtcNow,
+                recentTimestamp,
+                1), default);
+        }
+        Assert.DoesNotContain(
+            (await fixture.Journal.ReadRecentForOwnerAsync("owner", 100, default)),
+            entry => entry.Id == first.ActionId);
+
+        fixture.Dispatcher.ReleaseTurn(PorchRequest.TurnId);
+
+        var restartedDispatcher = fixture.CreateRestartedDispatcher();
+        var restartedWorkflow = fixture.ApprovalWorkflow(restartedDispatcher);
+        var siblingSummary = (await restartedWorkflow.ReadRecentAsync("owner", 10, default))
+            .Single(summary => summary.ActionId == sibling.ActionId);
+        var siblingOutcome = await restartedWorkflow.ResolveAsync(
+            "owner", sibling.ApprovalId!.Value, siblingSummary.Approval.ExpectedVersion, true, default);
+
+        Assert.Equal("Rejected", siblingOutcome.Status);
+        Assert.Equal("equivalent_write_outcome_unknown", siblingOutcome.ReasonCode);
+        Assert.Equal(1, fixture.ExecutionCount);
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task MalformedSameTurnUnknownEnvelopeFailsClosedBeforeFreshWrite()
+    {
+        using var fixture = await Fixture.CreateAsync(
+            execution: (_, _, _) => ValueTask.FromResult(
+                new ToolExecutionOutcome(ToolExecutionStatus.Unknown, null, "transport_timeout")),
+            verification: (_, _, _, _) => ValueTask.FromResult(
+                new ToolVerificationOutcome(ToolVerificationStatus.Unknown, "unconfirmed")));
+        var unknown = await fixture.Dispatcher.DispatchAsync(PorchRequest, default);
+        Assert.Equal("Unknown", unknown.Status);
+
+        await fixture.SqlAsync(
+            $"UPDATE actions SET canonical_arguments = 'not-json' " +
+            $"WHERE id = '{unknown.ActionId!.Value.Value:D}';");
+
+        var restarted = fixture.CreateRestartedDispatcher();
+        await Assert.ThrowsAsync<InvalidDataException>(async () =>
+            await restarted.DispatchAsync(PorchRequest with { CallId = "fresh-after-malformed-unknown" }, default));
+        Assert.Equal(1, fixture.ExecutionCount);
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task UnattributedUnknownJournalRowFailsClosedBeforeFreshWrite()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var malformed = await fixture.Journal.CreateAsync(new(
+            new ActionId(Guid.NewGuid()),
+            "legacy.action",
+            "not-json",
+            Guid.NewGuid().ToString("N"),
+            "Prepared",
+            fixture.Clock.UtcNow,
+            fixture.Clock.UtcNow,
+            1), default);
+        await fixture.Journal.UpdateStatusAsync(
+            malformed.Id, "Unknown", malformed.Version, fixture.Clock.UtcNow, default);
+
+        var restarted = fixture.CreateRestartedDispatcher();
+        await Assert.ThrowsAsync<InvalidDataException>(async () =>
+            await restarted.DispatchAsync(PorchRequest with { CallId = "fresh-after-unattributed-unknown" }, default));
+        Assert.Equal(0, fixture.ExecutionCount);
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
     public async Task OwnerWorkflowRejectionSettlesApprovalWithoutExecutingAction()
     {
         using var fixture = await Fixture.CreateAsync(ToolRiskClass.ApprovalRequired);
@@ -463,19 +593,34 @@ public sealed class ToolDispatcherTests
         var restarted = fixture.CreateRestartedDispatcher();
         if (cancelReplay)
         {
-            var executing = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var replaying = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var queuedRead = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            fixture.SetExecution(async (_, _, token) =>
+            var reads = 0;
+            var journal = new PausedJournal(fixture.Journal, async (entry, token) =>
             {
-                executing.SetResult();
-                await release.Task.WaitAsync(TimeSpan.FromSeconds(5), token);
-                return new ToolExecutionOutcome(ToolExecutionStatus.Completed, null, null);
+                if (entry?.Id != persisted.Id)
+                {
+                    return;
+                }
+
+                switch (Interlocked.Increment(ref reads))
+                {
+                    case 2:
+                        replaying.SetResult();
+                        await release.Task.WaitAsync(TimeSpan.FromSeconds(5), token);
+                        break;
+                    case 3:
+                        queuedRead.SetResult();
+                        break;
+                }
             });
-            var holder = restarted.DispatchAsync(
-                PorchRequest with { CallId = "holding-sqlite-unknown-replay" }, CancellationToken.None).AsTask();
-            await executing.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            restarted = fixture.CreateRestartedDispatcher(journal);
+            var holder = restarted.DispatchAsync(PorchRequest, CancellationToken.None).AsTask();
+            await replaying.Task.WaitAsync(TimeSpan.FromSeconds(2));
             using var cancellation = new CancellationTokenSource();
             var replay = restarted.DispatchAsync(PorchRequest, cancellation.Token).AsTask();
+            await queuedRead.Task.WaitAsync(TimeSpan.FromSeconds(2));
             Assert.False(replay.IsCompleted);
             cancellation.Cancel();
             try
@@ -485,7 +630,7 @@ public sealed class ToolDispatcherTests
             finally
             {
                 release.SetResult();
-                Assert.Equal("Succeeded", (await holder).Status);
+                Assert.Equal("Unknown", (await holder).Status);
             }
         }
         var sends = fixture.ExecutionCount;
@@ -540,12 +685,11 @@ public sealed class ToolDispatcherTests
     {
         using var fixture = await Fixture.CreateAsync();
         var otherRequest = PorchRequest with { CallId = "other-sqlite-orphan" };
+        ActionJournalEntry? otherOrphan = null;
         if (anotherOrphan)
         {
             var other = await fixture.Dispatcher.DispatchAsync(otherRequest, CancellationToken.None);
-            var entry = (await fixture.Journal.GetAsync(other.ActionId!.Value, CancellationToken.None))!;
-            await fixture.Journal.UpdateStatusAsync(
-                entry.Id, "Executing", entry.Version, fixture.Clock.UtcNow, CancellationToken.None);
+            otherOrphan = (await fixture.Journal.GetAsync(other.ActionId!.Value, CancellationToken.None))!;
         }
         var reading = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         // Inline release reaches registration and the proposal wait before cancellation.
@@ -575,41 +719,20 @@ public sealed class ToolDispatcherTests
         });
         var first = restarted.DispatchAsync(PorchRequest, CancellationToken.None).AsTask();
         await executing.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        if (otherOrphan is not null)
+        {
+            await fixture.Journal.UpdateStatusAsync(
+                otherOrphan.Id, "Executing", otherOrphan.Version, fixture.Clock.UtcNow, CancellationToken.None);
+        }
         using var cancellation = new CancellationTokenSource();
         var stale = restarted.DispatchAsync(PorchRequest, cancellation.Token).AsTask();
         await reading.Task.WaitAsync(TimeSpan.FromSeconds(2));
         releaseExecution.SetResult();
         var winner = await first;
         Assert.Equal(failed ? "Failed" : "Succeeded", winner.Status);
-        var holding = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var releaseHolder = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        fixture.SetExecution(async (_, _, token) =>
-        {
-            holding.SetResult();
-            await releaseHolder.Task.WaitAsync(TimeSpan.FromSeconds(5), token);
-            return new ToolExecutionOutcome(ToolExecutionStatus.Completed, null, null);
-        });
-        var holder = restarted.DispatchAsync(
-            PorchRequest with { CallId = "sqlite-terminal-replay-holder" }, CancellationToken.None).AsTask();
-        await holding.Task.WaitAsync(TimeSpan.FromSeconds(2));
-        releaseRead.SetResult();
         cancellation.Cancel();
-        try
-        {
-            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => stale);
-            if (anotherOrphan)
-            {
-                using var otherCancellation = new CancellationTokenSource();
-                var other = restarted.DispatchAsync(otherRequest, otherCancellation.Token).AsTask();
-                otherCancellation.Cancel();
-                await Assert.ThrowsAnyAsync<OperationCanceledException>(() => other);
-            }
-        }
-        finally
-        {
-            releaseHolder.SetResult();
-            Assert.Equal("Succeeded", (await holder).Status);
-        }
+        releaseRead.SetResult();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => stale);
         var sends = fixture.ExecutionCount;
         var observations = fixture.VerificationCount;
         var beforeReplay = await restarted.DispatchAsync(
@@ -657,8 +780,6 @@ public sealed class ToolDispatcherTests
         using var fixture = await Fixture.CreateAsync(risk);
         var completed = await fixture.Dispatcher.DispatchAsync(PorchRequest, CancellationToken.None);
         var orphan = (await fixture.Journal.GetAsync(completed.ActionId!.Value, CancellationToken.None))!;
-        await fixture.Journal.UpdateStatusAsync(
-            orphan.Id, "Executing", orphan.Version, fixture.Clock.UtcNow, CancellationToken.None);
         var claiming = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var releaseClaim = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var reading = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -682,6 +803,8 @@ public sealed class ToolDispatcherTests
         var request = PorchRequest with { CallId = "claiming-during-orphan-discovery" };
         var fresh = restarted.DispatchAsync(request, CancellationToken.None).AsTask();
         await claiming.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await fixture.Journal.UpdateStatusAsync(
+            orphan.Id, "Executing", orphan.Version, fixture.Clock.UtcNow, CancellationToken.None);
         using var cancellation = new CancellationTokenSource();
         var recovery = restarted.DispatchAsync(PorchRequest, cancellation.Token).AsTask();
         await reading.Task.WaitAsync(TimeSpan.FromSeconds(2));
@@ -727,30 +850,20 @@ public sealed class ToolDispatcherTests
         var orphan = (await fixture.Journal.GetAsync(completed.ActionId!.Value, CancellationToken.None))!;
         await fixture.Journal.UpdateStatusAsync(
             orphan.Id, "Executing", orphan.Version, fixture.Clock.UtcNow, CancellationToken.None);
-        var executing = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var releaseExecution = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        fixture.SetExecution(async (_, _, token) =>
+        var observing = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseObservation = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.SetVerification(async (_, _, _, token) =>
         {
-            executing.SetResult();
-            await releaseExecution.Task.WaitAsync(TimeSpan.FromSeconds(5), token);
-            return new ToolExecutionOutcome(ToolExecutionStatus.Completed, null, null);
+            observing.SetResult();
+            await releaseObservation.Task.WaitAsync(TimeSpan.FromSeconds(5), token);
+            return new ToolVerificationOutcome(ToolVerificationStatus.Verified, null);
         });
-        var reading = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var journal = new PausedJournal(fixture.Journal, (entry, _) =>
-        {
-            if (entry?.Id == orphan.Id && entry.Status == "Executing")
-            {
-                reading.TrySetResult();
-            }
-            return Task.CompletedTask;
-        });
-        var restarted = fixture.CreateRestartedDispatcher(journal);
-        var first = restarted.DispatchAsync(
-            PorchRequest with { CallId = "holding-cancelled-orphan-gate" }, CancellationToken.None).AsTask();
-        await executing.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        var restarted = fixture.CreateRestartedDispatcher();
+        var first = restarted.DispatchAsync(PorchRequest, CancellationToken.None).AsTask();
+        await observing.Task.WaitAsync(TimeSpan.FromSeconds(2));
         using var cancellation = new CancellationTokenSource();
-        var cancelled = restarted.DispatchAsync(PorchRequest, cancellation.Token).AsTask();
-        await reading.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        var cancelled = restarted.DispatchAsync(
+            PorchRequest with { CallId = "cancelled-queued-sqlite-recovery" }, cancellation.Token).AsTask();
         cancellation.Cancel();
         try
         {
@@ -758,11 +871,11 @@ public sealed class ToolDispatcherTests
         }
         finally
         {
-            releaseExecution.SetResult();
+            releaseObservation.SetResult();
             Assert.Equal("Succeeded", (await first).Status);
         }
-        Assert.Equal("Executing", (await fixture.Journal.GetAsync(orphan.Id, CancellationToken.None))!.Status);
-        Assert.Equal(2, fixture.ExecutionCount);
+        Assert.Equal("Succeeded", (await fixture.Journal.GetAsync(orphan.Id, CancellationToken.None))!.Status);
+        Assert.Equal(1, fixture.ExecutionCount);
         Assert.Equal(2, fixture.VerificationCount);
         fixture.SetExecution((_, _, _) =>
             ValueTask.FromResult(new ToolExecutionOutcome(ToolExecutionStatus.Failed, null, "known_failure")));
@@ -771,20 +884,16 @@ public sealed class ToolDispatcherTests
             CallId = "after-cancelled-sqlite-recovery",
             ArgumentsJson = """{"On":true,"Entity":"porch-lamp"}"""
         }, CancellationToken.None);
-        Assert.Equal(risk == ToolRiskClass.ReadOnly ? "Failed" : "Rejected", fresh.Status);
-        if (risk != ToolRiskClass.ReadOnly)
-        {
-            Assert.Equal("equivalent_write_outcome_unknown", fresh.ReasonCode);
-        }
-        Assert.Equal(risk == ToolRiskClass.ReadOnly ? 3 : 2, fixture.ExecutionCount);
+        Assert.Equal("Failed", fresh.Status);
+        Assert.Equal(2, fixture.ExecutionCount);
         Assert.Equal(fresh.Status, (await fixture.Journal.GetAsync(fresh.ActionId!.Value, CancellationToken.None))!.Status);
 
         Assert.Equal("Succeeded", (await restarted.DispatchAsync(PorchRequest, CancellationToken.None)).Status);
-        Assert.Equal(3, fixture.VerificationCount);
+        Assert.Equal(2, fixture.VerificationCount);
         Assert.Equal("Succeeded", (await fixture.Journal.GetAsync(orphan.Id, CancellationToken.None))!.Status);
         Assert.Equal("Failed", (await restarted.DispatchAsync(
             PorchRequest with { CallId = "after-confirmed-sqlite-recovery" }, CancellationToken.None)).Status);
-        Assert.Equal(risk == ToolRiskClass.ReadOnly ? 4 : 3, fixture.ExecutionCount);
+        Assert.Equal(3, fixture.ExecutionCount);
     }
 
     [Theory]
@@ -1642,11 +1751,12 @@ public sealed class ToolDispatcherTests
         public ToolDispatcher CreateRestartedDispatcher(IActionJournalStore? journal = null) =>
             new(registry, Policy, journal ?? Journal, Approvals, Clock, TimeSpan.FromSeconds(1));
 
-        public ApprovalWorkflowService ApprovalWorkflow()
+        public ApprovalWorkflowService ApprovalWorkflow(ToolDispatcher? dispatcher = null)
         {
+            dispatcher ??= Dispatcher;
             var memories = new SqliteConfirmedMemoryStore(Database, Clock);
-            var proposals = new MemoryProposalService(memories, Journal, Approvals, Dispatcher);
-            return new(ApprovalStore, Journal, Approvals, Dispatcher, memories, proposals);
+            var proposals = new MemoryProposalService(memories, Journal, Approvals, dispatcher);
+            return new(ApprovalStore, Journal, Approvals, dispatcher, memories, proposals);
         }
 
         public void Dispose() => file.Dispose();
@@ -1727,6 +1837,10 @@ public sealed class ToolDispatcherTests
         public ValueTask<IReadOnlyList<ActionJournalEntry>> ReadRecentForOwnerAsync(
             string ownerId, int maximumActions, CancellationToken cancellationToken) =>
             inner.ReadRecentForOwnerAsync(ownerId, maximumActions, cancellationToken);
+
+        public ValueTask<IReadOnlyList<ActionJournalEntry>> ReadForTurnAsync(
+            string ownerId, TurnId turnId, CancellationToken cancellationToken) =>
+            inner.ReadForTurnAsync(ownerId, turnId, cancellationToken);
 
         public async ValueTask<ActionJournalEntry?> GetAsync(ActionId id, CancellationToken cancellationToken)
         {

@@ -215,6 +215,11 @@ public sealed class HomeToolTests
             ValueTask.FromResult<IReadOnlyList<ActionJournalEntry>>(entries.Values
                 .Where(entry => entry.CanonicalArguments.Contains(ownerId, StringComparison.Ordinal))
                 .OrderByDescending(entry => entry.UpdatedAtUtc).Take(maximumActions).ToArray());
+        public ValueTask<IReadOnlyList<ActionJournalEntry>> ReadForTurnAsync(string ownerId, TurnId turnId, CancellationToken token) =>
+            ValueTask.FromResult<IReadOnlyList<ActionJournalEntry>>(entries.Values
+                .Where(entry => entry.CanonicalArguments.Contains(ownerId, StringComparison.Ordinal)
+                    && entry.CanonicalArguments.Contains(turnId.Value.ToString("D"), StringComparison.Ordinal))
+                .ToArray());
         public ValueTask<ActionJournalEntry> UpdateStatusAsync(ActionId id, string status, long expectedVersion,
             DateTimeOffset time, CancellationToken token, ToolDispatchResult? outcome = null)
         {

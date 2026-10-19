@@ -178,6 +178,44 @@ public sealed class MemoryTests
     }
 
     [Fact]
+    public async Task RestartedDispatcherMatchesEquivalentMemoryWritesAcrossGeneratedFactIds()
+    {
+        var fixture = new Fixture();
+        var request = fixture.Request(
+            "memory.propose_change",
+            new MemoryChangeArguments("create", Subject: "synthetic room", Key: "lamp", Value: "blue"));
+        var original = await fixture.Dispatcher.DispatchAsync(request, default);
+        Assert.Equal("AwaitingApproval", original.Status);
+        var persisted = fixture.Journal.Entries[original.ActionId!.Value];
+        await fixture.Journal.UpdateStatusAsync(
+            persisted.Id,
+            "Unknown",
+            persisted.Version,
+            fixture.Clock.UtcNow,
+            default,
+            new ToolDispatchResult("Unknown", null, "unconfirmed", persisted.Id));
+
+        var restarted = new ToolDispatcher(
+            new ToolRegistry(MemoryToolRegistrations.Create(fixture.Memory)),
+            new ToolAllowlistPolicy("memory", MemoryToolRegistrations.Permissions()),
+            fixture.Journal,
+            fixture.Approvals,
+            fixture.Clock,
+            TimeSpan.FromSeconds(5));
+        var siblingRequest = request with { CallId = "equivalent-memory-sibling" };
+        var sibling = await restarted.DispatchAsync(siblingRequest, default);
+        Assert.Equal("AwaitingApproval", sibling.Status);
+        await fixture.Approvals.ResolveAsync(
+            sibling.ApprovalId!.Value, "owner", 1, approved: true, default);
+
+        var result = await restarted.DispatchAsync(siblingRequest, default);
+
+        Assert.Equal("Rejected", result.Status);
+        Assert.Equal("equivalent_write_outcome_unknown", result.ReasonCode);
+        Assert.Equal(0, fixture.Memory.Commits);
+    }
+
+    [Fact]
     public async Task HostCanReviewApproveCompleteAndRejectWithoutAModelCallback()
     {
         var fixture = new Fixture();
@@ -329,6 +367,11 @@ public sealed class MemoryTests
             ValueTask.FromResult<IReadOnlyList<ActionJournalEntry>>(Entries.Values
                 .Where(entry => entry.MemoryOwnerId == ownerId)
                 .OrderByDescending(entry => entry.UpdatedAtUtc).Take(maximumActions).ToArray());
+        public ValueTask<IReadOnlyList<ActionJournalEntry>> ReadForTurnAsync(string ownerId, TurnId turnId, CancellationToken cancellationToken) =>
+            ValueTask.FromResult<IReadOnlyList<ActionJournalEntry>>(Entries.Values
+                .Where(entry => entry.CanonicalArguments.Contains(ownerId, StringComparison.Ordinal)
+                    && entry.CanonicalArguments.Contains(turnId.Value.ToString("D"), StringComparison.Ordinal))
+                .ToArray());
         public ValueTask<ActionJournalEntry> UpdateStatusAsync(ActionId id, string status, long expectedVersion, DateTimeOffset updatedAtUtc,
             CancellationToken cancellationToken, ToolDispatchResult? outcome = null)
         {

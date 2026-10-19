@@ -684,7 +684,9 @@ public sealed class ConfirmedMemoryTests
         await using (var connection = await database.OpenConnectionAsync())
         {
             foreach (var resource in typeof(SqliteDatabase).Assembly.GetManifestResourceNames()
-                .Where(name => name.Contains(".Migrations.", StringComparison.Ordinal) && !name.Contains(".007-", StringComparison.Ordinal))
+                .Where(name => name.Contains(".Migrations.", StringComparison.Ordinal)
+                    && !name.Contains(".007-", StringComparison.Ordinal)
+                    && !name.Contains(".008-", StringComparison.Ordinal))
                 .Order(StringComparer.Ordinal))
             {
                 await using var stream = typeof(SqliteDatabase).Assembly.GetManifestResourceStream(resource)!;
@@ -870,6 +872,8 @@ public sealed class ConfirmedMemoryTests
             inner.CreateAsync(entry, token);
         public ValueTask<IReadOnlyList<ActionJournalEntry>> ReadRecentForOwnerAsync(string ownerId, int maximumActions, CancellationToken token) =>
             inner.ReadRecentForOwnerAsync(ownerId, maximumActions, token);
+        public ValueTask<IReadOnlyList<ActionJournalEntry>> ReadForTurnAsync(string ownerId, TurnId turnId, CancellationToken token) =>
+            inner.ReadForTurnAsync(ownerId, turnId, token);
         public async ValueTask<ActionJournalEntry?> GetAsync(ActionId id, CancellationToken token)
         {
             var result = await inner.GetAsync(id, token);

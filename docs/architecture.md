@@ -258,6 +258,17 @@ Fresh dispatcher state, a lower current risk, cancellation or a failed journal
 refresh cannot erase that unresolved effect. Valid original reads retain
 distinct-action failure limits without inventing write uncertainty; malformed
 risk metadata registers uncertainty conservatively before surfacing its error.
+Before a nonterminal action can execute or enter approval, the dispatcher also
+reads the complete owner-and-turn action history from SQLite (turns are limited
+to eight tool calls) and seeds its proposal budget from equivalent `Unknown`
+or orphaned `Executing` writes. This reconstructs uncertainty for sibling
+approvals after a dispatcher restart; process-local approval holds remain a
+cleanup optimization, not the durable safety boundary. SQLite stores indexed
+owner/turn attribution beside the canonical envelope and migration backfills it
+from valid historical envelopes. This keeps malformed later envelope contents
+discoverable; any non-invalidated unresolved action lacking durable attribution
+fails closed before dispatch rather than being silently omitted from recovery
+history.
 The engine releases ephemeral accounting only
 after the turn's callbacks stop. Restart interrupts turns rather than resuming
 their inference, so these counters are not a durable retry mechanism.

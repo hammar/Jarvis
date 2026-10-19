@@ -241,6 +241,8 @@ public sealed class ToolDispatcher : IToolDispatcher
             return action.Outcome ?? new(action.Status, null, authorization.ReasonCode, action.Id);
         }
 
+        await SeedPersistedWriteUncertaintyAsync(actionId, request, draft, cancellationToken);
+
         if (effectiveRisk == ToolRiskClass.ApprovalRequired
             || action.Status == "AwaitingApproval")
         {
@@ -876,6 +878,62 @@ public sealed class ToolDispatcher : IToolDispatcher
         }
     }
 
+    private async ValueTask SeedPersistedWriteUncertaintyAsync(
+        ActionId currentActionId,
+        ToolDispatchRequest request,
+        ToolActionDraft draft,
+        CancellationToken cancellationToken)
+    {
+        var budget = GetFailureBudget(request, draft);
+        var currentProposal = GetProposalKey(request, draft);
+        var turnActions = await journal.ReadForTurnAsync(request.OwnerId!, request.TurnId, cancellationToken);
+        foreach (var previous in turnActions)
+        {
+            if (previous.Id == currentActionId
+                || previous.MemoryInvalidated
+                || previous.Status is not ("Unknown" or "Executing"))
+            {
+                continue;
+            }
+
+            CanonicalActionEnvelope envelope;
+            try
+            {
+                envelope = JsonSerializer.Deserialize<CanonicalActionEnvelope>(
+                    previous.CanonicalArguments, EnvelopeJsonOptions)
+                    ?? throw new InvalidDataException("The persisted action has no canonical envelope.");
+                if (envelope.FormatVersion != 1
+                    || envelope.TurnId != request.TurnId.Value.ToString("D")
+                    || !string.Equals(envelope.OwnerId, request.OwnerId, StringComparison.Ordinal)
+                    || !string.Equals(envelope.ActionType, previous.ActionType, StringComparison.Ordinal))
+                {
+                    throw new InvalidDataException("The persisted action envelope does not match its journal identity.");
+                }
+            }
+            catch (Exception exception) when (exception is JsonException or InvalidDataException)
+            {
+                budget.RegisterUncertainWrite(previous.Id);
+                throw new InvalidDataException("Unable to validate unresolved action history for this turn.", exception);
+            }
+
+            string previousProposal;
+            try
+            {
+                previousProposal = GetProposalKey(envelope, previous.Id);
+            }
+            catch (Exception exception) when (exception is JsonException or InvalidDataException or ArgumentException)
+            {
+                budget.RegisterUncertainWrite(previous.Id);
+                throw new InvalidDataException("Unable to compare unresolved action history for this turn.", exception);
+            }
+
+            if (string.Equals(currentProposal, previousProposal, StringComparison.Ordinal))
+            {
+                RegisterPersistedWriteUncertainty(budget, previous);
+            }
+        }
+    }
+
     private FailureBudget GetFailureBudget(ToolDispatchRequest request, ToolActionDraft draft)
     {
         var proposalKey = GetProposalKey(request, draft);
@@ -894,14 +952,65 @@ public sealed class ToolDispatcher : IToolDispatcher
     }
 
     private static string GetProposalKey(ToolDispatchRequest request, ToolActionDraft draft) =>
-        HashText(JsonSerializer.Serialize(new
-        {
-            request.OwnerId,
+        GetProposalKey(
+            request.OwnerId!,
             request.ToolName,
             draft.ActionType,
             draft.Operation,
             draft.ResolvedEntityId,
-            Arguments = CanonicalizeObjectJson(draft.EquivalentFailureArguments ?? draft.CanonicalArguments)
+            draft.EquivalentFailureArguments ?? draft.CanonicalArguments);
+
+    private static string GetProposalKey(CanonicalActionEnvelope envelope, ActionId actionId)
+    {
+        var equivalentFailureArguments = envelope.CanonicalArguments;
+        if (envelope.ToolName == "memory.propose_change")
+        {
+            var command = JsonSerializer.Deserialize<ConfirmedMemoryCommand>(
+                envelope.CanonicalArguments, EnvelopeJsonOptions)
+                ?? throw new InvalidDataException("The persisted memory action has no canonical command.");
+            if (command.ActionId != actionId)
+            {
+                throw new InvalidDataException("The persisted memory action identifier does not match its journal entry.");
+            }
+
+            equivalentFailureArguments = JsonSerializer.Serialize(new
+            {
+                command.OwnerId,
+                command.SourceMessageId,
+                Change = command.Change with
+                {
+                    FactId = command.Change.Operation is not ("update" or "delete")
+                        && command.Change.FactId.Value == actionId.Value
+                            ? default : command.Change.FactId,
+                    Conflicts = command.Change.Conflicts.OrderBy(item => item.Id.Value).ToArray()
+                }
+            });
+        }
+
+        return GetProposalKey(
+            envelope.OwnerId,
+            envelope.ToolName,
+            envelope.ActionType,
+            envelope.Operation,
+            envelope.EntityId,
+            equivalentFailureArguments);
+    }
+
+    private static string GetProposalKey(
+        string ownerId,
+        string toolName,
+        string actionType,
+        string operation,
+        string? entityId,
+        string arguments) =>
+        HashText(JsonSerializer.Serialize(new
+        {
+            OwnerId = ownerId,
+            ToolName = toolName,
+            ActionType = actionType,
+            Operation = operation,
+            ResolvedEntityId = entityId,
+            Arguments = CanonicalizeObjectJson(arguments)
         }));
 
     // Called only under the proposal gate, after its outcome has been durably recorded.

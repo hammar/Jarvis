@@ -1120,6 +1120,16 @@ public interface IActionJournalStore
         int maximumActions,
         CancellationToken cancellationToken);
 
+    /// <summary>Reads every action for one authenticated owner and turn.</summary>
+    /// <param name="ownerId">Authenticated owner identity used to filter canonical action envelopes.</param>
+    /// <param name="turnId">Turn whose bounded action history is required.</param>
+    /// <param name="cancellationToken">Token that cancels the read.</param>
+    /// <returns>All owner-bound actions in the turn; the coordinator limits a turn to eight tool calls.</returns>
+    ValueTask<IReadOnlyList<ActionJournalEntry>> ReadForTurnAsync(
+        string ownerId,
+        TurnId turnId,
+        CancellationToken cancellationToken);
+
     /// <summary>Compare-and-swaps action status and its optional complete response atomically, without external execution.</summary>
     /// <param name="id">Action identifier.</param>
     /// <param name="status">Next journal status.</param>
