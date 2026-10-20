@@ -25,6 +25,10 @@ public sealed class ToolDispatcher : IToolDispatcher
     private readonly TimeSpan verificationTimeout;
     private readonly ConcurrentDictionary<ActionId, byte> activeExecutions = new();
     private readonly ConcurrentDictionary<(TurnId Turn, string Proposal), FailureBudget> failureBudgets = new();
+    private readonly Dictionary<ActionId, (TurnId Turn, string Proposal)> approvalBudgets = [];
+    private readonly Dictionary<TurnId, int> activeDispatchesByTurn = [];
+    private readonly HashSet<TurnId> releasedTurnsWithActiveDispatches = [];
+    private readonly object failureBudgetLifecycleGate = new();
 
     /// <summary>Creates the host tool dispatcher.</summary>
     /// <param name="registry">Immutable host-registered tools.</param>
@@ -57,9 +61,90 @@ public sealed class ToolDispatcher : IToolDispatcher
     /// <inheritdoc />
     public void ReleaseTurn(TurnId turnId)
     {
-        foreach (var key in failureBudgets.Keys.Where(key => key.Turn == turnId))
+        lock (failureBudgetLifecycleGate)
         {
-            failureBudgets.TryRemove(key, out _);
+            if (activeDispatchesByTurn.ContainsKey(turnId))
+            {
+                releasedTurnsWithActiveDispatches.Add(turnId);
+            }
+
+            foreach (var pair in failureBudgets.Where(pair => pair.Key.Turn == turnId).ToArray())
+            {
+                pair.Value.TurnReleased = true;
+                RemoveReleasedBudgetIfIdle(pair.Key, pair.Value);
+            }
+        }
+    }
+
+    /// <inheritdoc />
+    public void ReleaseApproval(ActionId actionId)
+    {
+        lock (failureBudgetLifecycleGate)
+        {
+            if (!approvalBudgets.Remove(actionId, out var key)
+                || !failureBudgets.TryGetValue(key, out var budget))
+            {
+                return;
+            }
+
+            budget.PendingApprovals.Remove(actionId);
+            RemoveReleasedBudgetIfIdle(key, budget);
+        }
+    }
+
+    /// <summary>Records an explicit Unknown outcome when an interrupted action can no longer be observed.</summary>
+    /// <param name="action">Owner-validated action still marked Executing.</param>
+    /// <param name="cancellationToken">Token that cancels the journal update before it commits.</param>
+    /// <returns>The durable action, preserving any concurrent execution or terminal outcome.</returns>
+    public async ValueTask<ActionJournalEntry> MarkUnavailableExecutingActionUnknownAsync(
+        ActionJournalEntry action,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(action);
+        if (action.Status != "Executing")
+        {
+            return action;
+        }
+        if (!activeExecutions.TryAdd(action.Id, 0))
+        {
+            return await journal.GetAsync(action.Id, cancellationToken)
+                ?? throw new InvalidDataException("The action disappeared during unavailable-capability recovery.");
+        }
+
+        try
+        {
+            var current = await journal.GetAsync(action.Id, cancellationToken)
+                ?? throw new InvalidDataException("The action disappeared during unavailable-capability recovery.");
+            if (current.Status != "Executing")
+            {
+                return current;
+            }
+
+            try
+            {
+                return await journal.UpdateStatusAsync(
+                    current.Id,
+                    "Unknown",
+                    current.Version,
+                    clock.UtcNow.ToUniversalTime(),
+                    cancellationToken,
+                    new("Unknown", null, "recovery_capability_unavailable", current.Id));
+            }
+            catch (PersistenceConcurrencyException)
+            {
+                current = await journal.GetAsync(current.Id, cancellationToken)
+                    ?? throw new InvalidDataException("The action disappeared during unavailable-capability recovery.");
+                if (current.Status is "Executing" or "Prepared" or "AwaitingApproval")
+                {
+                    throw;
+                }
+
+                return current;
+            }
+        }
+        finally
+        {
+            activeExecutions.TryRemove(action.Id, out _);
         }
     }
 
@@ -75,6 +160,21 @@ public sealed class ToolDispatcher : IToolDispatcher
             return Rejected("invalid_tool_request");
         }
 
+        BeginDispatch(request.TurnId);
+        try
+        {
+            return await DispatchCoreAsync(request, cancellationToken);
+        }
+        finally
+        {
+            EndDispatch(request.TurnId);
+        }
+    }
+
+    private async ValueTask<ToolDispatchResult> DispatchCoreAsync(
+        ToolDispatchRequest request,
+        CancellationToken cancellationToken)
+    {
         if (request.ToolName.StartsWith("memory.", StringComparison.Ordinal))
         {
             var previous = await journal.GetAsync(CreateActionId(request.TurnId, request.CallId), cancellationToken);
@@ -213,6 +313,8 @@ public sealed class ToolDispatcher : IToolDispatcher
             return action.Outcome ?? new(action.Status, null, authorization.ReasonCode, action.Id);
         }
 
+        await SeedPersistedWriteUncertaintyAsync(actionId, request, draft, cancellationToken);
+
         if (effectiveRisk == ToolRiskClass.ApprovalRequired
             || action.Status == "AwaitingApproval")
         {
@@ -289,7 +391,9 @@ public sealed class ToolDispatcher : IToolDispatcher
 
         if (action.Status != "AwaitingApproval")
         {
-            return Recorded(await ReconcileTerminalReplayAsync(action, request, draft, cancellationToken));
+            var terminal = await ReconcileTerminalReplayAsync(action, request, draft, cancellationToken);
+            ReleaseApproval(action.Id);
+            return Recorded(terminal);
         }
 
         var approvalId = new ApprovalId(actionId.Value);
@@ -310,7 +414,9 @@ public sealed class ToolDispatcher : IToolDispatcher
 
         if (action.Status != "AwaitingApproval")
         {
-            return Recorded(await ReconcileTerminalReplayAsync(action, request, draft, cancellationToken));
+            var terminal = await ReconcileTerminalReplayAsync(action, request, draft, cancellationToken);
+            ReleaseApproval(action.Id);
+            return Recorded(terminal);
         }
 
         if (approval.Status == "Pending" && clock.UtcNow.ToUniversalTime() >= approval.ExpiresAtUtc)
@@ -353,11 +459,13 @@ public sealed class ToolDispatcher : IToolDispatcher
             }
 
             action = await ReconcileTerminalReplayAsync(action, request, draft, cancellationToken);
+            ReleaseApproval(action.Id);
             return Recorded(action);
         }
 
         if (approval.Status == "Pending")
         {
+            HoldApproval(actionId, request, draft);
             return new(
                 "AwaitingApproval",
                 null,
@@ -369,6 +477,7 @@ public sealed class ToolDispatcher : IToolDispatcher
 
         if (approval.Status != "Approved")
         {
+            ReleaseApproval(action.Id);
             return new("Rejected", null, "invalid_approval_state", action.Id, approvalId);
         }
 
@@ -377,11 +486,17 @@ public sealed class ToolDispatcher : IToolDispatcher
             action = await TransitionAsync(action, "Expired", cancellationToken,
                 "approval_expired_before_execution", approvalId);
             action = await ReconcileTerminalReplayAsync(action, request, draft, cancellationToken);
+            ReleaseApproval(action.Id);
             return Recorded(action);
         }
 
-        return await ExecuteOnceAsync(
+        var result = await ExecuteOnceAsync(
             action, arguments, registration, draft, request, policyVersion, true, approval.ExpiresAtUtc, cancellationToken);
+        if (result.Status != "AwaitingApproval")
+        {
+            ReleaseApproval(action.Id);
+        }
+        return result;
     }
 
     private async ValueTask<ToolDispatchResult> ExecuteOnceAsync(
@@ -835,19 +950,231 @@ public sealed class ToolDispatcher : IToolDispatcher
         }
     }
 
+    private async ValueTask SeedPersistedWriteUncertaintyAsync(
+        ActionId currentActionId,
+        ToolDispatchRequest request,
+        ToolActionDraft draft,
+        CancellationToken cancellationToken)
+    {
+        var budget = GetFailureBudget(request, draft);
+        var currentProposal = GetProposalKey(request, draft);
+        var turnActions = await journal.ReadForTurnAsync(request.OwnerId!, request.TurnId, cancellationToken);
+        var candidates = new Dictionary<ActionId, ActionJournalEntry>();
+        foreach (var previous in turnActions)
+        {
+            if (previous.Id == currentActionId
+                || previous.MemoryInvalidated
+                || previous.Status is not ("Unknown" or "Executing"))
+            {
+                continue;
+            }
+
+            CanonicalActionEnvelope envelope;
+            try
+            {
+                envelope = JsonSerializer.Deserialize<CanonicalActionEnvelope>(
+                    previous.CanonicalArguments, EnvelopeJsonOptions)
+                    ?? throw new InvalidDataException("The persisted action has no canonical envelope.");
+                if (envelope.FormatVersion != 1
+                    || envelope.TurnId != request.TurnId.Value.ToString("D")
+                    || !string.Equals(envelope.OwnerId, request.OwnerId, StringComparison.Ordinal)
+                    || !string.Equals(envelope.ActionType, previous.ActionType, StringComparison.Ordinal))
+                {
+                    throw new InvalidDataException("The persisted action envelope does not match its journal identity.");
+                }
+            }
+            catch (Exception exception) when (exception is JsonException or InvalidDataException)
+            {
+                budget.RegisterUncertainWrite(previous.Id);
+                throw new InvalidDataException("Unable to validate unresolved action history for this turn.", exception);
+            }
+
+            string previousProposal;
+            try
+            {
+                previousProposal = GetProposalKey(envelope, previous.Id);
+            }
+            catch (Exception exception) when (exception is JsonException or InvalidDataException or ArgumentException)
+            {
+                budget.RegisterUncertainWrite(previous.Id);
+                throw new InvalidDataException("Unable to compare unresolved action history for this turn.", exception);
+            }
+
+            if (string.Equals(currentProposal, previousProposal, StringComparison.Ordinal))
+            {
+                RegisterPersistedWriteUncertainty(budget, previous);
+                candidates[previous.Id] = previous;
+            }
+        }
+
+        if (candidates.Count == 0)
+        {
+            return;
+        }
+
+        await budget.Gate.WaitAsync(cancellationToken);
+        try
+        {
+            foreach (var previous in candidates.Values)
+            {
+                var current = await journal.GetAsync(previous.Id, cancellationToken)
+                    ?? throw new InvalidDataException("An unresolved action disappeared during recovery seeding.");
+                if (current.ActionType != previous.ActionType
+                    || !string.Equals(current.CanonicalArguments, previous.CanonicalArguments, StringComparison.Ordinal))
+                {
+                    budget.RegisterUncertainWrite(previous.Id);
+                    throw new InvalidDataException("An unresolved action changed during recovery seeding.");
+                }
+
+                if (current.MemoryInvalidated || current.Status is not ("Unknown" or "Executing"))
+                {
+                    budget.ClearUncertainWrite(current.Id);
+                }
+                else
+                {
+                    RegisterPersistedWriteUncertainty(budget, current);
+                }
+            }
+        }
+        finally
+        {
+            budget.Gate.Release();
+        }
+    }
+
     private FailureBudget GetFailureBudget(ToolDispatchRequest request, ToolActionDraft draft)
     {
-        var proposalKey = HashText(JsonSerializer.Serialize(new
+        var proposalKey = GetProposalKey(request, draft);
+        lock (failureBudgetLifecycleGate)
         {
-            request.OwnerId,
+            var budget = failureBudgets.GetOrAdd((request.TurnId, proposalKey), _ => new FailureBudget());
+            if (releasedTurnsWithActiveDispatches.Contains(request.TurnId))
+            {
+                budget.TurnReleased = true;
+            }
+
+            return budget;
+        }
+    }
+
+    private void BeginDispatch(TurnId turnId)
+    {
+        lock (failureBudgetLifecycleGate)
+        {
+            activeDispatchesByTurn.TryGetValue(turnId, out var active);
+            activeDispatchesByTurn[turnId] = active + 1;
+        }
+    }
+
+    private void EndDispatch(TurnId turnId)
+    {
+        lock (failureBudgetLifecycleGate)
+        {
+            if (!activeDispatchesByTurn.TryGetValue(turnId, out var active) || active < 1)
+            {
+                throw new InvalidOperationException("A dispatcher turn lease was released without being acquired.");
+            }
+
+            if (active == 1)
+            {
+                activeDispatchesByTurn.Remove(turnId);
+                releasedTurnsWithActiveDispatches.Remove(turnId);
+                foreach (var pair in failureBudgets.Where(pair => pair.Key.Turn == turnId).ToArray())
+                {
+                    RemoveReleasedBudgetIfIdle(pair.Key, pair.Value);
+                }
+            }
+            else
+            {
+                activeDispatchesByTurn[turnId] = active - 1;
+            }
+        }
+    }
+
+    private void RemoveReleasedBudgetIfIdle(
+        (TurnId Turn, string Proposal) key,
+        FailureBudget budget)
+    {
+        if (budget.TurnReleased
+            && budget.PendingApprovals.Count == 0
+            && !activeDispatchesByTurn.ContainsKey(key.Turn))
+        {
+            failureBudgets.TryRemove(key, out _);
+        }
+    }
+
+    private void HoldApproval(ActionId actionId, ToolDispatchRequest request, ToolActionDraft draft)
+    {
+        var key = (request.TurnId, GetProposalKey(request, draft));
+        lock (failureBudgetLifecycleGate)
+        {
+            var budget = failureBudgets.GetOrAdd(key, _ => new FailureBudget());
+            approvalBudgets[actionId] = key;
+            budget.PendingApprovals.Add(actionId);
+        }
+    }
+
+    private static string GetProposalKey(ToolDispatchRequest request, ToolActionDraft draft) =>
+        GetProposalKey(
+            request.OwnerId!,
             request.ToolName,
             draft.ActionType,
             draft.Operation,
             draft.ResolvedEntityId,
-            Arguments = CanonicalizeObjectJson(draft.EquivalentFailureArguments ?? draft.CanonicalArguments)
-        }));
-        return failureBudgets.GetOrAdd((request.TurnId, proposalKey), _ => new FailureBudget());
+            draft.EquivalentFailureArguments ?? draft.CanonicalArguments);
+
+    private static string GetProposalKey(CanonicalActionEnvelope envelope, ActionId actionId)
+    {
+        var equivalentFailureArguments = envelope.CanonicalArguments;
+        if (envelope.ToolName == "memory.propose_change")
+        {
+            var command = JsonSerializer.Deserialize<ConfirmedMemoryCommand>(
+                envelope.CanonicalArguments, EnvelopeJsonOptions)
+                ?? throw new InvalidDataException("The persisted memory action has no canonical command.");
+            if (command.ActionId != actionId)
+            {
+                throw new InvalidDataException("The persisted memory action identifier does not match its journal entry.");
+            }
+
+            equivalentFailureArguments = JsonSerializer.Serialize(new
+            {
+                command.OwnerId,
+                command.SourceMessageId,
+                Change = command.Change with
+                {
+                    FactId = command.Change.Operation is not ("update" or "delete")
+                        && command.Change.FactId.Value == actionId.Value
+                            ? default : command.Change.FactId,
+                    Conflicts = command.Change.Conflicts.OrderBy(item => item.Id.Value).ToArray()
+                }
+            });
+        }
+
+        return GetProposalKey(
+            envelope.OwnerId,
+            envelope.ToolName,
+            envelope.ActionType,
+            envelope.Operation,
+            envelope.EntityId,
+            equivalentFailureArguments);
     }
+
+    private static string GetProposalKey(
+        string ownerId,
+        string toolName,
+        string actionType,
+        string operation,
+        string? entityId,
+        string arguments) =>
+        HashText(JsonSerializer.Serialize(new
+        {
+            OwnerId = ownerId,
+            ToolName = toolName,
+            ActionType = actionType,
+            Operation = operation,
+            ResolvedEntityId = entityId,
+            Arguments = CanonicalizeObjectJson(arguments)
+        }));
 
     // Called only under the proposal gate, after its outcome has been durably recorded.
     private static void RecordBudgetOutcome(FailureBudget budget, ActionId actionId, string status)
@@ -1135,6 +1462,8 @@ public sealed class ToolDispatcher : IToolDispatcher
 
         public SemaphoreSlim Gate { get; } = new(1, 1);
         public HashSet<ActionId> FailedActions { get; } = [];
+        public HashSet<ActionId> PendingApprovals { get; } = [];
+        public bool TurnReleased { get; set; }
         public bool HasUncertainWrites => !uncertainWrites.IsEmpty;
 
         public void RegisterUncertainWrite(ActionId actionId)

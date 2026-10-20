@@ -178,6 +178,44 @@ public sealed class MemoryTests
     }
 
     [Fact]
+    public async Task RestartedDispatcherMatchesEquivalentMemoryWritesAcrossGeneratedFactIds()
+    {
+        var fixture = new Fixture();
+        var request = fixture.Request(
+            "memory.propose_change",
+            new MemoryChangeArguments("create", Subject: "synthetic room", Key: "lamp", Value: "blue"));
+        var original = await fixture.Dispatcher.DispatchAsync(request, default);
+        Assert.Equal("AwaitingApproval", original.Status);
+        var persisted = fixture.Journal.Entries[original.ActionId!.Value];
+        await fixture.Journal.UpdateStatusAsync(
+            persisted.Id,
+            "Unknown",
+            persisted.Version,
+            fixture.Clock.UtcNow,
+            default,
+            new ToolDispatchResult("Unknown", null, "unconfirmed", persisted.Id));
+
+        var restarted = new ToolDispatcher(
+            new ToolRegistry(MemoryToolRegistrations.Create(fixture.Memory)),
+            new ToolAllowlistPolicy("memory", MemoryToolRegistrations.Permissions()),
+            fixture.Journal,
+            fixture.Approvals,
+            fixture.Clock,
+            TimeSpan.FromSeconds(5));
+        var siblingRequest = request with { CallId = "equivalent-memory-sibling" };
+        var sibling = await restarted.DispatchAsync(siblingRequest, default);
+        Assert.Equal("AwaitingApproval", sibling.Status);
+        await fixture.Approvals.ResolveAsync(
+            sibling.ApprovalId!.Value, "owner", 1, approved: true, default);
+
+        var result = await restarted.DispatchAsync(siblingRequest, default);
+
+        Assert.Equal("Rejected", result.Status);
+        Assert.Equal("equivalent_write_outcome_unknown", result.ReasonCode);
+        Assert.Equal(0, fixture.Memory.Commits);
+    }
+
+    [Fact]
     public async Task HostCanReviewApproveCompleteAndRejectWithoutAModelCallback()
     {
         var fixture = new Fixture();
@@ -196,6 +234,97 @@ public sealed class MemoryTests
         pending = await fixture.Dispatcher.DispatchAsync(deletion, default);
         Assert.Empty((await service.PreviewAsync("owner", pending.ActionId!.Value, default)).Conflicts);
         Assert.Equal("Rejected", (await service.ResolveAsync("owner", pending.ActionId.Value, 1, false, default)).Status);
+    }
+
+    [Fact]
+    public async Task OwnerEnteredConflictPreviewIsBoundedAndCanExcludeItsEditTarget()
+    {
+        var fixture = new Fixture();
+        var target = new MemoryFact(Id, "subject", "key", "old", "source", "LocalOnly", 2);
+        var sibling = new MemoryFact(MemoryFactId.New(), "subject", "key", "new", "source", "LocalOnly", 1);
+        fixture.Memory.Facts = [target, sibling];
+
+        Assert.Equal([target, sibling],
+            await fixture.Proposals.ReadConflictsAsync("owner", "subject", "key", null, default));
+        Assert.Equal([sibling],
+            await fixture.Proposals.ReadConflictsAsync("owner", "subject", "key", Id, default));
+        await Assert.ThrowsAsync<ArgumentException>(async () =>
+            await fixture.Proposals.ReadConflictsAsync("", "subject", "key", null, default));
+        await Assert.ThrowsAsync<ArgumentException>(async () =>
+            await fixture.Proposals.ReadConflictsAsync("owner", " ", "key", null, default));
+        await Assert.ThrowsAsync<ArgumentException>(async () =>
+            await fixture.Proposals.ReadConflictsAsync("owner", "subject", new string('x', 129), null, default));
+        await Assert.ThrowsAsync<ArgumentException>(async () =>
+            await fixture.Proposals.ReadConflictsAsync("owner", new string('x', 257), "key", null, default));
+    }
+
+    [Fact]
+    public async Task OwnerEnteredProposalRequiresStableRequestIdentityBeforeReadingConversation()
+    {
+        var fixture = new Fixture();
+        await Assert.ThrowsAsync<ArgumentException>(() => fixture.Proposals.ProposeAsync(
+            "owner", ConversationId.New(), Guid.Empty, Create, default).AsTask());
+    }
+
+    [Fact]
+    public async Task OwnerEnteredProposalAcceptsConcurrentTerminalTurnSettlement()
+    {
+        var fixture = new Fixture();
+        var conversations = new ProposalConversations
+        {
+            ThrowOnStatusUpdate = true,
+            StatusAfterConcurrency = TurnStatus.Completed
+        };
+        var dispatcher = new RecordingDispatcher();
+        var service = new MemoryProposalService(
+            fixture.Memory, fixture.Journal, fixture.Approvals, dispatcher, conversations, fixture.Clock);
+
+        var submission = await service.ProposeAsync(
+            "owner", conversations.Conversation.Id, Guid.NewGuid(), Create, default);
+
+        Assert.Equal("AwaitingApproval", submission.Result.Status);
+        Assert.Equal(TurnStatus.Completed, conversations.Turn!.Status);
+        Assert.Equal([conversations.Turn.Id], dispatcher.ReleasedTurns);
+    }
+
+    [Fact]
+    public async Task OwnerEnteredProposalDoesNotSwallowNonterminalTurnSettlementConflict()
+    {
+        var fixture = new Fixture();
+        var conversations = new ProposalConversations { ThrowOnStatusUpdate = true };
+        var dispatcher = new RecordingDispatcher();
+        var service = new MemoryProposalService(
+            fixture.Memory, fixture.Journal, fixture.Approvals, dispatcher, conversations, fixture.Clock);
+
+        await Assert.ThrowsAsync<PersistenceConcurrencyException>(() => service.ProposeAsync(
+            "owner", conversations.Conversation.Id, Guid.NewGuid(), Create, default).AsTask());
+
+        Assert.Equal(TurnStatus.Received, conversations.Turn!.Status);
+        Assert.Equal([conversations.Turn.Id], dispatcher.ReleasedTurns);
+    }
+
+    [Fact]
+    public async Task OwnerEnteredProposalReleasesItsDispatcherTurnAfterSuccessOrFailure()
+    {
+        var fixture = new Fixture();
+        var conversations = new ProposalConversations();
+        var dispatcher = new RecordingDispatcher();
+        var service = new MemoryProposalService(
+            fixture.Memory, fixture.Journal, fixture.Approvals, dispatcher, conversations, fixture.Clock);
+
+        var submission = await service.ProposeAsync(
+            "owner", conversations.Conversation.Id, Guid.NewGuid(), Create, default);
+
+        Assert.Equal("AwaitingApproval", submission.Result.Status);
+        Assert.Equal(conversations.Turn!.Id, Assert.Single(dispatcher.ReleasedTurns));
+
+        var failedConversations = new ProposalConversations();
+        var failedDispatcher = new RecordingDispatcher { ThrowOnDispatch = true };
+        var failedService = new MemoryProposalService(
+            fixture.Memory, fixture.Journal, fixture.Approvals, failedDispatcher, failedConversations, fixture.Clock);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => failedService.ProposeAsync(
+            "owner", failedConversations.Conversation.Id, Guid.NewGuid(), Create, default).AsTask());
+        Assert.Equal([failedConversations.Turn!.Id], failedDispatcher.ReleasedTurns);
     }
 
     [Fact]
@@ -274,7 +403,8 @@ public sealed class MemoryTests
         internal ConversationMessage Source { get; } = new(Guid.NewGuid(), ConversationId.New(), "user", "explicit request", DateTimeOffset.UtcNow);
         internal string LastCall { get; private set; } = "";
         internal ToolDispatcher Dispatcher { get; }
-        internal MemoryProposalService Proposals => new(Memory, Journal, Approvals, Dispatcher);
+        internal MemoryProposalService Proposals =>
+            new(Memory, Journal, Approvals, Dispatcher, new ProposalConversations(), Clock);
         internal Fixture(ProviderKind provider = ProviderKind.Local)
         {
             Memory.Source = Source;
@@ -297,6 +427,8 @@ public sealed class MemoryTests
         internal bool HideReceipt { get; set; }
         private MemoryReceipt? receipt;
         public ValueTask<ConversationMessage?> ReadSourceAsync(string ownerId, TurnId turnId, CancellationToken cancellationToken) => ValueTask.FromResult(Source);
+        public ValueTask<IReadOnlyList<MemoryFact>> ReadActiveAsync(string ownerId, int maximumFacts, CancellationToken cancellationToken) =>
+            ValueTask.FromResult<IReadOnlyList<MemoryFact>>(Facts.Take(maximumFacts).ToArray());
         public ValueTask<IReadOnlyList<MemoryFact>> SearchAsync(string ownerId, string query, int limit, CancellationToken cancellationToken) => ValueTask.FromResult(Facts);
         public ValueTask<MemoryFact?> GetAsync(string ownerId, MemoryFactId id, CancellationToken cancellationToken) => ValueTask.FromResult(Facts.SingleOrDefault(fact => fact.Id == id));
         public ValueTask<IReadOnlyList<MemoryFact>> FindConflictsAsync(string ownerId, string subject, string key, CancellationToken cancellationToken) => ValueTask.FromResult(Facts);
@@ -323,6 +455,15 @@ public sealed class MemoryTests
             return ValueTask.FromResult(Entries[entry.Id]);
         }
         public ValueTask<ActionJournalEntry?> GetAsync(ActionId id, CancellationToken cancellationToken) => ValueTask.FromResult(Entries.GetValueOrDefault(id));
+        public ValueTask<IReadOnlyList<ActionJournalEntry>> ReadRecentForOwnerAsync(string ownerId, int maximumActions, CancellationToken cancellationToken) =>
+            ValueTask.FromResult<IReadOnlyList<ActionJournalEntry>>(Entries.Values
+                .Where(entry => entry.MemoryOwnerId == ownerId)
+                .OrderByDescending(entry => entry.UpdatedAtUtc).Take(maximumActions).ToArray());
+        public ValueTask<IReadOnlyList<ActionJournalEntry>> ReadForTurnAsync(string ownerId, TurnId turnId, CancellationToken cancellationToken) =>
+            ValueTask.FromResult<IReadOnlyList<ActionJournalEntry>>(Entries.Values
+                .Where(entry => entry.CanonicalArguments.Contains(ownerId, StringComparison.Ordinal)
+                    && entry.CanonicalArguments.Contains(turnId.Value.ToString("D"), StringComparison.Ordinal))
+                .ToArray());
         public ValueTask<ActionJournalEntry> UpdateStatusAsync(ActionId id, string status, long expectedVersion, DateTimeOffset updatedAtUtc,
             CancellationToken cancellationToken, ToolDispatchResult? outcome = null)
         {
@@ -359,10 +500,127 @@ public sealed class MemoryTests
             Entries[approvalId] = entry with { ExpectedVersion = expectedVersion + 1, Status = approved ? "Approved" : "Rejected" };
             return ValueTask.FromResult(Entries[approvalId]);
         }
+        public ValueTask<ActionJournalEntry> SettleExpiredAsync(
+            ApprovalId approvalId, string ownerId, long expectedVersion, CancellationToken cancellationToken) =>
+            throw new NotImplementedException();
+        public ValueTask<ActionJournalEntry> SettleRejectedAsync(
+            ApprovalId approvalId, string ownerId, long expectedVersion, CancellationToken cancellationToken) =>
+            throw new NotImplementedException();
     }
 
     private sealed class Clock : IClock
     {
         public DateTimeOffset UtcNow => new(2026, 10, 15, 12, 0, 0, TimeSpan.Zero);
+    }
+
+    private sealed class RecordingDispatcher : IToolDispatcher
+    {
+        internal List<TurnId> ReleasedTurns { get; } = [];
+        internal bool ThrowOnDispatch { get; init; }
+
+        public void ReleaseTurn(TurnId turnId) => ReleasedTurns.Add(turnId);
+        public void ReleaseApproval(ActionId actionId) { }
+        public ValueTask<ToolDispatchResult> DispatchAsync(ToolDispatchRequest request, CancellationToken cancellationToken)
+        {
+            if (ThrowOnDispatch)
+            {
+                throw new InvalidOperationException("Synthetic dispatcher failure.");
+            }
+            return ValueTask.FromResult(new ToolDispatchResult("AwaitingApproval", null, null));
+        }
+        public ValueTask<ActionJournalEntry> MarkUnavailableExecutingActionUnknownAsync(
+            ActionJournalEntry action,
+            CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+    }
+
+    private sealed class ProposalConversations : IConversationStore
+    {
+        internal ConversationRecord Conversation { get; } = new(
+            ConversationId.New(), "owner", "memory", DateTimeOffset.UtcNow, DateTimeOffset.UtcNow);
+        internal ConversationTurn? Turn { get; private set; }
+        internal bool ThrowOnStatusUpdate { get; init; }
+        internal TurnStatus StatusAfterConcurrency { get; init; } = TurnStatus.Received;
+
+        public ValueTask<ConversationRecord?> GetConversationAsync(
+            ConversationId conversationId, string ownerId, CancellationToken cancellationToken) =>
+            ValueTask.FromResult<ConversationRecord?>(
+                Conversation.Id == conversationId && ownerId == Conversation.OwnerId ? Conversation : null);
+
+        public ValueTask<SubmittedConversationTurn?> FindSubmittedTurnAsync(
+            ConversationId conversationId,
+            string clientRequestId,
+            string requestFingerprint,
+            CancellationToken cancellationToken,
+            string? requiredOwnerId = null) => ValueTask.FromResult<SubmittedConversationTurn?>(null);
+
+        public ValueTask<SubmittedConversationTurn> SubmitTurnAsync(
+            ConversationTurnSubmission submission, CancellationToken cancellationToken)
+        {
+            Turn = new(submission.TurnId, submission.ConversationId, TurnStatus.Received,
+                submission.CreatedAtUtc, submission.CreatedAtUtc, 1);
+            return ValueTask.FromResult(new SubmittedConversationTurn(Turn, submission.UserMessageId, false));
+        }
+
+        public ValueTask<ConversationTurn?> GetTurnAsync(TurnId turnId, CancellationToken cancellationToken) =>
+            ValueTask.FromResult(Turn?.Id == turnId ? Turn : null);
+
+        public ValueTask<ConversationTurn> UpdateTurnStatusAsync(
+            TurnId turnId,
+            TurnStatus status,
+            long expectedVersion,
+            DateTimeOffset updatedAtUtc,
+            CancellationToken cancellationToken)
+        {
+            if (ThrowOnStatusUpdate)
+            {
+                Turn = Turn! with
+                {
+                    Status = StatusAfterConcurrency,
+                    UpdatedAtUtc = updatedAtUtc,
+                    Version = expectedVersion + 1
+                };
+                throw new PersistenceConcurrencyException("Synthetic concurrent turn settlement.");
+            }
+
+            Turn = Turn! with { Status = status, UpdatedAtUtc = updatedAtUtc, Version = expectedVersion + 1 };
+            return ValueTask.FromResult(Turn);
+        }
+
+        public ValueTask<ConversationRecord> CreateConversationAsync(
+            ConversationRecord conversation, CancellationToken cancellationToken) => throw new NotImplementedException();
+        public ValueTask<IReadOnlyList<ConversationRecord>> ReadRecentConversationsAsync(
+            string ownerId, int maximumConversations, CancellationToken cancellationToken) => throw new NotImplementedException();
+        public ValueTask<ConversationRecord?> RenameConversationAsync(
+            ConversationId conversationId, string ownerId, string title, DateTimeOffset updatedAtUtc,
+            CancellationToken cancellationToken) => throw new NotImplementedException();
+        public ValueTask<ConversationMessage> AppendMessageAsync(
+            ConversationMessage message, CancellationToken cancellationToken) => throw new NotImplementedException();
+        public ValueTask<IReadOnlyList<ConversationMessage>> ReadRecentAsync(
+            ConversationId conversationId, int maximumMessages, CancellationToken cancellationToken,
+            Guid? currentTaskMessageId = null) => throw new NotImplementedException();
+        public ValueTask<ConversationTurn> CreateTurnAsync(
+            TurnId turnId, ConversationId conversationId, TurnStatus status, DateTimeOffset createdAtUtc,
+            CancellationToken cancellationToken) => throw new NotImplementedException();
+        public ValueTask<ConversationTurn?> GetTurnForOwnerAsync(
+            TurnId turnId, string ownerId, CancellationToken cancellationToken) =>
+            ValueTask.FromResult<ConversationTurn?>(
+                ownerId != Conversation.OwnerId ? null
+                : Turn?.Id == turnId ? Turn
+                : new(turnId, Conversation.Id, TurnStatus.Interrupted, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, 1));
+        public ValueTask<IReadOnlyList<ConversationTurn>> ReadRecentTurnsForOwnerAsync(
+            string ownerId, int maximumTurns, CancellationToken cancellationToken) => throw new NotImplementedException();
+        public ValueTask<IReadOnlyList<ConversationTurn>> ReadNonterminalTurnsAsync(
+            int maximumTurns, CancellationToken cancellationToken) => throw new NotImplementedException();
+        public ValueTask<PersistedTurnEvent> TransitionTurnAndAppendEventAsync(
+            TurnId turnId, TurnStatus status, long expectedVersion, DateTimeOffset updatedAtUtc,
+            string eventType, string payloadJson, DateTimeOffset occurredAtUtc,
+            CancellationToken cancellationToken) => throw new NotImplementedException();
+        public ValueTask<PersistedTurnEvent> AppendTurnEventAsync(
+            TurnId turnId, string eventType, string payloadJson, DateTimeOffset occurredAtUtc,
+            CancellationToken cancellationToken) => throw new NotImplementedException();
+        public ValueTask<IReadOnlyList<PersistedTurnEvent>> ReadTurnEventsAfterAsync(
+            TurnId turnId, long afterSequence, int maximumEvents, CancellationToken cancellationToken) =>
+            throw new NotImplementedException();
     }
 }

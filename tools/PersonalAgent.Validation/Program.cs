@@ -128,6 +128,7 @@ internal static class CoverageGate
         ("M2-01 exact tool allowlist policy", "src/PersonalAgent.Application/Tools/ToolAuthorizationPolicy.cs", 95, 90),
         ("M2-01 action dispatch and outcome policy", "src/PersonalAgent.Application/Tools/ToolDispatcher.cs", 95, 90),
         ("M2-01 exact approval lifecycle", "src/PersonalAgent.Application/Approvals/ApprovalService.cs", 95, 90),
+        ("M2-04 owner approval workflow and redaction", "src/PersonalAgent.Application/Approvals/ApprovalWorkflowService.cs", 95, 90),
         ("M2-02 exact home catalog and operation bounds", "src/PersonalAgent.Application/Tools/Home/HomeEntityCatalog.cs", 95, 90),
         ("M2-02 whole-request light intent", "src/PersonalAgent.Application/Tools/Home/HomeLightIntent.cs", 95, 90),
         ("M2-03 memory privacy and conflict policy", "src/PersonalAgent.Application/Memory/MemoryPolicy.cs", 95, 90),

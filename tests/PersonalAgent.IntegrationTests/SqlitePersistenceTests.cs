@@ -176,7 +176,7 @@ public sealed class SqlitePersistenceTests
         Assert.Equal(saved, await reopened.GetRetentionAsync(defaults, CancellationToken.None));
         Assert.True(await reopened.IsConfiguredAsync(CancellationToken.None));
         await using var connection = await new SqliteDatabase(file.Path).OpenConnectionAsync();
-        Assert.Equal(7, await UserVersionAsync(connection));
+        Assert.Equal(8, await UserVersionAsync(connection));
     }
 
     [Fact]
@@ -370,7 +370,7 @@ public sealed class SqlitePersistenceTests
         Assert.False(existing.TitleIsManual);
         Assert.Equal(Now, existing.CreatedAtUtc);
         await using var migrated = await database.OpenConnectionAsync();
-        Assert.Equal(7, await UserVersionAsync(migrated));
+        Assert.Equal(8, await UserVersionAsync(migrated));
     }
 
     [Fact]
@@ -433,7 +433,7 @@ public sealed class SqlitePersistenceTests
         await using var foreignKeys = connection.CreateCommand();
         foreignKeys.CommandText = "PRAGMA foreign_keys;";
         Assert.Equal(1L, (long)(await foreignKeys.ExecuteScalarAsync())!);
-        Assert.Equal(7, await UserVersionAsync(connection));
+        Assert.Equal(8, await UserVersionAsync(connection));
     }
 
     [Fact]
@@ -454,7 +454,7 @@ public sealed class SqlitePersistenceTests
         Assert.Equal(messageId, messages[0].MessageId);
         Assert.Equal("before upgrade", messages[0].Content);
         await using var migrated = await database.OpenConnectionAsync();
-        Assert.Equal(7, await UserVersionAsync(migrated));
+        Assert.Equal(8, await UserVersionAsync(migrated));
         await using var table = migrated.CreateCommand();
         table.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'cloud_consents';";
         Assert.Equal(1L, (long)(await table.ExecuteScalarAsync())!);
@@ -1542,6 +1542,37 @@ public sealed class SqlitePersistenceTests
 
     [Fact]
     [Trait("Category", "Integration")]
+    public async Task AuditPageIncludesNewestEventsBeforeApplyingItsBoundedLimit()
+    {
+        using var file = IsolatedDatabaseFile.Create();
+        var database = new SqliteDatabase(file.Path);
+        await database.InitializeAsync();
+        var audit = new SqliteAuditStore(database);
+        for (var index = 0; index < 205; index++)
+        {
+            await audit.AppendAsync(NewAudit(Now.AddMinutes(index)) with
+            {
+                EventType = $"conversation.turn-{index:D3}"
+            }, CancellationToken.None);
+        }
+        for (var index = 0; index < 202; index++)
+        {
+            await audit.AppendAsync(NewAudit(Now.AddMinutes(1000 + index)) with
+            {
+                EventType = $"approval.test-{index:D3}"
+            }, CancellationToken.None);
+        }
+
+        var events = await audit.ReadRecentActivityAsync(Now, 200, CancellationToken.None);
+
+        Assert.Equal(200, events.Count);
+        Assert.Equal("approval.test-201", events[0].EventType);
+        Assert.Equal("approval.test-002", events[^1].EventType);
+        Assert.All(events, item => Assert.StartsWith("approval.", item.EventType, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
     public async Task RetentionUsesDefaultAndOverrideWindowsAndKeepsDurableState()
     {
         Assert.Equal(new SqliteRetentionOptions(), new SqliteRetentionOptions(90, 30));
@@ -2492,7 +2523,7 @@ public sealed class SqlitePersistenceTests
                 return true;
             });
         await using var connection = await first.OpenConnectionAsync();
-        Assert.Equal(7, await UserVersionAsync(connection));
+        Assert.Equal(8, await UserVersionAsync(connection));
     }
 
     private static async Task<T[]> RunConcurrentlyAsync<T>(params Func<Task<T>>[] operations)

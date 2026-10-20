@@ -4,6 +4,7 @@ using System.Reflection;
 using System.Text.Json;
 using PersonalAgent.Application;
 using PersonalAgent.Application.Routing;
+using PersonalAgent.Application.Tools;
 using PersonalAgent.Application.TurnCoordination;
 using PersonalAgent.Domain;
 using Xunit;
@@ -117,16 +118,18 @@ public sealed class LocalTurnCoordinatorTests
         var context = new ControlledContextBuilder();
         var engine = new ControlledEngine(store);
         var clock = new FixedClock();
+        var registry = new StaticToolRegistry([]);
         var options = new LocalTurnCoordinatorOptions(TimeSpan.FromSeconds(120), TimeSpan.FromSeconds(300));
 
-        Assert.Throws<ArgumentNullException>(() => new LocalTurnCoordinator(null!, store, router, context, engine, clock, options, "instructions"));
-        Assert.Throws<ArgumentNullException>(() => new LocalTurnCoordinator(store, null!, router, context, engine, clock, options, "instructions"));
-        Assert.Throws<ArgumentNullException>(() => new LocalTurnCoordinator(store, store, null!, context, engine, clock, options, "instructions"));
-        Assert.Throws<ArgumentNullException>(() => new LocalTurnCoordinator(store, store, router, null!, engine, clock, options, "instructions"));
-        Assert.Throws<ArgumentNullException>(() => new LocalTurnCoordinator(store, store, router, context, null!, clock, options, "instructions"));
-        Assert.Throws<ArgumentNullException>(() => new LocalTurnCoordinator(store, store, router, context, engine, null!, options, "instructions"));
-        Assert.Throws<ArgumentNullException>(() => new LocalTurnCoordinator(store, store, router, context, engine, clock, null!, "instructions"));
-        Assert.Throws<ArgumentException>(() => new LocalTurnCoordinator(store, store, router, context, engine, clock, options, " "));
+        Assert.Throws<ArgumentNullException>(() => new LocalTurnCoordinator(null!, store, router, context, engine, registry, clock, options, "instructions"));
+        Assert.Throws<ArgumentNullException>(() => new LocalTurnCoordinator(store, null!, router, context, engine, registry, clock, options, "instructions"));
+        Assert.Throws<ArgumentNullException>(() => new LocalTurnCoordinator(store, store, null!, context, engine, registry, clock, options, "instructions"));
+        Assert.Throws<ArgumentNullException>(() => new LocalTurnCoordinator(store, store, router, null!, engine, registry, clock, options, "instructions"));
+        Assert.Throws<ArgumentNullException>(() => new LocalTurnCoordinator(store, store, router, context, null!, registry, clock, options, "instructions"));
+        Assert.Throws<ArgumentNullException>(() => new LocalTurnCoordinator(store, store, router, context, engine, null!, clock, options, "instructions"));
+        Assert.Throws<ArgumentNullException>(() => new LocalTurnCoordinator(store, store, router, context, engine, registry, null!, options, "instructions"));
+        Assert.Throws<ArgumentNullException>(() => new LocalTurnCoordinator(store, store, router, context, engine, registry, clock, null!, "instructions"));
+        Assert.Throws<ArgumentException>(() => new LocalTurnCoordinator(store, store, router, context, engine, registry, clock, options, " "));
 
         Assert.Throws<ArgumentOutOfRangeException>(() => new LocalTurnCoordinatorOptions(TimeSpan.Zero, TimeSpan.FromSeconds(120)).Validate());
         Assert.Throws<ArgumentOutOfRangeException>(() => new LocalTurnCoordinatorOptions(TimeSpan.FromSeconds(120), TimeSpan.FromSeconds(119)).Validate());
@@ -135,6 +138,27 @@ public sealed class LocalTurnCoordinatorTests
         Assert.Throws<ArgumentOutOfRangeException>(() => (options with { MaximumQueuedTurns = 19 }).Validate());
         Assert.Throws<ArgumentOutOfRangeException>(() => (options with { MaximumRequestIdCharacters = 0 }).Validate());
         Assert.Throws<ArgumentOutOfRangeException>(() => (options with { MaximumRequestIdCharacters = 257 }).Validate());
+    }
+
+    [Fact]
+    [Trait("Category", "Unit")]
+    public async Task CoordinatorPassesRegisteredToolsToContextAndEngineWithBoundedCallBudget()
+    {
+        var store = new InMemoryConversationStore();
+        var engine = new ControlledEngine(store);
+        var context = new ControlledContextBuilder();
+        var definition = new AgentToolDefinition("memory.search", """{"type":"object"}""", true);
+        var registry = new StaticToolRegistry([definition]);
+        await using var scope = CreateCoordinator(store, engine, contextBuilder: context, toolRegistry: registry);
+        await scope.Coordinator.StartAsync(CancellationToken.None);
+
+        var accepted = await scope.Coordinator.SubmitAsync(Request(), CancellationToken.None);
+        await WaitForTerminalEventAsync(store, accepted.Turn.Id);
+        await scope.Coordinator.StopAsync(CancellationToken.None);
+
+        Assert.Equal([definition], context.LastTools);
+        Assert.Equal([definition], engine.LastRequest!.Tools);
+        Assert.Equal(8, engine.LastRequest.MaximumToolCalls);
     }
 
     [Fact]
@@ -1788,13 +1812,15 @@ public sealed class LocalTurnCoordinatorTests
         ControlledEngine engine,
         IModelRouter? router = null,
         ControlledContextBuilder? contextBuilder = null,
-        FixedClock? clock = null) =>
+        FixedClock? clock = null,
+        IToolRegistry? toolRegistry = null) =>
         new(new LocalTurnCoordinator(
             store,
             store,
             router ?? new ControlledRouter(RouteDecision.Local("local", "policy")),
             contextBuilder ?? new ControlledContextBuilder(),
             engine,
+            toolRegistry ?? new StaticToolRegistry([]),
             clock ?? new FixedClock(),
             new LocalTurnCoordinatorOptions(TimeSpan.FromSeconds(120), TimeSpan.FromSeconds(300)),
             "Host instructions."));
@@ -1887,14 +1913,27 @@ public sealed class LocalTurnCoordinatorTests
         }
     }
 
+    private sealed class StaticToolRegistry(IReadOnlyList<AgentToolDefinition> definitions) : IToolRegistry
+    {
+        public IReadOnlyList<AgentToolDefinition> Definitions { get; } = definitions;
+
+        public bool TryGet(string name, out IToolRegistration? registration)
+        {
+            registration = null;
+            return false;
+        }
+    }
+
     private sealed class ControlledContextBuilder(bool block = false, bool ignoreCancellation = false) : IContextBuilder
     {
+        public IReadOnlyList<AgentToolDefinition> LastTools { get; private set; } = [];
         public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource CancellationObserved { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource Continue { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public async ValueTask<ContextPacket> BuildAsync(ContextBuildRequest request, CancellationToken cancellationToken)
         {
+            LastTools = request.Tools;
             cancellationToken.ThrowIfCancellationRequested();
             if (block)
             {
@@ -1936,6 +1975,7 @@ public sealed class LocalTurnCoordinatorTests
         bool hideOutcomeRead = false,
         bool persistCancellationOutcome = false) : IAgentEngine
     {
+        public AgentTurnRequest? LastRequest { get; private set; }
         private int executionCount;
         private int cancelCallCount;
         private int stopCallCount;
@@ -1966,6 +2006,7 @@ public sealed class LocalTurnCoordinatorTests
             AgentTurnRequest request,
             [EnumeratorCancellation] CancellationToken cancellationToken)
         {
+            LastRequest = request;
             var execution = Interlocked.Increment(ref executionCount);
             LastOwnerId = request.OwnerId;
             if (execution >= 4)

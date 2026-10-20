@@ -65,18 +65,14 @@ remain in the private data directory across restarts and application updates.
 See the [Web guide](src/PersonalAgent.Web/README.md) for session, API, and
 retention details.
 
-M2-02 provides the four narrow Home Assistant tools, approved catalog, REST
-adapter and controlled HTTP fixtures. Aspire tests exercise their dispatcher/
-approval integration; chat tool routing and approval UI are M2-04 scope, not
-yet available from the chat page. Live automatic light writes and thermostat
-writes are disabled by default. See the
-[Home Assistant configuration](docs/development.md#home-assistant-configuration).
-
-M2-03 adds confirmed local memory, bounded FTS retrieval, explicit conflict
-resolution and deletion of derived copies. New memories are LocalOnly, and
-every mutation needs exact owner approval. Memory/approval UI and chat wiring
-remain M2-04 scope. See the [memory decision](docs/adr/0006-confirmed-memory.md)
-for provenance, invalidated replay and backup/deletion limitations.
+M2 provides four narrow Home Assistant tools, confirmed local memory,
+owner-reviewed exact-action approvals, and household/memory/activity
+surfaces. The default Simulator profile uses controlled endpoints and no
+household credentials. Live automatic light writes and thermostat writes
+remain disabled by default. See the
+[Home Assistant configuration](docs/development.md#home-assistant-configuration)
+and [memory decision](docs/adr/0006-confirmed-memory.md) for provenance,
+invalidated replay and backup/deletion limitations.
 
 ## Validation
 

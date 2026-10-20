@@ -12,6 +12,11 @@ public sealed class RejectingToolDispatcher : IToolDispatcher
     }
 
     /// <inheritdoc />
+    public void ReleaseApproval(ActionId actionId)
+    {
+    }
+
+    /// <inheritdoc />
     public ValueTask<ToolDispatchResult> DispatchAsync(
         ToolDispatchRequest request,
         CancellationToken cancellationToken)
@@ -20,4 +25,10 @@ public sealed class RejectingToolDispatcher : IToolDispatcher
         cancellationToken.ThrowIfCancellationRequested();
         return ValueTask.FromResult(new ToolDispatchResult("Rejected", null, "tools_not_available_in_m1"));
     }
+
+    /// <inheritdoc />
+    public ValueTask<ActionJournalEntry> MarkUnavailableExecutingActionUnknownAsync(
+        ActionJournalEntry action,
+        CancellationToken cancellationToken) =>
+        throw new NotSupportedException("The M1 rejecting dispatcher does not recover journaled actions.");
 }

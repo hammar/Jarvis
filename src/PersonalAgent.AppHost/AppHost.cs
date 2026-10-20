@@ -39,6 +39,7 @@ if (profile is "Simulator" or "E2E")
             launchProfileName: null)
         .WithHttpEndpoint()
         .WithEnvironment("JARVIS_SIMULATOR_KIND", "model")
+        .WithEnvironment("JARVIS_SIMULATOR_DEMO_ENABLED", "true")
         .WithEnvironment("JARVIS_SIMULATOR_CONTROLS_ENABLED", profile == "E2E" ? "true" : "false")
         .WithHttpHealthCheck("/health/ready");
     var simulatorHome = builder.AddProject<Projects.PersonalAgent_SimulatorEndpoints>(

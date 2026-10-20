@@ -30,6 +30,9 @@
             <nav class="sidebar-actions" aria-label="Chat actions">
                 <button id="settings-button" class="nav-button" type="button"><span aria-hidden="true">⚙</span> Settings</button>
                 <button id="activity-button" class="nav-button" type="button"><span aria-hidden="true">◷</span> Activity</button>
+                <button id="approvals-button" class="nav-button" type="button">Approvals</button>
+                <button id="memory-button" class="nav-button" type="button">Memory</button>
+                <button id="household-button" class="nav-button" type="button">Household</button>
                 <button id="logout" class="nav-button" type="button"><span aria-hidden="true">↪</span> Sign out</button>
             </nav>
         </aside>
@@ -88,8 +91,71 @@
             <section id="activity" class="surface-card activity-view" hidden aria-labelledby="activity-title">
                 <p class="eyebrow">A clear local record</p>
                 <h2 id="activity-title">Local activity</h2>
-                <p>Activity is limited to local conversation and turn history. Provider secrets and prompt telemetry are not displayed.</p>
+                <p>Recent turns and action outcomes are shown without prompts, provider payloads, or secrets.</p>
+                <p id="activity-status" class="inline-status" role="status"></p>
+                <h3>Tool and action outcomes</h3>
+                <ul id="action-list" class="activity-list"></ul>
+                <h3>Approval decisions</h3>
+                <ul id="audit-list" class="activity-list"></ul>
+                <h3>Recent turns</h3>
                 <ul id="activity-list" class="activity-list"></ul>
+            </section>
+            <section id="approvals" class="surface-card" hidden aria-labelledby="approvals-title">
+                <p class="eyebrow">Exact, short-lived consent</p>
+                <h2 id="approvals-title">Pending approvals</h2>
+                <p>Review the exact registered action and its expiry. Approval authorizes only the displayed action.</p>
+                <p id="approvals-status" class="inline-status" role="status"></p>
+                <ul id="approval-list" class="activity-list"></ul>
+            </section>
+            <section id="memory" class="surface-card memory-view" hidden aria-labelledby="memory-title">
+                <p class="eyebrow">Owner-confirmed, stored locally</p>
+                <h2 id="memory-title">Memory</h2>
+                <p>Facts are evidence, not instructions. Enter an exact change here or ask Jarvis to propose one. Nothing is saved until you approve its exact proposal.</p>
+                <form id="memory-search-form">
+                    <label for="memory-query">Search remembered facts</label>
+                    <div class="inline-form">
+                        <input id="memory-query" type="search" maxlength="512" />
+                        <button class="button button-secondary" type="submit">Search</button>
+                    </div>
+                </form>
+                <form id="memory-request-form">
+                    <label for="memory-operation">Change type</label>
+                    <select id="memory-operation">
+                        <option value="create">Remember a new fact</option>
+                        <option value="update">Edit this fact</option>
+                        <option value="delete">Forget this fact</option>
+                    </select>
+                    <input id="memory-target-id" type="hidden" />
+                    <input id="memory-target-version" type="hidden" />
+                    <label for="memory-subject">Subject</label>
+                    <input id="memory-subject" maxlength="256" required />
+                    <label for="memory-key">Fact key</label>
+                    <input id="memory-key" maxlength="128" required />
+                    <label for="memory-value">Exact fact value</label>
+                    <textarea id="memory-value" maxlength="8192" required></textarea>
+                    <div id="memory-conflict-review" hidden>
+                        <p>Review these current facts before choosing how this proposal handles the conflicts:</p>
+                        <ul id="memory-conflict-list" class="activity-list"></ul>
+                        <label for="memory-conflict-choice">Conflict decision</label>
+                        <select id="memory-conflict-choice">
+                            <option value="">Choose how to resolve these conflicts</option>
+                            <option value="retain_both">Keep a separate fact with distinguishing context</option>
+                            <option value="supersede">Replace the matching facts</option>
+                        </select>
+                        <label for="memory-distinguishing-context">Distinguishing context (required to keep both)</label>
+                        <input id="memory-distinguishing-context" maxlength="512" />
+                    </div>
+                    <button class="button button-primary" type="submit">Prepare exact proposal</button>
+                </form>
+                <p id="memory-status" class="inline-status" role="status"></p>
+                <ul id="memory-list" class="activity-list"></ul>
+            </section>
+            <section id="household" class="surface-card" hidden aria-labelledby="household-title">
+                <p class="eyebrow">Approved resources only</p>
+                <h2 id="household-title">Household connection</h2>
+                <p id="household-status" class="inline-status" role="status"></p>
+                <p>Connection status is configuration-only until an operation probes the service. Secret values are never shown here.</p>
+                <ul id="household-list" class="activity-list"></ul>
             </section>
         </div>
     </section>

@@ -86,7 +86,11 @@ No fact text is inserted into host instructions or treated as owner intent.
 `memory.propose_change` uses the existing exact-action approval flow. The
 journaled canonical change is the pending draft; fact mutation requires an
 approved, unexpired owner-bound action. The host's `MemoryProposalService`
-can preview, resolve and complete it without a live callback. Normalized
+can preview, resolve and complete it without a live callback. It also accepts
+typed owner-entered proposals directly from the Memory surface: the host
+persists a source message and idempotency key, binds the authenticated owner,
+checks target/conflict versions before dispatch, and still requires approval
+of the immutable action. Normalized
 subject/key conflicts require exact-version supersession or distinguishing
 context to retain both. The full conflict set is checked under SQLite's
 immediate transaction, including concurrent insertions.
@@ -119,10 +123,18 @@ preventing a delayed result from reintroducing deleted content. Invalidated
 calls return `memory_result_invalidated`, never execute again. This narrow
 owner-approved exception to exact journal replay is recorded in
 [ADR 0006](adr/0006-confirmed-memory.md). Other actions retain ADR 0005 behavior.
-No memory context cache is introduced. M2-04 owns UI/chat composition and must
-track dependencies for new derived context; M3-01 owns cloud packet/consent
+No memory context cache is introduced. M3-01 owns cloud packet/consent
 invalidation. Original conversation answers and backups retain separate
 retention; logical deletion is not secure erasure.
+M2-04's Web API applies authenticated owner scoping to bounded approval,
+action and memory reads. The action-list read may trigger bounded
+owner-scoped observation-only recovery of unapproved Executing actions; it
+never resubmits a household write. The approval UI displays a redacted preview
+from the durable canonical action, and submits the expected approval version
+through the dispatcher; it cannot provide alternate action arguments. Memory
+edit and delete controls only prepare a chat proposal. They do not call the
+mutation store directly. The household view exposes the configured allowlist
+and labels connectivity as unprobed until an operation actually observes it.
 
 ### Host turn policy
 
@@ -216,6 +228,19 @@ and only for the action that owns that uncertainty. Verified success removes
 that action's provisional failure slot; confirmed failure consumes one slot,
 deduplicated by action ID. Unknown outcomes and failed observation or journaling
 retain the write block. Recovery of another action cannot clear it.
+Approval-waiting proposals retain their equivalent-proposal budget across
+completion of the originating model turn. Settling an approval releases its
+hold only after dispatch has produced a terminal durable outcome; unresolved
+sibling approvals keep the shared uncertainty budget alive.
+If an owner approval is persisted but the action remains `AwaitingApproval`
+because the host stopped before dispatch claimed it, the owner may explicitly
+resume that same action from the approvals surface while its five-minute
+approval window remains open. This path accepts only the already-approved
+version and exact journal identity; startup never auto-submits it. An expired
+approved action can be explicitly finalized as `Expired` without execution,
+which also releases its in-process approval hold. Actions already `Executing`
+or terminal are not offered as resumable or finalizable work, preserving
+observation-only recovery for uncertain physical outcomes.
 On a fresh dispatcher, recovery seeds uncertainty from the persisted action's
 original risk before observing, not from the new policy/registration risk.
 Unresolved writes are tracked by action ID as a set so reconciling one orphan
@@ -248,6 +273,17 @@ Fresh dispatcher state, a lower current risk, cancellation or a failed journal
 refresh cannot erase that unresolved effect. Valid original reads retain
 distinct-action failure limits without inventing write uncertainty; malformed
 risk metadata registers uncertainty conservatively before surfacing its error.
+Before a nonterminal action can execute or enter approval, the dispatcher also
+reads the complete owner-and-turn action history from SQLite (turns are limited
+to eight tool calls) and seeds its proposal budget from equivalent `Unknown`
+or orphaned `Executing` writes. This reconstructs uncertainty for sibling
+approvals after a dispatcher restart; process-local approval holds remain a
+cleanup optimization, not the durable safety boundary. SQLite stores indexed
+owner/turn attribution beside the canonical envelope and migration backfills it
+from valid historical envelopes. This keeps malformed later envelope contents
+discoverable; any non-invalidated unresolved action lacking durable attribution
+fails closed before dispatch rather than being silently omitted from recovery
+history.
 The engine releases ephemeral accounting only
 after the turn's callbacks stop. Restart interrupts turns rather than resuming
 their inference, so these counters are not a durable retry mechanism.

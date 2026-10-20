@@ -111,8 +111,57 @@ Exact-path 95% line / 90% branch gates cover `MemoryPolicy.cs`,
 `MemoryProposalService.cs`, `MemoryToolRegistrations.cs`,
 `SqliteConfirmedMemoryStore.cs` and `SqliteMemoryDependencies.cs`, in addition
 to the existing dispatcher, approval and journal gates. No thresholds are lowered.
-Memory UI and out-of-process feature acceptance remain M2-04 scope; running
-existing Aspire/browser regressions is not evidence of a memory UI.
+### M2-04 household and memory surfaces
+
+`AspireSimulatorTests.OwnerUiApisExposeOnlyBoundedMemoryApprovalsAndAllowlistedHouseholdStatus`
+checks the authenticated API against the controlled Aspire composition: the
+new bounded lists are empty for a clean fixture, Home Assistant reports
+`not-run` rather than claiming connectivity, only allowlisted entities appear,
+memory limits are enforced, and an invalid antiforgery token cannot submit an
+approval decision.
+`AspireSimulatorTests.WebChatDispatchesAllowedSimulatedLightThroughProductionComposition`
+scripts one bounded light command into the test-only model fixture and sends it
+through the real Web chat, Copilot SDK adapter, coordinator, dispatcher, and
+managed Home Assistant process. It checks the SSE tool lifecycle and terminal
+event, verified journal status, and exactly one write to the isolated
+simulator. The response is controlled by an E2E-only fixture endpoint; it does
+not establish live model behavior or physical-device causality.
+`AspireSimulatorTests.SimulatorDemoMapsDocumentedCommandsToBoundedRegisteredTools`
+checks the Simulator/E2E model fixture's fixed household and memory demo
+commands; `WebChatRunsDocumentedSimulatorLightCommandWithoutFixtureInjection`
+proves a documented exact light command traverses the managed tool and fake
+Home Assistant path without the E2E call-injection control.
+`ConfirmedMemoryTests.OwnerEnteredCreateEditAndDeleteProposalsNeedNoModelInference`
+and `BrowserSmokeTests.MemoryUiCreatesAndApprovesTypedProposalWithoutInference`
+cover the provider-independent typed proposal route, durable action replay,
+exact approval, edit/delete versions, and explicit retain-both conflict review.
+`ConfirmedMemoryTests.DuplicateProposalRetrySettlesATurnAfterItsFirstSettlementWasInterrupted`
+checks real-SQLite retry settlement after an interrupted status write.
+`ApprovalWorkflowExpiryTests.UnapprovedExecutingRecoveryMarksActionUnknownWhenOriginalSourceIsUnavailable`
+and
+`ApprovalWorkflowExpiryTests.UnapprovedExecutingRecoveryNeverCompletesMemoryProposals`
+and
+`AspireSimulatorTests.ApprovalListRecoversInterruptedActionsAfterHostRestartWithoutCrossingHomeInstallationBoundary`
+cover bounded owner-triggered recovery of interrupted automatic writes without
+resubmission. The unit workflow tests also cover malformed owner binding,
+expired approvals, invalidated memory, and concurrent turn-budget retention.
+`BrowserSmokeTests.DelayedMemoryProposalCannotResetFormOrSelectionAfterConversationSwitch`
+verifies that a delayed proposal is retried against its original conversation
+while the current selection and draft are preserved.
+`BrowserSmokeTests.HouseholdMemoryApprovalAndActivitySurfacesReflowAndKeepKeyboardFocusVisible`
+signs in through Playwright, forces a controlled `/api/status` failure, then
+verifies the owner surfaces still load and render empty-state/status content
+and the simulator allowlist. It checks keyboard focus visibility and asserts
+no horizontal overflow on Approvals, Memory, Household, and Activity at 1440,
+768, 390, and 320 CSS pixels. It also renders a 180-character fact/entity name
+and 420-character fact value at 320px from a controlled read-API display fixture.
+It captures the four controlled desktop surfaces and the 390-pixel household
+view for the task record (default output `artifacts/m204`, override with
+`JARVIS_M204_SCREENSHOTS`). This is controlled responsive/navigation evidence,
+not a complete M2 acceptance matrix, WCAG conformance claim, or screen-reader
+certification. Live HA, physical effects, and interactive assistive-technology
+observations are not exercised; the status failure is a UI boundary simulation,
+not a live model/provider outage.
 
 `tools/PersonalAgent.Validation` consumes VSTest TRX discovery results and
 Coverlet Cobertura output for line coverage and OpenCover output for individual
@@ -143,7 +192,9 @@ M2-01 typed tool registration, exact allowlist policy, dispatcher, and approval
 service in `Application/Tools/ToolRegistration.cs`,
 `Application/Tools/ToolAuthorizationPolicy.cs`,
 `Application/Tools/ToolDispatcher.cs`, and
-`Application/Approvals/ApprovalService.cs`, also at 95% / 90%;
+`Application/Approvals/ApprovalService.cs`, plus the M2-04 owner approval
+workflow/redaction boundary in `Application/Approvals/ApprovalWorkflowService.cs`,
+also at 95% / 90%;
 changed executable lines at 90%.
 The coverage validator requires each critical source file to exist at its
 exact owned path, so renaming it cannot silently remove the gate. A module with no coverable lines
@@ -283,6 +334,14 @@ E2E is a separate pass gate, not in-process coverage. See the
 | Windows data directories reject ACL access for other identities | `SqlitePersistenceTests.WindowsDatabaseRejectsDirectoriesGrantingAccessToOtherUsers` |
 | Turn state/version survive restart and nonterminal recovery reads are bounded | `SqlitePersistenceTests.NonterminalTurnStateAndVersionCanBeRecoveredAfterRestart` |
 | Durable request ID retries return the original turn and conflicting reuse fails after reopening SQLite | `SqlitePersistenceTests.TurnSubmissionIsAtomicAndDeduplicatedAcrossStoreReopen` |
+| Version-7 migration backfills durable action owner/turn attribution, malformed same-turn history is found, and unattributed unresolved history fails closed | `ActionOutcomePersistenceTests.VersionSevenUpgradeBackfillsDurableActionOwnerAndTurnAttribution`, `ToolDispatcherTests.MalformedSameTurnUnknownEnvelopeFailsClosedBeforeFreshWrite`, `ToolDispatcherTests.UnattributedUnknownJournalRowFailsClosedBeforeFreshWrite` |
+| Owner UI APIs bound memory reads, return only allowlisted household status, and reject missing/invalid consent protection | `AspireSimulatorTests.OwnerUiApisExposeOnlyBoundedMemoryApprovalsAndAllowlistedHouseholdStatus` |
+| An Unknown approved write remains protected after turn completion and dispatcher restart while an equivalent sibling approval is still actionable | `ToolDispatcherTests.UnknownApprovedWriteRemainsProtectedAcrossTurnReleaseWhileSiblingApprovalIsPending`, `ToolDispatcherTests.UnknownApprovedWriteRemainsProtectedAfterDispatcherRestartWhileSiblingApprovalIsPending` |
+| An already-approved Home Assistant action left unclaimed by interruption can be explicitly resumed once from the owner UI without replaying a claimed/uncertain action | `ToolDispatcherTests.AlreadyApprovedUnclaimedHomeActionCanResumeAfterDispatcherRestart`, `BrowserSmokeTests.ApprovedUnclaimedActionOffersAnExplicitResumeControl` |
+| An expired approved-but-unclaimed Home Assistant action can be finalized as Expired without execution, and malformed canonical JSON does not hide durably attributed actions from owner Activity | `ToolDispatcherTests.ExpiredApprovedUnclaimedActionCanBeFinalizedWithoutExecution`, `BrowserSmokeTests.ExpiredApprovedActionOffersNoExecutionFinalization`, `ToolDispatcherTests.MalformedSameTurnUnknownEnvelopeFailsClosedBeforeFreshWrite` |
+| Invalidated memory approval records remain owner-bound, content-free, and non-actionable in the approvals list | `ConfirmedMemoryTests.DeleteRedactsDerivedCopiesAndOldCallsCannotRestoreThem` |
+| A controlled exact-eligible light command traverses the actual Web/SDK/coordinator/dispatcher composition and performs exactly one simulator write | `AspireSimulatorTests.WebChatDispatchesAllowedSimulatedLightThroughProductionComposition` |
+| Approval, memory, household, and activity surfaces render empty/status states without horizontal overflow at desktop/tablet/mobile widths, with visible keyboard focus | `BrowserSmokeTests.HouseholdMemoryApprovalAndActivitySurfacesReflowAndKeepKeyboardFocusVisible` |
 | Turn completion atomically stores one final assistant message and terminal event | `SqlitePersistenceTests.TerminalCompletionPersistsItsFinalAssistantMessageAtomicallyOnce`, `LocalTurnCoordinatorTests.CoordinatorPersistsOneCompletedAnswerAndReturnsDuplicateRequest` |
 | Typed registration and dispatch enforce strict JSON, exact policy, deterministic identities, approvals, pre-send cancellation, and honest unknown outcomes at the Application unit boundary | `ToolAuthorizationPolicyTests.ToolRegistrationAndRegistryRejectInvalidNamesSchemasAndDuplicates`, `ToolAuthorizationPolicyTests.ToolRegistrationEnforcesCallbackAndPreparationContracts`, `ToolAuthorizationPolicyTests.AllowlistRejectsEveryOverlongOrEmptyExactPermissionComponent`, `ToolDispatcherUnitTests.DispatcherValidatesRequestsAndNeverJournalsClarificationOrMalformedArguments`, `ToolDispatcherUnitTests.DispatcherSeparatesCallIdentityAndRejectsChangedContentUnderAnExistingIdentity`, `ToolDispatcherUnitTests.ApprovalTransitionsRejectForeignOrInvalidDecisionsAndPersistExpiry`, `ToolDispatcherUnitTests.DispatchRacesAndCorruptJournalEntriesCannotCauseExecution`, `ToolDispatcherUnitTests.InvalidAdapterStatusesAreJournaledUnknownBeforeSurfacingTheContractError` |
 | Unregistered, malformed, ambiguous, unsupported, and disallowed tool requests never execute | `ToolDispatcherTests.UnknownMalformedAmbiguousAndDisallowedCallsNeverExecute`, `ToolDispatcherTests.UnsupportedRiskAndUnauthenticatedActionsAreDenied` |

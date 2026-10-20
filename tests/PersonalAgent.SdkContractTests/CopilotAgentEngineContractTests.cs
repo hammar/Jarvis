@@ -2557,6 +2557,7 @@ public sealed class CopilotAgentEngineContractTests(ITestOutputHelper output)
         public TurnId? ReleasedTurn { get; private set; }
 
         public void ReleaseTurn(TurnId turnId) => ReleasedTurn = turnId;
+        public void ReleaseApproval(ActionId actionId) { }
 
         public ValueTask<ToolDispatchResult> DispatchAsync(
             ToolDispatchRequest request,
@@ -2569,6 +2570,11 @@ public sealed class CopilotAgentEngineContractTests(ITestOutputHelper output)
             LastUserRequest = request.CurrentUserRequest;
             return ValueTask.FromResult(result);
         }
+
+        public ValueTask<ActionJournalEntry> MarkUnavailableExecutingActionUnknownAsync(
+            ActionJournalEntry action,
+            CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
     }
 
     private sealed class BlockingDispatcher : IToolDispatcher
@@ -2576,6 +2582,7 @@ public sealed class CopilotAgentEngineContractTests(ITestOutputHelper output)
         public void ReleaseTurn(TurnId turnId)
         {
         }
+        public void ReleaseApproval(ActionId actionId) { }
 
         public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource Cancelled { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -2589,5 +2596,10 @@ public sealed class CopilotAgentEngineContractTests(ITestOutputHelper output)
             await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
             return new ToolDispatchResult("Succeeded", "{}", null);
         }
+
+        public ValueTask<ActionJournalEntry> MarkUnavailableExecutingActionUnknownAsync(
+            ActionJournalEntry action,
+            CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
     }
 }

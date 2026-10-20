@@ -1,0 +1,584 @@
+using System.Text.Json;
+using PersonalAgent.Application.Memory;
+using PersonalAgent.Application.Tools;
+using PersonalAgent.Domain;
+
+namespace PersonalAgent.Application.Approvals;
+
+/// <summary>Provides an owner-facing, redacted summary of one journaled approval.</summary>
+/// <param name="Approval">Owner-bound approval and its expiry/version state.</param>
+/// <param name="ActionId">Stable journaled action identifier.</param>
+/// <param name="ToolName">Registered host capability name.</param>
+/// <param name="ActionType">Stable application action category.</param>
+/// <param name="Operation">Narrow host-validated operation.</param>
+/// <param name="EntityId">Exact resolved household entity, when applicable.</param>
+/// <param name="ActionStatus">Current durable action state.</param>
+/// <param name="ArgumentsJson">Validated display arguments without owner, source, or secret fields.</param>
+public sealed record ApprovalActionSummary(
+    ApprovalRequest Approval,
+    ActionId ActionId,
+    string ToolName,
+    string ActionType,
+    string Operation,
+    string? EntityId,
+    string ActionStatus,
+    string ArgumentsJson);
+
+/// <summary>Coordinates trusted approval decisions and owner-initiated resumption of exact approved actions.</summary>
+public sealed class ApprovalWorkflowService
+{
+    private readonly IApprovalStore approvalStore;
+    private readonly IActionJournalStore journal;
+    private readonly IApprovalService approvals;
+    private readonly IToolDispatcher dispatcher;
+    private readonly IConfirmedMemoryStore memories;
+    private readonly MemoryProposalService memoryProposals;
+    private readonly IClock clock;
+
+    /// <summary>Creates approval list, preview, and exact-action decision use cases.</summary>
+    public ApprovalWorkflowService(
+        IApprovalStore approvalStore,
+        IActionJournalStore journal,
+        IApprovalService approvals,
+        IToolDispatcher dispatcher,
+        IConfirmedMemoryStore memories,
+        MemoryProposalService memoryProposals,
+        IClock clock)
+    {
+        this.approvalStore = approvalStore ?? throw new ArgumentNullException(nameof(approvalStore));
+        this.journal = journal ?? throw new ArgumentNullException(nameof(journal));
+        this.approvals = approvals ?? throw new ArgumentNullException(nameof(approvals));
+        this.dispatcher = dispatcher ?? throw new ArgumentNullException(nameof(dispatcher));
+        this.memories = memories ?? throw new ArgumentNullException(nameof(memories));
+        this.memoryProposals = memoryProposals ?? throw new ArgumentNullException(nameof(memoryProposals));
+        this.clock = clock ?? throw new ArgumentNullException(nameof(clock));
+    }
+
+    /// <summary>Lists bounded recent approvals belonging to one authenticated owner.</summary>
+    /// <param name="ownerId">Authenticated owner identity.</param>
+    /// <param name="maximumRequests">Maximum number of entries, from 1 through 100.</param>
+    /// <param name="cancellationToken">Token that cancels reads.</param>
+    /// <returns>Owner-bound action previews with secret and provenance fields removed.</returns>
+    public async ValueTask<IReadOnlyList<ApprovalActionSummary>> ReadRecentAsync(
+        string ownerId,
+        int maximumRequests,
+        CancellationToken cancellationToken)
+    {
+        MemoryPolicy.ValidateOwner(ownerId);
+        if (maximumRequests is < 1 or > 100)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maximumRequests));
+        }
+
+        var records = await approvalStore.ReadRecentForOwnerAsync(ownerId, maximumRequests, cancellationToken);
+        var summaries = new List<ApprovalActionSummary>(records.Count);
+        var recoveredExecutions = 0;
+        foreach (var record in records)
+        {
+            if (!string.Equals(record.OwnerId, ownerId, StringComparison.Ordinal))
+            {
+                throw new InvalidDataException("The approval store returned a record for another owner.");
+            }
+
+            var action = await journal.GetAsync(record.ActionId, cancellationToken)
+                ?? throw new InvalidDataException("An approval is missing its durable action.");
+            var approval = new ApprovalRequest(
+                record.Id, record.ActionId, record.OwnerId, record.ExpiresAtUtc, record.Version, record.Status);
+            if (approval.Status == "Pending"
+                && action.Status == "AwaitingApproval"
+                && !action.MemoryInvalidated
+                && clock.UtcNow.ToUniversalTime() >= approval.ExpiresAtUtc)
+            {
+                try
+                {
+                    approval = await approvals.ResolveAsync(
+                        approval.Id, ownerId, approval.ExpectedVersion, approved: false, cancellationToken);
+                }
+                catch (PersistenceConcurrencyException)
+                {
+                    approval = await approvals.GetAsync(approval.Id, cancellationToken)
+                        ?? throw new PersistenceConcurrencyException("The approval disappeared during expiry settlement.");
+                    action = await journal.GetAsync(action.Id, cancellationToken)
+                        ?? throw new InvalidDataException("The expired action disappeared.");
+                    if (approval.Status == "Pending")
+                    {
+                        throw;
+                    }
+                }
+            }
+            if (approval.Status is "Expired" or "Rejected")
+            {
+                action = approval.Status == "Expired"
+                    ? await approvals.SettleExpiredAsync(
+                        approval.Id, ownerId, approval.ExpectedVersion, cancellationToken)
+                    : await approvals.SettleRejectedAsync(
+                        approval.Id, ownerId, approval.ExpectedVersion, cancellationToken);
+            }
+            else if (approval.Status == "Approved" && action.Status == "Executing" && recoveredExecutions < 8)
+            {
+                action = await RecoverExecutingActionAsync(ownerId, action, cancellationToken);
+                recoveredExecutions++;
+            }
+
+            if (action.Status is "Succeeded" or "Failed" or "Rejected" or "Expired")
+            {
+                dispatcher.ReleaseApproval(action.Id);
+            }
+
+            if (action.MemoryInvalidated)
+            {
+                if (!string.Equals(action.MemoryOwnerId, ownerId, StringComparison.Ordinal))
+                {
+                    throw new InvalidDataException("An invalidated memory approval is not bound to its owner.");
+                }
+
+                dispatcher.ReleaseApproval(action.Id);
+                summaries.Add(new(
+                    new(record.Id, record.ActionId, record.OwnerId, record.ExpiresAtUtc, record.Version, record.Status),
+                    action.Id,
+                    "memory.propose_change",
+                    action.ActionType,
+                    "invalidated",
+                    null,
+                    "Invalidated",
+                    """{"invalidated":true}"""));
+                continue;
+            }
+
+            var envelope = ReadEnvelope(action);
+            if (!string.Equals(envelope.OwnerId, ownerId)
+                || envelope.ToolName is not ("home.set_light" or "home.set_temperature" or "memory.propose_change"))
+            {
+                throw new InvalidDataException("An approval is not bound to an approved owner tool.");
+            }
+
+            var arguments = envelope.CanonicalArguments;
+            if (envelope.ToolName == "memory.propose_change")
+            {
+                var proposal = await memoryProposals.PreviewAsync(ownerId, action.Id, cancellationToken);
+                arguments = JsonSerializer.Serialize(new
+                {
+                    change = proposal.Command.Change,
+                    conflicts = proposal.Conflicts
+                });
+            }
+
+            summaries.Add(new(
+                approval,
+                action.Id,
+                envelope.ToolName,
+                envelope.ActionType,
+                envelope.Operation,
+                envelope.EntityId,
+                action.Status,
+                arguments));
+        }
+        return summaries;
+    }
+
+    /// <summary>Recovers bounded owner-bound Home Assistant actions that have no approval record.</summary>
+    /// <param name="ownerId">Authenticated owner whose recent actions may be reconciled.</param>
+    /// <param name="cancellationToken">Token that cancels recovery before a durable outcome is recorded.</param>
+    /// <returns>Safe per-action recovery issues; at most eight observation-only attempts are made.</returns>
+    public async ValueTask<IReadOnlyList<ActionRecoveryIssue>> RecoverUnapprovedExecutingActionsAsync(
+        string ownerId,
+        CancellationToken cancellationToken)
+    {
+        MemoryPolicy.ValidateOwner(ownerId);
+        var actions = await journal.ReadRecentForOwnerAsync(ownerId, 100, cancellationToken);
+        var recovered = 0;
+        var issues = new List<ActionRecoveryIssue>();
+        foreach (var action in actions)
+        {
+            if (recovered >= 8)
+            {
+                break;
+            }
+            if (action.Status != "Executing"
+                || action.MemoryInvalidated
+                || action.ActionType is not ("home.set_light" or "home.set_temperature"))
+            {
+                continue;
+            }
+
+            var approval = await approvalStore.GetAsync(new(action.Id.Value), cancellationToken);
+            if (approval is not null)
+            {
+                continue;
+            }
+
+            try
+            {
+                await RecoverExecutingActionAsync(ownerId, action, cancellationToken);
+                recovered++;
+            }
+            catch (InvalidDataException)
+            {
+                issues.Add(new(action.Id, "invalid_action_journal"));
+            }
+            catch (FormatException)
+            {
+                issues.Add(new(action.Id, "invalid_action_journal"));
+            }
+        }
+        return issues;
+    }
+
+    private async ValueTask<ActionJournalEntry> RecoverExecutingActionAsync(
+        string ownerId,
+        ActionJournalEntry action,
+        CancellationToken cancellationToken)
+    {
+        var envelope = ReadEnvelope(action);
+        if (!string.Equals(envelope.OwnerId, ownerId, StringComparison.Ordinal)
+            || envelope.ToolName is not ("home.set_light" or "home.set_temperature" or "memory.propose_change"))
+        {
+            throw new InvalidDataException("An executing approval is not bound to a recoverable owner action.");
+        }
+
+        var turnId = new TurnId(Guid.Parse(envelope.TurnId));
+        if (ToolDispatcher.CreateActionId(turnId, envelope.CallId) != action.Id
+            || !string.Equals(envelope.ActionType, action.ActionType, StringComparison.Ordinal))
+        {
+            throw new InvalidDataException("The action envelope identity does not match its journal entry.");
+        }
+
+        var attributedActions = await journal.ReadForTurnAsync(ownerId, turnId, cancellationToken);
+        if (!attributedActions.Any(attributed =>
+                attributed.Id == action.Id
+                && string.Equals(attributed.ActionType, action.ActionType, StringComparison.Ordinal)))
+        {
+            throw new InvalidDataException("The action envelope does not match its durable owner and turn attribution.");
+        }
+
+        var releaseTurn = false;
+        try
+        {
+            if (envelope.ToolName == "memory.propose_change")
+            {
+                await memoryProposals.CompleteAsync(ownerId, action.Id, cancellationToken);
+            }
+            else
+            {
+                var source = await memories.ReadSourceAsync(ownerId, turnId, cancellationToken);
+                if (source is null)
+                {
+                    action = await journal.UpdateStatusAsync(
+                        action.Id,
+                        "Unknown",
+                        action.Version,
+                        clock.UtcNow.ToUniversalTime(),
+                        cancellationToken,
+                        new("Unknown", null, "interrupted_execution_source_unavailable", action.Id,
+                            new ApprovalId(action.Id.Value)));
+                    releaseTurn = await memoryProposals.IsSourceTurnTerminalAsync(ownerId, turnId, cancellationToken);
+                }
+                else
+                {
+                    var result = await dispatcher.DispatchAsync(new(
+                        turnId,
+                        envelope.CallId,
+                        envelope.ToolName,
+                        envelope.CanonicalArguments,
+                        ownerId,
+                        source.Content)
+                    {
+                        ReplayCurrentRequestHash = envelope.CurrentRequestHash
+                    }, cancellationToken);
+                    if (result.Status == "Rejected"
+                        && result.ReasonCode is "unregistered_tool" or "home_operation_not_allowed")
+                    {
+                        action = await dispatcher.MarkUnavailableExecutingActionUnknownAsync(action, cancellationToken);
+                    }
+                }
+
+                action = await journal.GetAsync(action.Id, cancellationToken)
+                    ?? throw new InvalidDataException("The recovered action disappeared.");
+                releaseTurn = action.Status != "Executing"
+                    && await memoryProposals.IsSourceTurnTerminalAsync(ownerId, turnId, cancellationToken);
+            }
+        }
+        catch (PersistenceConcurrencyException)
+        {
+            action = await journal.GetAsync(action.Id, cancellationToken)
+                ?? throw new InvalidDataException("The recovered action disappeared during concurrent settlement.");
+            if (action.Status is not ("Succeeded" or "Failed" or "Unknown" or "Rejected" or "Expired"))
+            {
+                throw;
+            }
+
+            releaseTurn = await memoryProposals.IsSourceTurnTerminalAsync(ownerId, turnId, cancellationToken);
+        }
+        finally
+        {
+            if (releaseTurn)
+            {
+                dispatcher.ReleaseTurn(turnId);
+            }
+        }
+
+        action = await journal.GetAsync(action.Id, cancellationToken)
+            ?? throw new InvalidDataException("The recovered action disappeared.");
+        if (action.Status != "Executing")
+        {
+            dispatcher.ReleaseApproval(action.Id);
+        }
+        return action;
+    }
+
+    /// <summary>
+    /// Resolves an exact owner-bound approval or resumes its already-approved, unclaimed action and executes at most once.
+    /// </summary>
+    /// <param name="ownerId">Authenticated owner deciding the action.</param>
+    /// <param name="approvalId">Approval identifier from the trusted UI.</param>
+    /// <param name="expectedVersion">Version displayed to the owner.</param>
+    /// <param name="approved">True to approve, false to reject the exact action.</param>
+    /// <param name="cancellationToken">Token that cancels work before an external submission.</param>
+    /// <returns>The durable action outcome, including an explicit Unknown status when effects are uncertain.</returns>
+    public async ValueTask<ToolDispatchResult> ResolveAsync(
+        string ownerId,
+        ApprovalId approvalId,
+        long expectedVersion,
+        bool approved,
+        CancellationToken cancellationToken)
+    {
+        MemoryPolicy.ValidateOwner(ownerId);
+        var approval = await approvals.GetAsync(approvalId, cancellationToken)
+            ?? throw new KeyNotFoundException("The approval request is unavailable.");
+        if (!string.Equals(approval.OwnerId, ownerId, StringComparison.Ordinal))
+        {
+            throw new KeyNotFoundException("The approval request is unavailable.");
+        }
+
+        var action = await journal.GetAsync(approval.ActionId, cancellationToken)
+            ?? throw new PersistenceConcurrencyException("The approved action is unavailable.");
+        if (action.MemoryInvalidated)
+        {
+            if (!string.Equals(action.MemoryOwnerId, ownerId, StringComparison.Ordinal))
+            {
+                throw new KeyNotFoundException("The approval request is unavailable.");
+            }
+
+            dispatcher.ReleaseApproval(action.Id);
+            return new("Rejected", null, "memory_result_invalidated", action.Id, approvalId);
+        }
+
+        var envelope = ReadEnvelope(action);
+        if (!string.Equals(envelope.OwnerId, ownerId, StringComparison.Ordinal))
+        {
+            throw new KeyNotFoundException("The approval request is unavailable.");
+        }
+
+        if (envelope.ToolName == "memory.propose_change")
+        {
+            ToolDispatchResult memoryResult;
+            if (approval.Status == "Approved")
+            {
+                if (!approved || approval.ExpectedVersion != expectedVersion)
+                {
+                    throw new PersistenceConcurrencyException(
+                        "The approved action cannot be changed or its version has changed.");
+                }
+                if (action.Status != "AwaitingApproval")
+                {
+                    return action.Outcome
+                        ?? new(action.Status, null, "recorded_action_outcome", action.Id, approvalId);
+                }
+
+                memoryResult = await memoryProposals.CompleteAsync(ownerId, action.Id, cancellationToken);
+            }
+            else
+            {
+                memoryResult = await memoryProposals.ResolveAsync(
+                    ownerId, action.Id, expectedVersion, approved, cancellationToken);
+            }
+            if (memoryResult.Status != "AwaitingApproval")
+            {
+                dispatcher.ReleaseApproval(action.Id);
+            }
+            return memoryResult;
+        }
+
+        if (envelope.ToolName is not ("home.set_light" or "home.set_temperature"))
+        {
+            throw new InvalidDataException("The approval does not reference a supported owner action.");
+        }
+
+        var turnId = new TurnId(Guid.Parse(envelope.TurnId));
+        ConversationMessage? source = null;
+        ApprovalRequest resolved;
+        if (approval.Status == "Approved")
+        {
+            if (!approved || approval.ExpectedVersion != expectedVersion)
+            {
+                throw new PersistenceConcurrencyException(
+                    "The approved action cannot be changed or its version has changed.");
+            }
+            if (action.Status != "AwaitingApproval")
+            {
+                return action.Outcome ?? new(action.Status, null, "recorded_action_outcome", action.Id, approvalId);
+            }
+
+            resolved = approval;
+        }
+        else
+        {
+            source = await memories.ReadSourceAsync(ownerId, turnId, cancellationToken)
+                ?? throw new PersistenceConcurrencyException("The original owner request is unavailable.");
+            resolved = await approvals.ResolveAsync(
+                approvalId, ownerId, expectedVersion, approved, cancellationToken);
+        }
+        if (resolved.Status != "Approved")
+        {
+            dispatcher.ReleaseApproval(action.Id);
+            var settled = await journal.GetAsync(action.Id, cancellationToken)
+                ?? throw new InvalidDataException("The settled action disappeared.");
+            return settled.Outcome ?? new(settled.Status, null, $"approval_{resolved.Status.ToLowerInvariant()}",
+                settled.Id, approvalId, resolved.ExpiresAtUtc);
+        }
+
+        var approvedSource = source ?? await memories.ReadSourceAsync(ownerId, turnId, cancellationToken)
+            ?? throw new PersistenceConcurrencyException("The original owner request is unavailable.");
+        var request = new ToolDispatchRequest(
+            turnId,
+            envelope.CallId,
+            envelope.ToolName,
+            envelope.CanonicalArguments,
+            ownerId,
+            approvedSource.Content)
+        {
+            ReplayCurrentRequestHash = envelope.CurrentRequestHash
+        };
+        var result = await dispatcher.DispatchAsync(request, cancellationToken);
+        if (result.Status != "Executing"
+            && await memoryProposals.IsSourceTurnTerminalAsync(ownerId, turnId, cancellationToken))
+        {
+            dispatcher.ReleaseTurn(turnId);
+        }
+        return result;
+    }
+
+    /// <summary>Settles an already-approved Home Assistant action that expired before execution was claimed.</summary>
+    /// <param name="ownerId">Authenticated owner finalizing the exact action.</param>
+    /// <param name="approvalId">Approval identifier from the owner UI.</param>
+    /// <param name="expectedVersion">Approval version displayed to the owner.</param>
+    /// <param name="cancellationToken">Token that cancels persistence before the expiry transition commits.</param>
+    /// <returns>The durable expired action outcome; this operation never dispatches or executes the action.</returns>
+    public async ValueTask<ToolDispatchResult> ExpireApprovedUnclaimedAsync(
+        string ownerId,
+        ApprovalId approvalId,
+        long expectedVersion,
+        CancellationToken cancellationToken)
+    {
+        MemoryPolicy.ValidateOwner(ownerId);
+        var approval = await approvals.GetAsync(approvalId, cancellationToken)
+            ?? throw new KeyNotFoundException("The approval request is unavailable.");
+        if (!string.Equals(approval.OwnerId, ownerId, StringComparison.Ordinal))
+        {
+            throw new KeyNotFoundException("The approval request is unavailable.");
+        }
+        if (approval.Status != "Approved" || approval.ExpectedVersion != expectedVersion)
+        {
+            throw new PersistenceConcurrencyException("The approval is not the expected approved version.");
+        }
+
+        var action = await journal.GetAsync(approval.ActionId, cancellationToken)
+            ?? throw new PersistenceConcurrencyException("The approved action is unavailable.");
+        if (action.MemoryInvalidated)
+        {
+            dispatcher.ReleaseApproval(action.Id);
+            return new("Rejected", null, "memory_result_invalidated", action.Id, approvalId);
+        }
+
+        var envelope = ReadEnvelope(action);
+        var isHomeAction = envelope.ToolName is "home.set_light" or "home.set_temperature";
+        var isMemoryAction = envelope.ToolName == "memory.propose_change"
+            && action.ActionType == "memory.propose_change"
+            && string.Equals(action.MemoryOwnerId, ownerId, StringComparison.Ordinal);
+        if (!string.Equals(envelope.OwnerId, ownerId, StringComparison.Ordinal)
+            || !(isHomeAction || isMemoryAction))
+        {
+            throw new InvalidDataException("Only an owner-bound Home Assistant or memory action can be finalized as expired.");
+        }
+        if (action.Status != "AwaitingApproval")
+        {
+            return action.Outcome ?? new(action.Status, null, "recorded_action_outcome", action.Id, approvalId);
+        }
+        var nowUtc = clock.UtcNow.ToUniversalTime();
+        if (nowUtc < approval.ExpiresAtUtc)
+        {
+            throw new PersistenceConcurrencyException("The approved action has not expired.");
+        }
+
+        ActionJournalEntry settled;
+        try
+        {
+            settled = await journal.UpdateStatusAsync(
+                action.Id,
+                "Expired",
+                action.Version,
+                nowUtc,
+                cancellationToken,
+                new("Expired", null, "approval_expired_before_execution", action.Id, approvalId));
+        }
+        catch (PersistenceConcurrencyException)
+        {
+            settled = await journal.GetAsync(action.Id, cancellationToken)
+                ?? throw new PersistenceConcurrencyException("The approved action is unavailable.");
+            if (settled.Status == "AwaitingApproval")
+            {
+                throw;
+            }
+        }
+
+        if (settled.Status != "AwaitingApproval")
+        {
+            dispatcher.ReleaseApproval(action.Id);
+        }
+        return settled.Outcome ?? new(settled.Status, null, "recorded_action_outcome", action.Id, approvalId);
+    }
+
+    private static CanonicalActionEnvelope ReadEnvelope(ActionJournalEntry action)
+    {
+        try
+        {
+            var envelope = JsonSerializer.Deserialize<CanonicalActionEnvelope>(action.CanonicalArguments)
+                ?? throw new InvalidDataException("The action envelope is missing.");
+            if (envelope.FormatVersion != 1
+                || !Guid.TryParse(envelope.TurnId, out var turnId)
+                || turnId == Guid.Empty
+                || string.IsNullOrWhiteSpace(envelope.CallId)
+                || string.IsNullOrWhiteSpace(envelope.OwnerId)
+                || string.IsNullOrWhiteSpace(envelope.ToolName)
+                || string.IsNullOrWhiteSpace(envelope.ActionType)
+                || string.IsNullOrWhiteSpace(envelope.Operation)
+                || string.IsNullOrWhiteSpace(envelope.PolicyVersion)
+                || !Enum.IsDefined(envelope.RiskClass)
+                || string.IsNullOrWhiteSpace(envelope.CurrentRequestHash)
+                || string.IsNullOrWhiteSpace(envelope.CanonicalArguments))
+            {
+                throw new InvalidDataException("The action envelope is incomplete or invalid.");
+            }
+
+            return envelope;
+        }
+        catch (JsonException error)
+        {
+            throw new InvalidDataException("The action envelope is invalid.", error);
+        }
+    }
+
+    private sealed record CanonicalActionEnvelope(
+        int FormatVersion,
+        string TurnId,
+        string CallId,
+        string OwnerId,
+        string ToolName,
+        string ActionType,
+        string Operation,
+        string? EntityId,
+        string PolicyVersion,
+        ToolRiskClass RiskClass,
+        string CurrentRequestHash,
+        string CanonicalArguments);
+}

@@ -143,11 +143,80 @@ public sealed class ActionOutcomePersistenceTests
         await using var verify = await database.OpenConnectionAsync();
         await using var command = verify.CreateCommand();
         command.CommandText = "PRAGMA user_version;";
-        Assert.Equal(7L, (long)(await command.ExecuteScalarAsync())!);
+        Assert.Equal(8L, (long)(await command.ExecuteScalarAsync())!);
         command.CommandText = "SELECT content FROM messages;";
         Assert.Equal("preserved answer", (string?)await command.ExecuteScalarAsync());
         command.CommandText = "UPDATE actions SET outcome_json = '{\"Status\":\"Succeeded\"}';";
         await Assert.ThrowsAsync<SqliteException>(async () => await command.ExecuteNonQueryAsync());
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task VersionSevenUpgradeBackfillsDurableActionOwnerAndTurnAttribution()
+    {
+        using var file = IsolatedDatabaseFile.Create();
+        var actionId = new ActionId(Guid.NewGuid());
+        var malformedActionId = new ActionId(Guid.NewGuid());
+        var turnId = TurnId.New();
+        await using (var connection = new SqliteConnection($"Data Source={file.Path}"))
+        {
+            await connection.OpenAsync();
+            var assembly = typeof(SqliteDatabase).Assembly;
+            foreach (var name in assembly.GetManifestResourceNames()
+                .Where(name => name.Contains(".Persistence.Migrations.", StringComparison.Ordinal))
+                .Order(StringComparer.Ordinal).Take(7))
+            {
+                using var resource = assembly.GetManifestResourceStream(name)!;
+                using var reader = new StreamReader(resource);
+                await using var migration = connection.CreateCommand();
+                migration.CommandText = await reader.ReadToEndAsync();
+                await migration.ExecuteNonQueryAsync();
+            }
+
+            await using var insert = connection.CreateCommand();
+            insert.CommandText = """
+                PRAGMA user_version = 7;
+                INSERT INTO actions(id,action_type,canonical_arguments,request_hash,status,created_at_utc,updated_at_utc,version)
+                VALUES ($id,'home.set_light',$arguments,'hash','Unknown',$now,$now,1);
+                INSERT INTO actions(id,action_type,canonical_arguments,request_hash,status,created_at_utc,updated_at_utc,version)
+                VALUES ($malformedId,'home.set_light',$malformedArguments,'malformed-hash','Unknown',$now,$now,1);
+                """;
+            insert.Parameters.AddWithValue("$id", actionId.Value.ToString("D"));
+            insert.Parameters.AddWithValue("$arguments", $$"""{"OwnerId":"owner","TurnId":"{{turnId.Value:D}}"}""");
+            insert.Parameters.AddWithValue("$malformedId", malformedActionId.Value.ToString("D"));
+            insert.Parameters.AddWithValue("$malformedArguments", """{"OwnerId":"owner","TurnId":"not-a-turn"}""");
+            insert.Parameters.AddWithValue("$now", Now.ToString("O"));
+            await insert.ExecuteNonQueryAsync();
+        }
+
+        var database = new SqliteDatabase(file.Path);
+        await database.InitializeAsync();
+        var journal = new SqliteActionJournalStore(database);
+        await using (var connection = await database.OpenConnectionAsync())
+        await using (var command = connection.CreateCommand())
+        {
+            command.CommandText = """
+                SELECT action_owner_id, action_turn_id
+                FROM actions WHERE id = $id;
+                """;
+            command.Parameters.AddWithValue("$id", actionId.Value.ToString("D"));
+            await using (var reader = await command.ExecuteReaderAsync())
+            {
+                Assert.True(await reader.ReadAsync());
+                Assert.Equal("owner", reader.GetString(0));
+                Assert.Equal(turnId.Value.ToString("D"), reader.GetString(1));
+            }
+            command.Parameters.Clear();
+            command.Parameters.AddWithValue("$id", malformedActionId.Value.ToString("D"));
+            await using (var reader = await command.ExecuteReaderAsync())
+            {
+                Assert.True(await reader.ReadAsync());
+                Assert.True(await reader.IsDBNullAsync(0));
+                Assert.True(await reader.IsDBNullAsync(1));
+            }
+        }
+        await Assert.ThrowsAsync<InvalidDataException>(async () =>
+            await journal.ReadForTurnAsync("owner", turnId, CancellationToken.None));
     }
 
     private static ActionJournalEntry Prepared() =>

@@ -647,14 +647,26 @@ public interface IToolDispatcher
 {
     /// <summary>Releases ephemeral equivalent-failure accounting after all callbacks for a turn have stopped.</summary>
     /// <param name="turnId">Completed or interrupted host turn whose callbacks can no longer dispatch.</param>
-    /// <remarks>Does not delete durable actions or permit replay of an existing action identity.</remarks>
+    /// <remarks>Accounting is retained while owner approvals from the turn remain actionable. Does not delete durable actions or permit replay of an existing action identity.</remarks>
     void ReleaseTurn(TurnId turnId);
+
+    /// <summary>Releases the failure-budget hold for an approval after its decision is settled.</summary>
+    /// <param name="actionId">The durable action associated with the settled approval.</param>
+    void ReleaseApproval(ActionId actionId);
 
     /// <summary>Dispatches one untrusted proposal through host-side policy checks.</summary>
     /// <param name="request">Model-proposed call; its arguments are never trusted as authorization.</param>
     /// <param name="cancellationToken">Token that cancels work before an external side effect is sent.</param>
     /// <returns>A truthful result; ambiguous physical outcomes are reported as Unknown.</returns>
     ValueTask<ToolDispatchResult> DispatchAsync(ToolDispatchRequest request, CancellationToken cancellationToken);
+
+    /// <summary>Records Unknown when an interrupted action cannot be safely observed with current capabilities.</summary>
+    /// <param name="action">Owner-validated action still marked Executing.</param>
+    /// <param name="cancellationToken">Token that cancels persistence before the outcome is committed.</param>
+    /// <returns>The durable action, preserving concurrent execution and terminal outcomes.</returns>
+    ValueTask<ActionJournalEntry> MarkUnavailableExecutingActionUnknownAsync(
+        ActionJournalEntry action,
+        CancellationToken cancellationToken);
 }
 
 /// <summary>Describes an exact-action approval request.</summary>
@@ -708,6 +720,34 @@ public interface IApprovalService
         string ownerId,
         long expectedVersion,
         bool approved,
+        CancellationToken cancellationToken);
+
+    /// <summary>Repairs action settlement for an approval already recorded as expired.</summary>
+    /// <param name="approvalId">Persisted expired approval request.</param>
+    /// <param name="ownerId">Authenticated owner bound to the approval.</param>
+    /// <param name="expectedVersion">Approval version read by the owner workflow.</param>
+    /// <param name="cancellationToken">Token that cancels settlement before commit.</param>
+    /// <returns>The current durable action; an already terminal or executing action is not overwritten.</returns>
+    /// <remarks>Approval and action records are stored separately. This idempotent operation recovers an expired
+    /// approval whose process stopped after the approval decision committed but before its action was settled.</remarks>
+    ValueTask<ActionJournalEntry> SettleExpiredAsync(
+        ApprovalId approvalId,
+        string ownerId,
+        long expectedVersion,
+        CancellationToken cancellationToken);
+
+    /// <summary>Repairs action settlement for an approval already recorded as rejected.</summary>
+    /// <param name="approvalId">Persisted rejected approval request.</param>
+    /// <param name="ownerId">Authenticated owner bound to the approval.</param>
+    /// <param name="expectedVersion">Approval version read by the owner workflow.</param>
+    /// <param name="cancellationToken">Token that cancels settlement before commit.</param>
+    /// <returns>The current durable action; an already terminal or executing action is not overwritten.</returns>
+    /// <remarks>Approval and action records are stored separately. This idempotent operation repairs a rejected
+    /// approval whose process stopped before its action was settled.</remarks>
+    ValueTask<ActionJournalEntry> SettleRejectedAsync(
+        ApprovalId approvalId,
+        string ownerId,
+        long expectedVersion,
         CancellationToken cancellationToken);
 }
 
@@ -1091,6 +1131,11 @@ public sealed record ActionJournalEntry(
     public string? MemoryOwnerId { get; init; }
 }
 
+/// <summary>Describes a safely reported failure to recover an owner-bound action.</summary>
+/// <param name="ActionId">Action whose durable recovery data could not be interpreted.</param>
+/// <param name="ReasonCode">Stable non-sensitive reason code suitable for owner-facing status.</param>
+public sealed record ActionRecoveryIssue(ActionId ActionId, string ReasonCode);
+
 /// <summary>Persists action intent and observed outcomes before and after external side effects.</summary>
 public interface IActionJournalStore
 {
@@ -1105,6 +1150,26 @@ public interface IActionJournalStore
     /// <param name="cancellationToken">Token that cancels the read.</param>
     /// <returns>The entry, or <see langword="null"/> when absent.</returns>
     ValueTask<ActionJournalEntry?> GetAsync(ActionId id, CancellationToken cancellationToken);
+
+    /// <summary>Reads a bounded page of recent actions bound to one authenticated owner.</summary>
+    /// <param name="ownerId">Authenticated owner identity used to filter canonical action envelopes.</param>
+    /// <param name="maximumActions">Maximum number of entries, from 1 through 100.</param>
+    /// <param name="cancellationToken">Token that cancels the read.</param>
+    /// <returns>Most recently updated owner-bound actions.</returns>
+    ValueTask<IReadOnlyList<ActionJournalEntry>> ReadRecentForOwnerAsync(
+        string ownerId,
+        int maximumActions,
+        CancellationToken cancellationToken);
+
+    /// <summary>Reads every action for one authenticated owner and turn.</summary>
+    /// <param name="ownerId">Authenticated owner identity used to filter canonical action envelopes.</param>
+    /// <param name="turnId">Turn whose bounded action history is required.</param>
+    /// <param name="cancellationToken">Token that cancels the read.</param>
+    /// <returns>All owner-bound actions in the turn; the coordinator limits a turn to eight tool calls.</returns>
+    ValueTask<IReadOnlyList<ActionJournalEntry>> ReadForTurnAsync(
+        string ownerId,
+        TurnId turnId,
+        CancellationToken cancellationToken);
 
     /// <summary>Compare-and-swaps action status and its optional complete response atomically, without external execution.</summary>
     /// <param name="id">Action identifier.</param>
@@ -1159,6 +1224,16 @@ public interface IApprovalStore
     /// <returns>The request, or <see langword="null"/> when absent.</returns>
     ValueTask<ApprovalStorageRecord?> GetAsync(ApprovalId id, CancellationToken cancellationToken);
 
+    /// <summary>Reads a bounded page of approval requests for one authenticated owner.</summary>
+    /// <param name="ownerId">Owner identity used to filter the request.</param>
+    /// <param name="maximumRequests">Maximum number of records, from 1 through 100.</param>
+    /// <param name="cancellationToken">Token that cancels the read.</param>
+    /// <returns>Most recently created owner-bound requests.</returns>
+    ValueTask<IReadOnlyList<ApprovalStorageRecord>> ReadRecentForOwnerAsync(
+        string ownerId,
+        int maximumRequests,
+        CancellationToken cancellationToken);
+
     /// <summary>Resolves a still-pending, unexpired request once using owner and version checks.</summary>
     /// <param name="id">Approval identifier.</param>
     /// <param name="ownerId">Owner identity bound to the request.</param>
@@ -1203,6 +1278,16 @@ public interface IAuditStore
     /// <param name="cancellationToken">Token that cancels the read.</param>
     /// <returns>Audit events in occurrence order.</returns>
     ValueTask<IReadOnlyList<AuditEventRecord>> ReadSinceAsync(
+        DateTimeOffset fromUtc,
+        int maximumEvents,
+        CancellationToken cancellationToken);
+
+    /// <summary>Reads the newest bounded page of owner-visible action and approval events.</summary>
+    /// <param name="fromUtc">Inclusive UTC lower bound.</param>
+    /// <param name="maximumEvents">Maximum results, from 1 through 1000.</param>
+    /// <param name="cancellationToken">Token that cancels the read.</param>
+    /// <returns>Matching events newest first; unrelated event types do not consume the page limit.</returns>
+    ValueTask<IReadOnlyList<AuditEventRecord>> ReadRecentActivityAsync(
         DateTimeOffset fromUtc,
         int maximumEvents,
         CancellationToken cancellationToken);

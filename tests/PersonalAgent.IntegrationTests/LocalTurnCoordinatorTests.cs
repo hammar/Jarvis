@@ -3,6 +3,7 @@ using System.Text.Json;
 using PersonalAgent.Application;
 using PersonalAgent.Application.Context;
 using PersonalAgent.Application.Routing;
+using PersonalAgent.Application.Tools;
 using PersonalAgent.Application.TurnCoordination;
 using PersonalAgent.Domain;
 using PersonalAgent.Infrastructure.Persistence;
@@ -473,6 +474,7 @@ public sealed class LocalTurnCoordinatorTests
             new LocalOnlyModelRouter(),
             new ConversationContextBuilder(store),
             engine,
+            new ToolRegistry(Array.Empty<IToolRegistration>()),
             clock,
             new LocalTurnCoordinatorOptions(
                 TimeSpan.FromSeconds(120),

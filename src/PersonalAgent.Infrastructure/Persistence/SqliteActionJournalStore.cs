@@ -38,14 +38,19 @@ public sealed class SqliteActionJournalStore : IActionJournalStore
         await using var transaction = await SqliteDatabase.BeginImmediateTransactionAsync(connection, cancellationToken);
         await using var command = connection.CreateCommand();
         command.Transaction = transaction;
+        var ownership = ReadActionOwnership(entry.CanonicalArguments);
         command.CommandText = """
             INSERT INTO actions
-                (id, action_type, canonical_arguments, request_hash, status, created_at_utc, updated_at_utc, version, memory_owner_id)
-            VALUES ($id, $type, $arguments, $hash, $status, $created, $updated, 1, $memoryOwner)
+                (id, action_type, canonical_arguments, request_hash, status, created_at_utc, updated_at_utc, version,
+                 memory_owner_id, action_owner_id, action_turn_id)
+            VALUES ($id, $type, $arguments, $hash, $status, $created, $updated, 1,
+                 $memoryOwner, $actionOwner, $actionTurn)
             ON CONFLICT(id) DO NOTHING;
             """;
         var memoryOwner = SqliteMemoryDependencies.ReadOwner(entry);
         command.Parameters.AddWithValue("$memoryOwner", (object?)memoryOwner ?? DBNull.Value);
+        command.Parameters.AddWithValue("$actionOwner", (object?)ownership?.OwnerId ?? DBNull.Value);
+        command.Parameters.AddWithValue("$actionTurn", (object?)ownership?.TurnId ?? DBNull.Value);
         command.Parameters.AddWithValue("$id", SqliteValue.Guid(entry.Id.Value));
         command.Parameters.AddWithValue("$type", entry.ActionType);
         command.Parameters.AddWithValue("$arguments", entry.CanonicalArguments);
@@ -92,6 +97,130 @@ public sealed class SqliteActionJournalStore : IActionJournalStore
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         return await reader.ReadAsync(cancellationToken) ? ReadEntry(reader) : null;
     }
+
+    /// <inheritdoc />
+    public async ValueTask<IReadOnlyList<ActionJournalEntry>> ReadRecentForOwnerAsync(
+        string ownerId, int maximumActions, CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(ownerId);
+        if (ownerId.Length > 128)
+        {
+            throw new ArgumentOutOfRangeException(nameof(ownerId));
+        }
+        if (maximumActions is < 1 or > 100)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maximumActions));
+        }
+
+        await using var connection = await database.OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT id, action_type, canonical_arguments, request_hash, status,
+                   created_at_utc, updated_at_utc, version, outcome_json, memory_invalidated, memory_owner_id
+            FROM actions
+            WHERE action_owner_id = $owner OR memory_owner_id = $owner
+            ORDER BY CASE WHEN status IN ('Prepared', 'AwaitingApproval', 'Executing')
+                          THEN 0
+                          WHEN status = 'Unknown' THEN 1 ELSE 2 END,
+                     updated_at_utc DESC, id
+            LIMIT $limit;
+            """;
+        command.Parameters.AddWithValue("$owner", ownerId);
+        command.Parameters.AddWithValue("$limit", maximumActions);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        var entries = new List<ActionJournalEntry>();
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            entries.Add(ReadEntry(reader));
+        }
+        return entries;
+    }
+
+    /// <inheritdoc />
+    public async ValueTask<IReadOnlyList<ActionJournalEntry>> ReadForTurnAsync(
+        string ownerId, TurnId turnId, CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(ownerId);
+        if (ownerId.Length > 128)
+        {
+            throw new ArgumentOutOfRangeException(nameof(ownerId));
+        }
+
+        await using var connection = await database.OpenConnectionAsync(cancellationToken);
+        await using (var integrityCheck = connection.CreateCommand())
+        {
+            integrityCheck.CommandText = """
+                SELECT EXISTS (
+                    SELECT 1 FROM actions
+                    WHERE status IN ('Unknown', 'Executing')
+                      AND memory_invalidated = 0
+                      AND (action_owner_id IS NULL OR action_turn_id IS NULL)
+                );
+                """;
+            if (Convert.ToInt32(await integrityCheck.ExecuteScalarAsync(cancellationToken)) != 0)
+            {
+                throw new InvalidDataException(
+                    "An unresolved action has no durable owner and turn attribution; refusing action dispatch.");
+            }
+        }
+
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT id, action_type, canonical_arguments, request_hash, status,
+                   created_at_utc, updated_at_utc, version, outcome_json, memory_invalidated, memory_owner_id
+            FROM actions
+            WHERE action_owner_id = $owner AND action_turn_id = $turn
+            ORDER BY created_at_utc, id
+            LIMIT 9;
+            """;
+        command.Parameters.AddWithValue("$owner", ownerId);
+        command.Parameters.AddWithValue("$turn", turnId.Value.ToString("D"));
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        var entries = new List<ActionJournalEntry>();
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            entries.Add(ReadEntry(reader));
+        }
+        if (entries.Count > 8)
+        {
+            throw new InvalidDataException("The action journal exceeds the configured per-turn tool-call limit.");
+        }
+
+        return entries;
+    }
+
+    private static ActionOwnership? ReadActionOwnership(string json)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object
+                || !root.TryGetProperty("OwnerId", out var ownerElement)
+                || ownerElement.ValueKind != JsonValueKind.String
+                || !root.TryGetProperty("TurnId", out var turnElement)
+                || turnElement.ValueKind != JsonValueKind.String)
+            {
+                return null;
+            }
+
+            var owner = ownerElement.GetString();
+            var turn = turnElement.GetString();
+            if (string.IsNullOrWhiteSpace(owner) || owner.Length > 128
+                || !Guid.TryParseExact(turn, "D", out var turnId))
+            {
+                return null;
+            }
+
+            return new(owner, turnId.ToString("D"));
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private sealed record ActionOwnership(string OwnerId, string TurnId);
 
     /// <inheritdoc />
     public async ValueTask<ActionJournalEntry> UpdateStatusAsync(
