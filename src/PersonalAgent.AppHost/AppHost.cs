@@ -8,6 +8,12 @@ if (profile is not ("Simulator" or "Local" or "Hybrid" or "E2E"))
     throw new InvalidOperationException("JARVIS_PROFILE must be Simulator, Local, Hybrid, or E2E.");
 }
 
+var simulatedHome = builder.Configuration.GetValue<bool>("JARVIS_LOCAL_SIMULATED_HOME");
+if (simulatedHome && profile != "Local")
+{
+    throw new InvalidOperationException("JARVIS_LOCAL_SIMULATED_HOME is only permitted with the Local profile.");
+}
+
 var dataDirectory = ResolveDataDirectory(profile, builder.Configuration);
 var web = builder.AddProject<Projects.PersonalAgent_Web>("personalagent-web", launchProfileName: null)
     .WithHttpEndpoint()
@@ -83,7 +89,41 @@ else
             .WithEnvironment("JARVIS_CLOUD_SECRET_REFERENCE", cloudSecretReference);
     }
 
-    var homeAssistantEndpoint = builder.Configuration["JARVIS_HOME_ASSISTANT_BASE_URL"];
+    if (simulatedHome)
+    {
+        var home = builder.AddProject<Projects.PersonalAgent_SimulatorEndpoints>(
+                "simulator-home-assistant", launchProfileName: null)
+            .WithHttpEndpoint()
+            .WithEnvironment("JARVIS_SIMULATOR_KIND", "home-assistant")
+            .WithEnvironment("JARVIS_SIMULATOR_CONTROLS_ENABLED", "false")
+            .WithHttpHealthCheck("/health/ready");
+        web.WithReference(home)
+            .WaitFor(home)
+            .WithEnvironment("JARVIS_HOME_ASSISTANT_BASE_URL", home.GetEndpoint("http"))
+            .WithEnvironment("JARVIS_HOME_ASSISTANT_SECRET_REFERENCE", "JARVIS_SIMULATOR_HOME_TOKEN")
+            .WithEnvironment("JARVIS_SIMULATOR_HOME_TOKEN", "synthetic-home-token")
+            .WithEnvironment("JARVIS_HOME_THERMOSTAT_ENABLED", "false")
+            .WithEnvironment("JARVIS_HOME_AUTOMATIC_LIGHTS_ENABLED", "false")
+            .WithEnvironment("JARVIS_HOME_ENTITY_CATALOG", """
+                [
+                  {"EntityId":"light.simulator_lamp","FriendlyName":"simulator lamp","Area":"Study","Unit":null,"Aliases":["lamp"],"AllowWrite":true},
+                  {"EntityId":"sensor.temperature","FriendlyName":"simulated temperature sensor","Area":"Hall","Unit":"C","Aliases":["temperature"],"AllowWrite":false}
+                ]
+                """);
+    }
+    else
+    {
+        ConfigureExternalHome(web, builder.Configuration);
+    }
+}
+
+builder.Build().Run();
+
+static void ConfigureExternalHome(
+    IResourceBuilder<ProjectResource> web,
+    IConfiguration configuration)
+{
+    var homeAssistantEndpoint = configuration["JARVIS_HOME_ASSISTANT_BASE_URL"];
     if (!string.IsNullOrWhiteSpace(homeAssistantEndpoint))
     {
         web.WithEnvironment(
@@ -91,7 +131,7 @@ else
             ValidateEndpoint("JARVIS_HOME_ASSISTANT_BASE_URL", homeAssistantEndpoint));
     }
 
-    var homeAssistantSecretReference = builder.Configuration["JARVIS_HOME_ASSISTANT_SECRET_REFERENCE"];
+    var homeAssistantSecretReference = configuration["JARVIS_HOME_ASSISTANT_SECRET_REFERENCE"];
     if (!string.IsNullOrWhiteSpace(homeAssistantSecretReference))
     {
         web.WithEnvironment("JARVIS_HOME_ASSISTANT_SECRET_REFERENCE", homeAssistantSecretReference);
@@ -103,17 +143,30 @@ else
         "JARVIS_HOME_VERIFICATION_SECONDS", "JARVIS_HOME_POLL_MILLISECONDS"
     })
     {
-        if (builder.Configuration[setting] is { } value)
+        if (configuration[setting] is { } value)
         {
             web.WithEnvironment(setting, value);
         }
     }
 }
 
-builder.Build().Run();
-
 static string ResolveDataDirectory(string profile, IConfiguration configuration)
 {
+    if (profile == "Local" && configuration.GetValue<bool>("JARVIS_LOCAL_SIMULATED_HOME"))
+    {
+        if (!string.IsNullOrWhiteSpace(configuration["JARVIS_DATA_DIR"]))
+        {
+            throw new InvalidOperationException(
+                "The simulated-home demo uses JARVIS_LOCAL_DEMO_DATA_DIR, not JARVIS_DATA_DIR, to avoid reusing live data.");
+        }
+        var demoDirectory = configuration["JARVIS_LOCAL_DEMO_DATA_DIR"];
+        return string.IsNullOrWhiteSpace(demoDirectory)
+            ? Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "PersonalAgent", "ollama-simulated-home-demo")
+            : Path.GetFullPath(demoDirectory);
+    }
+
     if (profile == "E2E")
     {
         var e2eDirectory = configuration["JARVIS_E2E_DATA_DIR"];
