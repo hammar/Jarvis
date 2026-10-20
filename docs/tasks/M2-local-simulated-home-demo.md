@@ -45,5 +45,41 @@ review dispositions below before reporting readiness.
 
 ## Evidence and review ledger
 
-Implementation and validation in progress. No acceptance or live inference
-claim is made by this record yet.
+Implementation/review revision: `bc585adc699a51be571d880a1c06838af72be271`,
+based on current `origin/main` at `633b246`. Native macOS, pinned .NET SDK
+10.0.401. No schema, SDK, dependency or application contract changes.
+
+| Shared command | Executed result |
+| --- | --- |
+| `tools/validate.sh build` | Passed, zero warnings/errors, formatting/analyzers included. |
+| `tools/validate.sh architecture` | Passed 6/6. |
+| `tools/validate.sh unit` | Passed 361/361 with coverage/discovery. |
+| `tools/validate.sh integration` | Passed 482/482 with coverage/discovery. |
+| `tools/validate.sh sdk-contracts` | Actual-runtime harness passed; 57/57 contract tests passed. |
+| `tools/validate.sh coverage` | Passed all configured thresholds and gate self-tests. Changed coverable lines N/A: AppHost is outside instrumented runtime coverage; new orchestration has distributed acceptance coverage, not claimed line coverage. |
+| `tools/validate.sh aspire-e2e` | Passed 20/20, including five new Local demo cases. |
+| `tools/validate.sh browser-e2e` | Passed 36/36; the separate deliberate failure probe failed 1/1 as expected and its rejection was verified. |
+| `tools/validate.sh docs` | Passed all internal links. |
+
+Five new cases were also executed in a focused run before the full gates.
+The positive distributed case covers actual Copilot runtime inference/tool
+dispatch through an external controlled model, the managed sensor, lamp
+approval-before-write, restricted catalog, disabled controls, startup/shutdown,
+and preservation of the isolated account/database. Existing profile tests
+continue to cover ordinary Local/Hybrid and Simulator/E2E.
+Logs/reports are local ignored artifacts; do not commit private application
+data or bootstrap tokens.
+
+Independent read-only code-review agent examined the exact implementation
+revision against the brief, specification, composition, profile restrictions,
+HA wiring, data isolation, approvals, tests and documentation. No significant
+findings were reported; the cumulative follow-up finding ledger is empty.
+This evidence does not replace owner acceptance or authorize merging.
+
+Limitations: Linux checks remain CI evidence, not locally executed. These
+required tests use a controlled external model, not live Ollama. Earlier ad hoc
+demo setup verified a direct native model response and host availability, not
+an end-to-end live tool-quality evaluation of this committed configuration.
+No live HA, cloud, physical effects or live-model quality claim is made.
+Native runtime dependency trust remains as accepted in ADR 0001. This follow-up
+does not waive any required CI gate. The interactive demo remains stopped.
