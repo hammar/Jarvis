@@ -586,6 +586,8 @@ exact-commit review remain pending.
 | M2-04-R46 | Medium | An expired Pending approval whose action had already been Rejected was sent through approval expiry settlement, which requires `AwaitingApproval`; the concurrency catch then rethrew while the approval remained Pending, making the whole owner list unavailable. | Expiry settlement is now limited to actions still `AwaitingApproval`. `ChangedProposalWhileApprovalIsPendingInvalidatesTheAction` now reads the owner list after the approval expires and verifies the terminal action remains visible without breaking the list. |
 | M2-04-R47 | Medium | Household recovery compared the pre-dispatch immutable `Executing` snapshot after dispatch, so terminal recovery could skip `ReleaseTurn` and retain a restarted dispatcher’s failure budget. | Re-read the durable action after dispatch before releasing the turn. `ApprovalListRecoversInterruptedApprovedHomeActionByObservationOnly` now verifies the terminal recovery leaves no failure budget. |
 | M2-04-R48 | Medium | Resuming an approved household or memory action after restart allocated a new turn budget without releasing it after terminal completion; cleanup must still preserve active dispatches and sibling approval holds. | Release the household turn after terminal dispatch and release memory-completion turns in `MemoryProposalService`; existing dispatch-lease and pending-approval holds remain authoritative. Restart-resume tests cover both action types, and sibling-approval regressions verify equivalent-write uncertainty remains protected. |
+| M2-04-R49 | High | Recovery did not verify that a valid envelope's turn/call identity derived the journaled action ID, that its action type matched the journal, or that its owner/turn matched durable attribution. A tampered envelope could dispatch under a fresh action identity and resubmit a physical write. | Recovery now checks the derived action ID and action type, then requires the action to appear in the journal's owner/turn-attributed history before memory settlement or dispatcher recovery. The `MismatchedValidExecutingActionEnvelopeReportsIssueWithoutResending` theory covers changed turn, call, and action type; `DurableOwnerTurnAttributionMismatchFailsRecoveryClosed` covers inconsistent stored attribution. Focused tests passed 4/4 integration and 16/16 unit tests; the complete validation now passes with R50. |
+| M2-04-R50 | Medium | Reading an expired pending approval whose action was already Rejected left its approval hold in the dispatcher's turn budget. If the turn was released first, `approvalBudgets` and `failureBudgets` retained the budget until restart. | `ReadRecentAsync` now releases approval holds only for definitive terminal outcomes (`Succeeded`, `Failed`, `Rejected`, or `Expired`), preserving uncertainty holds such as `Unknown` and any sibling approvals. `ChangedProposalWhileApprovalIsPendingInvalidatesTheAction` verifies the released turn's failure budget is cleaned up; focused regression passed 1/1 and the full integration suite passed 482/482. |
 
 Before the final run, the R44–R45 focused integration regressions passed 2/2
 and the R44 malformed-envelope unit cases passed 5/5. The refreshed full
@@ -622,3 +624,38 @@ revision. The existing R46–R48 review threads still need replies and
 resolution after the validated change is pushed. Linux CI, live Home
 Assistant/provider availability, physical-effect causality, human
 observations, and assistive-technology certification remain unexercised.
+
+### R49–R50 validation follow-up
+
+R49–R50 were validated on native macOS with .NET SDK `10.0.401` and isolated
+Simulator/SQLite data, without live Home Assistant credentials, private
+household data, cloud inference, or physical-device writes. The two memory
+browser scenarios that intermittently timed out before reaching the Memory
+navigation button now use the same direct sign-in flow as the passing
+browser scenarios; the affected three memory browser tests passed together.
+
+| Command | Result |
+| --- | --- |
+| `tools/validate.sh build` | Passed; Release build, formatting/analyzers, zero warnings/errors. |
+| `tools/validate.sh architecture` | Passed; 6/6 discovered tests. |
+| `tools/validate.sh unit` | Passed; 361/361 discovered tests. |
+| `tools/validate.sh integration` | Passed; 482/482 discovered tests. |
+| `tools/validate.sh sdk-contracts` | Passed; actual pinned-runtime probes and 57/57 contract tests. |
+| `tools/validate.sh coverage` | Passed; changed executable lines 96.6% (1076/1114); Application 98.3% lines / 93.8% branches; all configured thresholds met. |
+| `tools/validate.sh aspire-e2e` | Passed; 15/15 out-of-process scenarios. |
+| `tools/validate.sh browser-e2e` | Passed; 36/36 Playwright scenarios and the deliberately failing browser probe was discovered and failed as expected. |
+| `tools/validate.sh docs` | Passed; all internal Markdown links resolve. |
+| `git diff --check` | Passed. |
+
+An earlier local integration invocation failed because `Web.deps.json` was
+temporarily unavailable to the test host; rerunning the repository's
+`tools/validate.sh integration` completed successfully, and the subsequent
+full gate run also passed integration. An earlier browser run failed two
+memory tests at the pre-navigation sign-in boundary; after normalizing those
+tests to the direct sign-in flow, all browser scenarios passed. GitHub CI on
+the previous committed revision `ae650f4` still records its browser failure;
+CI on the new pushed revision is required. An exact-commit independent
+review, review-thread resolution, and current GitHub checks remain pending.
+Linux CI, live Home Assistant/provider availability, physical-effect
+causality, human observations, and assistive-technology certification remain
+unexercised.

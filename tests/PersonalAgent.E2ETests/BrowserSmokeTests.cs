@@ -2315,14 +2315,9 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
                 new BrowserTypeLaunchOptions { Headless = true });
             var page = await browser.NewPageAsync();
             await page.GotoAsync(isolated.WebClient.BaseAddress!.ToString());
-            await page.WaitForFunctionAsync(
-                "() => !document.getElementById('auth').hidden || !document.getElementById('chat').hidden");
-            if (!await page.Locator("#auth").IsHiddenAsync())
-            {
-                await page.GetByLabel("Passphrase").FillAsync(SimulatorHostFixture.OwnerPassphrase);
-                await page.Locator("#auth-submit").ClickAsync();
-                await page.WaitForFunctionAsync("() => !authenticationInFlight && !document.getElementById('chat').hidden");
-            }
+            await page.GetByLabel("Passphrase").FillAsync(SimulatorHostFixture.OwnerPassphrase);
+            await page.Locator("#auth-submit").ClickAsync();
+            await page.WaitForFunctionAsync("() => !authenticationInFlight && !document.getElementById('chat').hidden");
 
             await page.GetByRole(AriaRole.Button, new PageGetByRoleOptions { Name = "Memory" }).ClickAsync();
             await page.GetByLabel("Subject").FillAsync("typed room");
@@ -2403,15 +2398,10 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
                 new BrowserTypeLaunchOptions { Headless = true });
             var page = await browser.NewPageAsync();
             await page.GotoAsync(isolated.WebClient.BaseAddress!.ToString());
+            await page.GetByLabel("Passphrase").FillAsync(SimulatorHostFixture.OwnerPassphrase);
+            await page.Locator("#auth-submit").ClickAsync();
             await page.WaitForFunctionAsync(
-                "() => !document.getElementById('auth').hidden || !document.getElementById('chat').hidden");
-            if (!await page.Locator("#auth").IsHiddenAsync())
-            {
-                await page.GetByLabel("Passphrase").FillAsync(SimulatorHostFixture.OwnerPassphrase);
-                await page.Locator("#auth-submit").ClickAsync();
-                await page.WaitForFunctionAsync(
-                    "() => !authenticationInFlight && !document.getElementById('chat').hidden");
-            }
+                "() => !authenticationInFlight && !document.getElementById('chat').hidden");
 
             async Task<Guid> CreateConversationAsync(string title) =>
                 await page.EvaluateAsync<Guid>(
@@ -2513,15 +2503,10 @@ public sealed class BrowserSmokeTests(SimulatorHostFixture fixture)
                 new BrowserTypeLaunchOptions { Headless = true });
             var page = await browser.NewPageAsync();
             await page.GotoAsync(isolated.WebClient.BaseAddress!.ToString());
+            await page.GetByLabel("Passphrase").FillAsync(SimulatorHostFixture.OwnerPassphrase);
+            await page.Locator("#auth-submit").ClickAsync();
             await page.WaitForFunctionAsync(
-                "() => !document.getElementById('auth').hidden || !document.getElementById('chat').hidden");
-            if (!await page.Locator("#auth").IsHiddenAsync())
-            {
-                await page.GetByLabel("Passphrase").FillAsync(SimulatorHostFixture.OwnerPassphrase);
-                await page.Locator("#auth-submit").ClickAsync();
-                await page.WaitForFunctionAsync(
-                    "() => !authenticationInFlight && !document.getElementById('chat').hidden");
-            }
+                "() => !authenticationInFlight && !document.getElementById('chat').hidden");
 
             await page.GetByRole(AriaRole.Button, new PageGetByRoleOptions { Name = "Memory" }).ClickAsync();
             await page.GetByLabel("Subject").FillAsync("draft room");

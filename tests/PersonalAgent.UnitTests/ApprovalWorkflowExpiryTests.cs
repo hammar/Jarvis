@@ -380,9 +380,11 @@ public sealed class ApprovalWorkflowExpiryTests
             DateTimeOffset? expiry = null,
             string? memoryOwner = null)
         {
-            var actionId = new ActionId(Guid.NewGuid());
+            var turnId = new TurnId(Guid.NewGuid());
+            const string callId = "call";
+            var actionId = ToolDispatcher.CreateActionId(turnId, callId);
             Approval = new(new(actionId.Value), actionId, approvalOwner, expiry ?? Now.AddMinutes(-1), 7, approvalStatus);
-            Journal = new(CreateEntry(actionId, envelopeOwner, toolName, actionStatus, memoryOwner));
+            Journal = new(CreateEntry(actionId, turnId, envelopeOwner, toolName, actionStatus, memoryOwner));
             Clock = new(Now);
             Approvals = new Approvals(Approval, Journal);
             Workflow = new(
@@ -400,12 +402,12 @@ public sealed class ApprovalWorkflowExpiryTests
             Workflow.ExpireApprovedUnclaimedAsync("owner", Approval.Id, Approval.ExpectedVersion, default).AsTask();
 
         private static ActionJournalEntry CreateEntry(
-            ActionId id, string owner, string tool, string status, string? memoryOwner)
+            ActionId id, TurnId turnId, string owner, string tool, string status, string? memoryOwner)
         {
             var canonical = $$"""
                 {
                   "FormatVersion": 1,
-                  "TurnId": "{{Guid.NewGuid():D}}",
+                  "TurnId": "{{turnId.Value:D}}",
                   "CallId": "call",
                   "OwnerId": "{{owner}}",
                   "ToolName": "{{tool}}",
@@ -551,7 +553,11 @@ public sealed class ApprovalWorkflowExpiryTests
         public ValueTask<IReadOnlyList<ActionJournalEntry>> ReadRecentForOwnerAsync(string ownerId, int maximumActions, CancellationToken cancellationToken) =>
             ValueTask.FromResult<IReadOnlyList<ActionJournalEntry>>(RecentActions.Take(maximumActions).ToArray());
         public ValueTask<IReadOnlyList<ActionJournalEntry>> ReadForTurnAsync(string ownerId, TurnId turnId, CancellationToken cancellationToken) =>
-            throw new NotImplementedException();
+            ValueTask.FromResult<IReadOnlyList<ActionJournalEntry>>(
+                JsonNode.Parse(Entry.CanonicalArguments)?["OwnerId"]?.GetValue<string>() == ownerId
+                    && JsonNode.Parse(Entry.CanonicalArguments)?["TurnId"]?.GetValue<string>() == turnId.Value.ToString("D")
+                    ? [Entry]
+                    : []);
         public ValueTask<ActionJournalEntry> UpdateStatusAsync(ActionId id, string status, long expectedVersion, DateTimeOffset updatedAtUtc,
             CancellationToken cancellationToken, ToolDispatchResult? outcome = null)
         {

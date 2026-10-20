@@ -113,15 +113,16 @@ public sealed class ApprovalWorkflowService
                         approval.Id, ownerId, approval.ExpectedVersion, cancellationToken)
                     : await approvals.SettleRejectedAsync(
                         approval.Id, ownerId, approval.ExpectedVersion, cancellationToken);
-                if (action.Status != "Executing" && !action.MemoryInvalidated)
-                {
-                    dispatcher.ReleaseApproval(action.Id);
-                }
             }
             else if (approval.Status == "Approved" && action.Status == "Executing" && recoveredExecutions < 8)
             {
                 action = await RecoverExecutingActionAsync(ownerId, action, cancellationToken);
                 recoveredExecutions++;
+            }
+
+            if (action.Status is "Succeeded" or "Failed" or "Rejected" or "Expired")
+            {
+                dispatcher.ReleaseApproval(action.Id);
             }
 
             if (action.MemoryInvalidated)
@@ -236,6 +237,20 @@ public sealed class ApprovalWorkflowService
         }
 
         var turnId = new TurnId(Guid.Parse(envelope.TurnId));
+        if (ToolDispatcher.CreateActionId(turnId, envelope.CallId) != action.Id
+            || !string.Equals(envelope.ActionType, action.ActionType, StringComparison.Ordinal))
+        {
+            throw new InvalidDataException("The action envelope identity does not match its journal entry.");
+        }
+
+        var attributedActions = await journal.ReadForTurnAsync(ownerId, turnId, cancellationToken);
+        if (!attributedActions.Any(attributed =>
+                attributed.Id == action.Id
+                && string.Equals(attributed.ActionType, action.ActionType, StringComparison.Ordinal)))
+        {
+            throw new InvalidDataException("The action envelope does not match its durable owner and turn attribution.");
+        }
+
         var releaseTurn = false;
         try
         {

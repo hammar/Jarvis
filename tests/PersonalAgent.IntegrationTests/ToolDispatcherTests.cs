@@ -1238,7 +1238,7 @@ public sealed class ToolDispatcherTests
             )
             INSERT INTO actions
                 (id, action_type, canonical_arguments, request_hash, status, created_at_utc,
-                 updated_at_utc, version, action_owner_id)
+                 updated_at_utc, version, action_owner_id, action_turn_id)
             SELECT lower(substr(hex(randomblob(16)), 1, 8) || '-' ||
                          substr(hex(randomblob(16)), 9, 4) || '-' ||
                          substr(hex(randomblob(16)), 13, 4) || '-' ||
@@ -1246,7 +1246,12 @@ public sealed class ToolDispatcherTests
                          substr(hex(randomblob(16)), 21, 12)),
                    action_type, canonical_arguments,
                    'terminal-seed-' || value, '{newerStatus}', '2026-10-15T00:00:00+00:00',
-                   '2026-10-15T00:00:00+00:00', 1, 'owner'
+                   '2026-10-15T00:00:00+00:00', 1, 'owner',
+                   lower(substr(hex(randomblob(16)), 1, 8) || '-' ||
+                         substr(hex(randomblob(16)), 9, 4) || '-' ||
+                         substr(hex(randomblob(16)), 13, 4) || '-' ||
+                         substr(hex(randomblob(16)), 17, 4) || '-' ||
+                         substr(hex(randomblob(16)), 21, 12))
             FROM numbers
             CROSS JOIN actions
             WHERE actions.id = '{action.Id.Value:D}';
@@ -1665,6 +1670,65 @@ public sealed class ToolDispatcherTests
         Assert.Equal(1, fixture.ExecutionCount);
     }
 
+    [Theory]
+    [InlineData("TurnId")]
+    [InlineData("CallId")]
+    [InlineData("ActionType")]
+    [Trait("Category", "Integration")]
+    public async Task MismatchedValidExecutingActionEnvelopeReportsIssueWithoutResending(string property)
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var completed = await fixture.Dispatcher.DispatchAsync(
+            PorchRequest with { TurnId = TurnId.New(), CallId = $"identity-{property}" }, CancellationToken.None);
+        var action = await fixture.Journal.GetAsync(completed.ActionId!.Value, CancellationToken.None)
+            ?? throw new InvalidOperationException("The action was not journaled.");
+        await fixture.Journal.UpdateStatusAsync(
+            action.Id, "Executing", action.Version, fixture.Clock.UtcNow, CancellationToken.None);
+
+        var envelope = JsonNode.Parse(action.CanonicalArguments)?.AsObject()
+            ?? throw new InvalidOperationException("The action envelope was not valid JSON.");
+        envelope[property] = property switch
+        {
+            "TurnId" => Guid.NewGuid().ToString("D"),
+            "CallId" => "different-valid-call",
+            "ActionType" => "home.set_temperature",
+            _ => throw new InvalidOperationException("Unexpected identity field.")
+        };
+        await fixture.SqlAsync(
+            $"UPDATE actions SET canonical_arguments = '{envelope.ToJsonString()}' WHERE id = '{action.Id.Value:D}';");
+
+        var issues = await fixture.ApprovalWorkflow()
+            .RecoverUnapprovedExecutingActionsAsync("owner", CancellationToken.None);
+        var persisted = await fixture.Journal.GetAsync(action.Id, CancellationToken.None);
+
+        Assert.Contains(issues, issue => issue.ActionId == action.Id && issue.ReasonCode == "invalid_action_journal");
+        Assert.Equal("Executing", persisted!.Status);
+        Assert.Equal(1, fixture.ExecutionCount);
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task DurableOwnerTurnAttributionMismatchFailsRecoveryClosed()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var completed = await fixture.Dispatcher.DispatchAsync(
+            PorchRequest with { TurnId = TurnId.New(), CallId = "durable-attribution-mismatch" }, CancellationToken.None);
+        var action = await fixture.Journal.GetAsync(completed.ActionId!.Value, CancellationToken.None)
+            ?? throw new InvalidOperationException("The action was not journaled.");
+        await fixture.Journal.UpdateStatusAsync(
+            action.Id, "Executing", action.Version, fixture.Clock.UtcNow, CancellationToken.None);
+        await fixture.SqlAsync(
+            $"UPDATE actions SET action_turn_id = '{Guid.NewGuid():D}' WHERE id = '{action.Id.Value:D}';");
+
+        var issues = await fixture.ApprovalWorkflow()
+            .RecoverUnapprovedExecutingActionsAsync("owner", CancellationToken.None);
+        var persisted = await fixture.Journal.GetAsync(action.Id, CancellationToken.None);
+
+        Assert.Contains(issues, issue => issue.ActionId == action.Id && issue.ReasonCode == "invalid_action_journal");
+        Assert.Equal("Executing", persisted!.Status);
+        Assert.Equal(1, fixture.ExecutionCount);
+    }
+
     [Fact]
     [Trait("Category", "Integration")]
     public async Task ConcurrentInterruptedActionRecoveryAcceptsTheFirstTerminalOutcome()
@@ -1900,10 +1964,12 @@ public sealed class ToolDispatcherTests
         await Assert.ThrowsAsync<PersistenceConcurrencyException>(async () =>
             await fixture.Approvals.ResolveAsync(approvalId, "owner", 1, true, CancellationToken.None));
         Assert.Equal(0, fixture.ExecutionCount);
+        fixture.Dispatcher.ReleaseTurn(PorchRequest.TurnId);
         fixture.Clock.Advance(TimeSpan.FromMinutes(5));
         var summary = Assert.Single(await fixture.ApprovalWorkflow().ReadRecentAsync("owner", 10, default));
         Assert.Equal("Pending", summary.Approval.Status);
         Assert.Equal("Rejected", summary.ActionStatus);
+        Assert.Equal(0, FailureBudgetCount(fixture.Dispatcher));
     }
 
     [Fact]
