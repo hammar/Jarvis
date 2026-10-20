@@ -588,6 +588,7 @@ exact-commit review remain pending.
 | M2-04-R48 | Medium | Resuming an approved household or memory action after restart allocated a new turn budget without releasing it after terminal completion; cleanup must still preserve active dispatches and sibling approval holds. | Release the household turn after terminal dispatch and release memory-completion turns in `MemoryProposalService`; existing dispatch-lease and pending-approval holds remain authoritative. Restart-resume tests cover both action types, and sibling-approval regressions verify equivalent-write uncertainty remains protected. |
 | M2-04-R49 | High | Recovery did not verify that a valid envelope's turn/call identity derived the journaled action ID, that its action type matched the journal, or that its owner/turn matched durable attribution. A tampered envelope could dispatch under a fresh action identity and resubmit a physical write. | Fixed in `7eef01a`: recovery checks the derived action ID and action type, then requires the action to appear in the journal's owner/turn-attributed history before memory settlement or dispatcher recovery. `MismatchedValidExecutingActionEnvelopeReportsIssueWithoutResending` covers changed turn, call, and action type; `DurableOwnerTurnAttributionMismatchFailsRecoveryClosed` covers inconsistent stored attribution. Focused tests passed 4/4 integration and 16/16 unit tests; the complete validation passed. |
 | M2-04-R50 | Medium | Reading an expired pending approval whose action was already Rejected left its approval hold in the dispatcher's turn budget. If the turn was released first, `approvalBudgets` and `failureBudgets` retained the budget until restart. | Fixed in `7eef01a`: `ReadRecentAsync` releases approval holds only for definitive terminal outcomes (`Succeeded`, `Failed`, `Rejected`, or `Expired`), preserving uncertainty holds such as `Unknown` and any sibling approvals. `ChangedProposalWhileApprovalIsPendingInvalidatesTheAction` verifies cleanup after turn release; focused regression passed 1/1 and the full integration suite passed 482/482. |
+| M2-04-R51 | Medium | The task brief said CI was pending for `7eef01a` even though the active GitHub Actions run validated the documentation commit `4a51f45`. | Corrected the validation record to identify run `39347994587` and its actual head `4a51f45`; this preserves the historical check state without misattributing it to the prior code commit. |
 
 Before the final run, the R44–R45 focused integration regressions passed 2/2
 and the R44 malformed-envelope unit cases passed 5/5. The refreshed full
@@ -654,10 +655,12 @@ full gate run also passed integration. An earlier browser run failed two
 memory tests at the pre-navigation sign-in boundary; after normalizing those
 tests to the direct sign-in flow, all browser scenarios passed. GitHub CI on
 the previous committed revision `ae650f4` recorded a browser failure.
-Independent code review of `7eef01aadc8d559b2c3ae2a577a825425562ab90`
-reported no additional significant findings; the R50 review thread was
-replied to and resolved. CI for `7eef01a` is currently running and remains
-required before handoff.
+Independent code review of code commit
+`7eef01aadc8d559b2c3ae2a577a825425562ab90` reported no additional code
+findings; the R50 review thread was replied to and resolved. A subsequent
+documentation review found R51: at that time CI run `39347994587` was in
+progress for documentation commit `4a51f454f8a879fc83ca7905f2a4fa42b322a126`,
+not `7eef01a`. The next pushed revision still requires its own passing CI.
 Linux CI, live Home Assistant/provider availability, physical-effect
 causality, human observations, and assistive-technology certification remain
 unexercised.
