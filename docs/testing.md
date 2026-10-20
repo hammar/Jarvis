@@ -19,6 +19,15 @@ committed NuGet lock files.
 
 ## Local chat model comparison
 
+`LocalSimulatedHomeTests` in the required Aspire E2E suite covers the opt-in
+[Local simulated-home configuration](development.md#local-ollama-with-simulated-home-assistant).
+It launches production Local composition against an external controlled model
+endpoint and a separately managed HA simulator, verifies timestamped sensor/tool
+results and exact lamp approval, disables fixture controls, rejects incompatible
+profile/data configuration, and checks shutdown preserves the demo account.
+It does not establish live Ollama quality. Existing credential-free
+Simulator/E2E runs remain deterministic and never opt into a real model.
+
 With native Ollama running and the model already installed, run synthetic-only
 live checks (no household/cloud credentials or real Jarvis data):
 

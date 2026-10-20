@@ -2,8 +2,7 @@
 
 ## Home Assistant configuration
 
-Home tools are registered when an HA endpoint is configured; production chat
-tool selection and approval UI remain M2-04 scope. Simulator/E2E uses the
+Home tools are registered when an HA endpoint is configured. Simulator/E2E uses the
 managed HA endpoint, synthetic credentials and explicit fixture catalog.
 Direct controlled Web hosts without that resource register no home tools.
 Local/Hybrid never substitute fixture entities for a missing live catalog.
@@ -130,6 +129,56 @@ never through a model or request payload.
 | Local | Requires `JARVIS_OLLAMA_BASE_URL` and `JARVIS_OLLAMA_MODEL`; cloud is disabled. Optional HA uses `JARVIS_HOME_ASSISTANT_BASE_URL` and a secret reference. |
 | Hybrid | Requires explicit Ollama endpoint/model and cloud HTTP(S) endpoints plus `JARVIS_CLOUD_SECRET_REFERENCE`. Configuring Hybrid does not bypass packet review or consent. |
 | E2E | Test-only; requires unique `JARVIS_E2E_DATA_DIR`, launches controlled model/Home Assistant fixtures, and configures Web to use the discovered model fixture instead of external inference. Its model fixture exposes a one-shot delayed-stream control only to E2E tests for deterministic cancellation checks; model input cannot enable it. An optional `JARVIS_E2E_BOOTSTRAP_TOKEN` is test-only and rejected in all other profiles. |
+
+### Local Ollama with simulated Home Assistant
+
+For an opt-in real-model M2 demo without an installed Home Assistant, use the
+Local AppHost profile with a managed simulated home:
+
+```sh
+JARVIS_PROFILE=Local \
+JARVIS_LOCAL_SIMULATED_HOME=true \
+JARVIS_OLLAMA_BASE_URL=http://127.0.0.1:11434 \
+JARVIS_OLLAMA_MODEL=jarvis-demo-llama3.2:latest \
+dotnet run --project src/PersonalAgent.AppHost
+```
+
+First start native Ollama and select an installed tool-capable model. The example
+alias can be created from an already-installed `llama3.2:latest` without
+downloading weights or changing the original model:
+
+```sh
+curl --fail http://127.0.0.1:11434/api/create \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"jarvis-demo-llama3.2:latest","from":"llama3.2:latest","parameters":{"num_ctx":10240},"stream":false}'
+```
+
+Other models may be selected explicitly; allocate at least 10,240 context tokens
+as described below. Model availability/tool quality is not guaranteed. This
+mode performs actual local inference, not the scripted Simulator commands.
+Try asking for the temperature or to turn on the simulator lamp.
+
+AppHost discovers and owns only its simulated HA process. The catalog contains
+`sensor.temperature` and `light.simulator_lamp`; lamp writes always require
+exact approval, thermostat is disabled, and fixture-control routes are absent.
+Configured live HA endpoint/reference/catalog/write-enable settings are not
+forwarded in this mode. Cloud remains disabled. Do not enter household secrets.
+The Web UI still labels the profile Local; these explicitly named entities are
+simulated, not evidence of physical effects.
+
+The account, keys, conversations, approvals and memory persist separately at
+`PersonalAgent/ollama-simulated-home-demo` under the OS local-application-data
+directory (`~/Library/Application Support/PersonalAgent/ollama-simulated-home-demo`
+on macOS), matching the initial ad hoc demo. It does not reset the passphrase.
+Unset `JARVIS_DATA_DIR` before launching: it is rejected to avoid accidental
+reuse of live data. `JARVIS_LOCAL_DEMO_DATA_DIR` can explicitly select a different
+demo-only directory; do not point it at a live or Simulator database. Concurrent
+demos need distinct demo directories and dashboard ports.
+
+Stop AppHost with Ctrl+C: its Web and simulated HA stop, demo data persists,
+and external Ollama is left running. The flag is AppHost-only and rejected with
+Simulator, Hybrid or E2E; direct Web deployment remains unchanged. Unset the
+flag to return to ordinary Local with explicitly configured live HA.
 
 Endpoint settings must be absolute HTTP(S) URIs without embedded user info or
 query data. Supply tokens through a named protected secret reference, not an

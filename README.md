@@ -74,6 +74,11 @@ remain disabled by default. See the
 and [memory decision](docs/adr/0006-confirmed-memory.md) for provenance,
 invalidated replay and backup/deletion limitations.
 
+For real native Ollama conversation with simulated devices and separate demo
+data, use the opt-in
+[Local simulated-home demo](docs/development.md#local-ollama-with-simulated-home-assistant).
+It requires no live Home Assistant and keeps lamp writes approval-gated.
+
 ## Validation
 
 Use `tools/validate.sh` on macOS/Linux. It relies on the pinned .NET SDK and
